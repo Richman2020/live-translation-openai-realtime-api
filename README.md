@@ -1,4 +1,16 @@
 #  Live Voice Translation with Twilio & OpenAI Realtime
+
+## 本仓库的项目交接入口
+
+本仓库是 ChatGPT 与电脑端 Codex 共同维护项目的交接来源。开始工作前请阅读：
+
+- [AGENTS.md](AGENTS.md)：共享协作、提交与推送规则，以及运行边界。
+- [PROJECT_BRIEF.md](PROJECT_BRIEF.md)：用户目标、当前范围与后续功能。
+- [PROGRESS.md](PROGRESS.md)：已完成工作、验证结果、尚未验证的内容与下一步。
+- [LOCAL_SETUP.md](LOCAL_SETUP.md)：本机安装、私密配置和真实通话测试步骤。
+
+当前代码基于 Twilio Flex 通话翻译示例；独立桌面界面、主动拨号和 WhatsApp 接入的实际状态请以进度记录和代码为准。下面保留上游项目说明。
+
 This application demonstrates how to use Twilio and OpenAI's Realtime API for bidirectional
 voice language translation between a caller and a contact center agent.
 
