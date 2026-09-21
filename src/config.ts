@@ -24,6 +24,7 @@ const ConfigSchema = Type.Strict(
     TWILIO_FLEX_NUMBER: Type.String(),
     TWILIO_FLEX_WORKFLOW_SID: Type.String(),
     OPENAI_API_KEY: Type.String(),
+    OPENAI_REALTIME_MODEL: Type.String({ default: 'gpt-realtime-1.5' }),
     FORWARD_AUDIO_BEFORE_TRANSLATION: Type.String({ default: 'false' }),
   }),
 );
