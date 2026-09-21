@@ -2,7 +2,7 @@ import { FastifyBaseLogger, FastifyPluginAsync } from 'fastify';
 import VoiceResponse from 'twilio/lib/twiml/VoiceResponse';
 
 const outboundCall: FastifyPluginAsync = async (server) => {
-  server.post(
+  server.post<{ Body: { Caller: string } }>(
     '/outbound-call',
     {
       logLevel: 'info',

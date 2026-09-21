@@ -4,7 +4,7 @@ import { Type } from '@fastify/type-provider-typebox';
 import AudioInterceptor from '@/services/AudioInterceptor';
 
 const flexReservationAccepted: FastifyPluginAsync = async (server) => {
-  server.post(
+  server.post<{ Body: { TaskAttributes: string } }>(
     '/reservation-accepted',
     {
       logLevel: 'info',

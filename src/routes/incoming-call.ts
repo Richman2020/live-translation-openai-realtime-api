@@ -3,7 +3,10 @@ import { FastifyBaseLogger, FastifyPluginAsync } from 'fastify';
 import VoiceResponse from 'twilio/lib/twiml/VoiceResponse';
 
 const incomingCall: FastifyPluginAsync = async (server) => {
-  server.post(
+  server.post<{
+    Body: { From: string; To: string; CallSid: string };
+    Querystring: { lang: string };
+  }>(
     '/incoming-call',
     {
       logLevel: 'info',
