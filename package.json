@@ -6,7 +6,12 @@
   "author": "ETI Team",
   "type": "module",
   "scripts": {
-    "prebuild": "rm -rf dist",
+    "test": "node --import tsx --test tests/*.test.ts",
+    "predev": "npm run check:config",
+    "prestart": "npm run check:config",
+    "prebuild": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "setup:local": "node scripts/setup-local.mjs",
+    "check:config": "node scripts/check-config.mjs",
     "build": "tsc -p tsconfig.build.json && tsc-alias",
     "dev": "nodemon -e ts,json --exec tsx src | pino-pretty",
     "lint": "eslint src/ --ext .ts",
@@ -64,6 +69,6 @@
     "vite-tsconfig-paths": "^5.0.1"
   },
   "engines": {
-    "node": "^20.10.0"
+    "node": ">=20.10.0"
   }
 }

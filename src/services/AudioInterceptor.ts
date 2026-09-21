@@ -4,11 +4,18 @@ import WebSocket from 'ws';
 import StreamSocket, { MediaBaseAudioMessage } from '@/services/StreamSocket';
 import { Config } from '@/config';
 import { AI_PROMPT_AGENT, AI_PROMPT_CALLER } from '@/prompts';
+import buildRealtimeSessionUpdate from './realtime';
+
+type WebSocketFactory = (
+  url: string,
+  options: { headers: { Authorization: string } },
+) => WebSocket;
 
 type AudioInterceptorOptions = {
   logger: FastifyBaseLogger;
   config: Config;
   callerLanguage: string;
+  createWebSocket?: WebSocketFactory;
 };
 
 type BufferedMessage = {
@@ -23,12 +30,14 @@ type OpenAIMessage = {
   vad_speech_stopped_time: number;
   type: string;
   delta: string;
+  error?: { code?: string; type?: string; message?: string };
+  response?: { status: string; status_details?: unknown };
 };
 
 export default class AudioInterceptor {
-  private static instance: AudioInterceptor;
-
   private readonly logger: FastifyBaseLogger;
+
+  private readonly createWebSocket: WebSocketFactory;
 
   private config: Config;
 
@@ -44,14 +53,21 @@ export default class AudioInterceptor {
 
   #agentFirstAudioTime?: number;
 
-  #callerMessages?: BufferedMessage[];
+  #callerMessages: BufferedMessage[] = [];
 
-  #agentMessages?: BufferedMessage[];
+  #agentMessages: BufferedMessage[] = [];
+
+  #readySessions = new Set<WebSocket>();
+
+  #pendingAudio = new Map<WebSocket, { chunks: string[]; bytes: number }>();
 
   public constructor(options: AudioInterceptorOptions) {
     this.logger = options.logger;
     this.config = options.config;
     this.callerLanguage = options.callerLanguage;
+    this.createWebSocket =
+      options.createWebSocket ||
+      ((url, settings) => new WebSocket(url, settings));
     this.setupOpenAISockets();
   }
 
@@ -59,6 +75,8 @@ export default class AudioInterceptor {
    * Closes the audio interceptor
    */
   public close() {
+    this.#readySessions.clear();
+    this.#pendingAudio.clear();
     if (this.#callerSocket) {
       this.#callerSocket.close();
       this.#callerSocket = null;
@@ -96,12 +114,8 @@ export default class AudioInterceptor {
     this.logger.info('Initiating the websocket to OpenAI Realtime S2S API');
     // Start Audio Interception
     this.logger.info('Both sockets are set. Starting interception');
-    this.#callerSocket.onMedia(
-      this.translateAndForwardCallerAudio.bind(this),
-    );
-    this.#agentSocket.onMedia(
-      this.translateAndForwardAgentAudio.bind(this),
-    );
+    this.#callerSocket.onMedia(this.translateAndForwardCallerAudio.bind(this));
+    this.#agentSocket.onMedia(this.translateAndForwardAgentAudio.bind(this));
   }
 
   private translateAndForwardAgentAudio(message: MediaBaseAudioMessage) {
@@ -111,7 +125,7 @@ export default class AudioInterceptor {
     // Wait for 1 second after the first time we hear audio from the agent
     // This ensures that we don't send beeps from Flex to OpenAI when the call
     // first connects
-    const now = new Date().getTime();
+    const now = Date.now();
     if (!this.#agentFirstAudioTime) {
       this.#agentFirstAudioTime = now;
     } else if (now - this.#agentFirstAudioTime >= 1000) {
@@ -146,17 +160,15 @@ export default class AudioInterceptor {
    * @private
    */
   private setupOpenAISockets() {
-    const url = 'wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01';
-    const callerSocket = new WebSocket(url, {
+    const url = `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(this.config.OPENAI_REALTIME_MODEL)}`;
+    const callerSocket = this.createWebSocket(url, {
       headers: {
         Authorization: `Bearer ${this.config.OPENAI_API_KEY}`,
-        'OpenAI-Beta': 'realtime=v1'
       },
     });
-    const agentSocket = new WebSocket(url, {
+    const agentSocket = this.createWebSocket(url, {
       headers: {
         Authorization: `Bearer ${this.config.OPENAI_API_KEY}`,
-        'OpenAI-Beta': 'realtime=v1'
       },
     });
     const callerPrompt = AI_PROMPT_CALLER.replace(
@@ -173,32 +185,8 @@ export default class AudioInterceptor {
     this.#agentOpenAISocket = agentSocket;
 
     // Configure the Realtime AI Agents with new 'session.update' client event
-    const callerConfigMsg = {
-      type: 'session.update',
-      session: {
-        modalities: ['text', 'audio'],
-        instructions: callerPrompt,
-        input_audio_format: 'g711_ulaw',
-        output_audio_format: 'g711_ulaw',
-        input_audio_transcription: {model: 'whisper-1'},
-        turn_detection: {type: 'server_vad'},
-        //Setting temperature to minimum allowed value to get deterministic translation results
-        temperature: 0.6
-      }
-    }
-    const agentConfigMsg = {
-      type: 'session.update',
-      session: {
-        modalities: ['text', 'audio'],
-        instructions: agentPrompt,
-        input_audio_format: 'g711_ulaw',
-        output_audio_format: 'g711_ulaw',
-        input_audio_transcription: {model: 'whisper-1'},
-        turn_detection: {type: 'server_vad'},
-        //Setting temperature to minimum allowed value to get deterministic translation results
-        temperature: 0.6
-      }
-    }
+    const callerConfigMsg = buildRealtimeSessionUpdate(callerPrompt);
+    const agentConfigMsg = buildRealtimeSessionUpdate(agentPrompt);
 
     // Event listeners for when the connection is opened
     callerSocket.on('open', () => {
@@ -207,7 +195,7 @@ export default class AudioInterceptor {
       this.sendMessageToOpenAI(callerSocket, callerConfigMsg);
       this.logger.info(
         callerConfigMsg,
-        'Caller session has been configured with the following settings:',
+        'Caller session configuration sent; awaiting session.updated:',
       );
     });
     agentSocket.on('open', () => {
@@ -216,64 +204,16 @@ export default class AudioInterceptor {
       this.sendMessageToOpenAI(agentSocket, agentConfigMsg);
       this.logger.info(
         agentConfigMsg,
-        'Agent session has been configured with the following settings:',
+        'Agent session configuration sent; awaiting session.updated:',
       );
     });
 
     // Event listeners for when a message is received from the server
     callerSocket.on('message', (msg) => {
-      this.logger.info(`Caller message from OpenAI: ${msg}`);
-      const currentTime = new Date().getTime();
-      const message = JSON.parse(msg) as OpenAIMessage;
-      if (message.type === 'input_audio_buffer.speech_stopped') {
-        if (!this.#callerMessages) {
-          this.#callerMessages = [];
-        }
-        this.#callerMessages.push({
-          message_id: message.event_id,
-          vad_speech_stopped_time: currentTime,
-        });
-      }
-      if (message.type === 'response.audio.delta') {
-        // Handle an audio message from OpenAI, post translation
-        this.logger.info('Received caller translation from OpenAI');
-        if (
-          !this.#callerMessages[this.#callerMessages.length - 1]
-            .first_audio_buffer_add_time
-        ) {
-          this.#callerMessages[
-            this.#callerMessages.length - 1
-          ].first_audio_buffer_add_time = currentTime;
-        }
-        this.#agentSocket.send([message.delta]);
-      }
+      this.handleOpenAIMessage(callerSocket, msg.toString(), 'caller');
     });
     agentSocket.on('message', (msg) => {
-      this.logger.info(`Agent message from OpenAI: ${msg.toString()}`);
-      const currentTime = new Date().getTime();
-      const message = JSON.parse(msg) as OpenAIMessage;;
-      if (message.type === 'input_audio_buffer.speech_stopped') {
-        if (!this.#agentMessages) {
-          this.#agentMessages = [];
-        }
-        this.#agentMessages.push({
-          message_id: message.event_id,
-          vad_speech_stopped_time: currentTime,
-        });
-      }
-      if (message.type === 'response.audio.delta') {
-        // Handle an audio message from OpenAI, post translation
-        this.logger.info('Received agent translation from OpenAI');
-        if (
-          !this.#agentMessages[this.#agentMessages.length - 1]
-            .first_audio_buffer_add_time
-        ) {
-          this.#agentMessages[
-            this.#agentMessages.length - 1
-          ].first_audio_buffer_add_time = currentTime;
-        }
-        this.#callerSocket.send([message.delta]);
-      }
+      this.handleOpenAIMessage(agentSocket, msg.toString(), 'agent');
     });
 
     // Event listeners for when an error occurs
@@ -286,12 +226,79 @@ export default class AudioInterceptor {
 
     // Event listeners for when the connection is closed
     callerSocket.on('close', () => {
+      this.#readySessions.delete(callerSocket);
+      this.#pendingAudio.delete(callerSocket);
       this.logger.info('Caller webSocket connection to OpenAI is closed now.');
     });
 
     agentSocket.on('close', () => {
+      this.#readySessions.delete(agentSocket);
+      this.#pendingAudio.delete(agentSocket);
       this.logger.info('Agent webSocket connection to OpenAI is closed now.');
     });
+  }
+
+  private handleOpenAIMessage(
+    socket: WebSocket,
+    raw: string,
+    source: 'caller' | 'agent',
+  ) {
+    let message: OpenAIMessage;
+    try {
+      message = JSON.parse(raw) as OpenAIMessage;
+    } catch {
+      this.logger.error({ source }, 'Invalid JSON received from OpenAI');
+      return;
+    }
+    if (!message || typeof message.type !== 'string') {
+      this.logger.error({ source }, 'Invalid event received from OpenAI');
+      return;
+    }
+    if (message.type === 'session.updated') {
+      this.#readySessions.add(socket);
+      const pending = this.#pendingAudio.get(socket);
+      this.#pendingAudio.delete(socket);
+      pending?.chunks.forEach((audio) =>
+        this.forwardAudioToOpenAIForTranslation(socket, audio),
+      );
+      this.logger.info({ source }, 'OpenAI Realtime session ready');
+      return;
+    }
+    if (message.type === 'error') {
+      this.logger.error(
+        { source, error: message.error },
+        'OpenAI Realtime error',
+      );
+      return;
+    }
+    if (
+      message.type === 'response.done' &&
+      message.response?.status === 'failed'
+    ) {
+      this.logger.error(
+        { source, details: message.response.status_details },
+        'OpenAI translation response failed',
+      );
+      return;
+    }
+    const messages =
+      source === 'caller' ? this.#callerMessages : this.#agentMessages;
+    const now = Date.now();
+    if (message.type === 'input_audio_buffer.speech_stopped') {
+      messages.push({
+        message_id: message.event_id,
+        vad_speech_stopped_time: now,
+      });
+    }
+    if (message.type === 'response.output_audio.delta' && message.delta) {
+      const latest = messages[messages.length - 1];
+      if (latest && !latest.first_audio_buffer_add_time) {
+        latest.first_audio_buffer_add_time = now;
+      }
+      const recipient =
+        source === 'caller' ? this.#agentSocket : this.#callerSocket;
+      recipient?.send([message.delta]);
+    }
   }
 
   private reportOnSocketTimeToFirstAudioBufferAdd(messages: BufferedMessage[]) {
@@ -304,10 +311,30 @@ export default class AudioInterceptor {
       0,
     );
 
-    return totalTime / filtered.length;
+    return filtered.length ? totalTime / filtered.length : null;
   }
 
-  private forwardAudioToOpenAIForTranslation(socket: WebSocket, audio: String) {
+  private forwardAudioToOpenAIForTranslation(socket: WebSocket, audio: string) {
+    if (
+      socket.readyState !== WebSocket.OPEN &&
+      socket.readyState !== WebSocket.CONNECTING
+    ) {
+      return;
+    }
+    if (!this.#readySessions.has(socket)) {
+      const pending = this.#pendingAudio.get(socket) || {
+        chunks: [],
+        bytes: 0,
+      };
+      pending.chunks.push(audio);
+      pending.bytes += Buffer.from(audio, 'base64').length;
+      // At most two seconds of 8 kHz mu-law while session configuration completes.
+      while (pending.bytes > 16000 && pending.chunks.length) {
+        pending.bytes -= Buffer.from(pending.chunks.shift(), 'base64').length;
+      }
+      this.#pendingAudio.set(socket, pending);
+      return;
+    }
     this.sendMessageToOpenAI(socket, {
       type: 'input_audio_buffer.append',
       audio: audio,

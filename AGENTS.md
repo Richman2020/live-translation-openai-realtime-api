@@ -1,3 +1,30 @@
+# 本项目的共享协作规则（用户明确要求）
+
+共享仓库：<https://github.com/Richman2020/live-translation-openai-realtime-api>
+
+本项目以这个 GitHub 仓库作为 ChatGPT、电脑端 Codex 和后续会话共同读取的交接来源。聊天说明或某个环境里的本地修改，不能代替仓库中的代码与记录。
+
+## 每次开始
+
+1. 检查当前仓库、分支、工作区未提交修改及远端最新提交；获取远端更新，在不覆盖现有修改的前提下同步当前任务需要的分支。不要直接重置或覆盖电脑端 Codex 等其他参与者的工作。
+2. 阅读远端最新适用版本的 `AGENTS.md`、[PROGRESS.md](PROGRESS.md) 和 [PROJECT_BRIEF.md](PROJECT_BRIEF.md)，再阅读相关代码；安装操作参考 [LOCAL_SETUP.md](LOCAL_SETUP.md)。若当前分支与远端不同，先查明差异再继续。
+3. 以实际代码、测试结果和这些交接文件为依据。不能把其他会话的推测、未推送修改或用户报告的快捷方式，自动当成当前环境已验证的功能。
+
+## 每次修改与结束
+
+- 将与本项目有关的新需求、决定、代码和文档落入本仓库。需求变化更新 `PROJECT_BRIEF.md`，完成情况和下一步更新 `PROGRESS.md`；不要只留在聊天中。
+- `PROGRESS.md` 应写明工作日期、修改内容、验证环境与结果、尚未验证的部分、阻塞和下一步。区分已编译、离线测试、API 连通、真实双向电话与延迟实测。
+- 用户已要求将本项目更新提交并推送到本仓库。完成必要验证后提交代码和进度记录；推送前再次检查远端并保留并发改动。发生冲突时安全整合，不强制推送、不丢弃他人提交。
+- 根据已有分支/保护规则推送到适当分支；若通过开发分支或 PR 交接，明确记录分支与链接，不能把它说成已合入 `main`。
+- 成功后核对远端提交，并向用户报告仓库、分支、commit 和主要结果。若权限、网络或其他原因导致推送失败，说明真实状态和阻塞；本地提交或补丁不能称为“已经同步到 GitHub”。
+- 密钥、密码、访问令牌、真实私密配置和个人账号资料不得提交。`.env` 留在运行环境；共享变量名、模板和配置完成状态即可，日志也不得泄露秘密。
+
+这些规则适用于读取本仓库的 ChatGPT/Codex 会话。用户也希望其他项目采用同样的仓库协作方式；开展其他项目时，应把规则写入那个项目自己的仓库。这里的文件不会自动控制没有读取本仓库的其他会话，也不能使云端助手直接访问用户电脑。
+
+以下保留上游项目的结构与运行要求。
+
+---
+
 # Live Voice Translation with Twilio & OpenAI Realtime
 
 A middleware service that uses Twilio Voice, Studio, Flex, and TaskRouter together with the OpenAI Realtime API to provide bidirectional live voice translation between a caller and a contact center agent.

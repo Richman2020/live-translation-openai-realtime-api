@@ -1,5 +1,5 @@
 import { FastifyBaseLogger } from 'fastify';
-import { WebSocket } from '@fastify/websocket';
+import WebSocket from 'ws';
 
 type BaseAudioMessage = {
   sequenceNumber: number;
@@ -135,6 +135,10 @@ export default class StreamSocket {
    * @param isLast
    */
   public send = (messages: string[], isLast = false) => {
+    if (this.socket.readyState !== WebSocket.OPEN || !this.streamSid) {
+      this.logger.warn('Twilio stream is not ready; skipping outgoing audio');
+      return;
+    }
     const buffers = messages.map((msg) => Buffer.from(msg, 'base64'));
     const payload = Buffer.concat(buffers).toString('base64');
 
