@@ -21,7 +21,17 @@
 
 这些规则适用于读取本仓库的 ChatGPT/Codex 会话。用户也希望其他项目采用同样的仓库协作方式；开展其他项目时，应把规则写入那个项目自己的仓库。这里的文件不会自动控制没有读取本仓库的其他会话，也不能使云端助手直接访问用户电脑。
 
-以下保留上游项目的结构与运行要求。
+## 本机 solo 模式的运行边界（2026-09-22）
+
+当前新增实现是 `src/solo/` 与 `public/` 的单人桌面通话模式，运行命令为 `npm run start:solo`；保留原版 Flex 实现，两个模式的配置与启动要求分别判断。
+
+- solo 模式允许在供应商配置未齐时启动本机服务及设置界面，以便安全填写配置。`npm run check:solo` 只检查本机格式；缺失或无效配置必须拦截通话，不能填入占位值冒充就绪。
+- 仅本机界面/API 可以操作通话，须带本机访问凭据。公开隧道用于签名校验的语音回调与媒体流；公开 `/api/health` 只返回应用标识，不提供配置、密钥或通话能力。
+- 按 [LOCAL_SETUP.md](LOCAL_SETUP.md) 先启动本机服务、填写私密设置、建立公网隧道，再运行 `configure:twilio -- --prepare`、验证 API；验证成功后才运行 `--apply` 改绑号码。用户已授权复用旧号码并替换旧语音回调，无需重复索取该项授权。不得把这一授权扩展成删除旧系统资源。
+- 停止服务使用 `scripts/Stop-AIPhone.ps1`：先请求服务清理电话线路，收到 `ok: true` 和 `safeToStop: true` 后才回收本启动器的进程。清理未确认时保留服务并重试挂断，不能盲目强杀后宣称线路已结束。
+- API 验证、离线测试、界面验证和真实双向电话是不同证据。未取得实际结果前，不宣称供应商已接入或通话/延迟验收通过。
+
+以下保留上游 Flex 项目的结构与运行要求；其中 Studio、Flex、TaskRouter 及“配置完成后才启动”的规则仅适用于原版 Flex 模式，不适用于先启动 solo 设置页的流程。
 
 ---
 
@@ -76,7 +86,7 @@ cp .env.sample .env
 - `src/prompts.ts` — OpenAI Realtime prompts for caller and agent translation; edit here to change languages or behavior
 - `inbound_language_studio_flow.json` — Studio Flow definition to import into Twilio Console
 
-## Agent Boundaries
+## Agent Boundaries (upstream Flex mode only)
 
 **Always:**
 - Confirm `.env` is fully populated and ngrok is running before starting the server

@@ -9,7 +9,31 @@
 - [PROGRESS.md](PROGRESS.md)：已完成工作、验证结果、尚未验证的内容与下一步。
 - [LOCAL_SETUP.md](LOCAL_SETUP.md)：本机安装、私密配置和真实通话测试步骤。
 
-当前代码基于 Twilio Flex 通话翻译示例；独立桌面界面、主动拨号和 WhatsApp 接入的实际状态请以进度记录和代码为准。下面保留上游项目说明。
+## 本机单人通话版（solo）
+
+仓库现已新增独立的中文通话工作台，使用电脑浏览器、Twilio Voice JavaScript SDK、Twilio 电话线路和 OpenAI Realtime。默认方向为：**我说普通话，对方听英语；对方说英语，我听中文**。本模式不需要开通 Flex，也不需要 Studio 或 TaskRouter；原版 Flex 代码保留在仓库中。
+
+已实现桌面入口、主动拨号、来电接听/拒接、挂断、静音、实际字幕事件、可选本机历史记录、私密配置及手动 API 验证。默认模型为 `gpt-realtime-1.5`，实际账户可用性与翻译效果须联网实测。实现依据是 `src/solo/`、`public/` 与 `scripts/`；界面不会生成假对话或把“配置已填写”当作“通话已接通”。
+
+当前验证包括 Windows 本机编译、离线测试、隔离浏览器界面检查和服务启停。**尚无真实 OpenAI/Twilio API 连通、真实电话或端到端延迟结果**。当前本机供应商凭据尚未配置；最终测试数、具体证据和阻塞见 [PROGRESS.md](PROGRESS.md)。
+
+在仓库目录安装并创建桌面入口：
+
+```powershell
+npm ci
+npm run setup:local
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Install-DesktopShortcut.ps1
+```
+
+点击桌面「AI 电话」打开；首次供应商配置缺失时会进入设置页。也可运行 `scripts/Start-AIPhone.ps1`；停止用 `scripts/Stop-AIPhone.ps1`，关闭浏览器窗口不等于停止本机服务。已有的「AI 电话（预览）」快捷方式保留为旧预览。
+
+接通顺序是：**启动本机服务 → 在设置页保存私密凭据 → 启动 Cloudflare 临时隧道 → `npm run configure:twilio -- --prepare` → 验证 API 连接 → `npm run configure:twilio -- --apply` → 真实双向电话验收**。`--prepare` 准备 API Key/TwiML App，`--apply` 在再次验证成功后才改绑用户已授权复用的号码。完整命令和每步影响见 [LOCAL_SETUP.md](LOCAL_SETUP.md)。
+
+Twilio/OpenAI 仍需联网。本机界面/API 不对公网开放；隧道提供语音回调和媒体流入口。临时域名变化后必须重新配置。点击「开启通话」注册接听设备，拨号/接听时需要麦克风权限，建议戴耳机。WhatsApp、其他翻译供应商与云端部署尚未实现。
+
+## 上游 Flex 示例（独立保留）
+
+以下英文说明仅适用于原版 Flex/Studio/TaskRouter 模式，使用 `npm run dev` 或 `npm start` 和 `npm run check:config`。其两号码、Flex 和 ngrok 配置不要套到上面的 solo 模式。
 
 This application demonstrates how to use Twilio and OpenAI's Realtime API for bidirectional
 voice language translation between a caller and a contact center agent.

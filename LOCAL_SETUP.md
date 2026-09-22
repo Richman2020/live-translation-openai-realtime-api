@@ -1,85 +1,146 @@
-# 在电脑上的 Codex 中安装运行
+# 本机 AI 电话：安装、配置与验收
 
-仓库：<https://github.com/Richman2020/live-translation-openai-realtime-api>
+仓库：<https://github.com/Richman2020/live-translation-openai-realtime-api>。先读 [AGENTS.md](AGENTS.md)、[PROJECT_BRIEF.md](PROJECT_BRIEF.md) 和 [PROGRESS.md](PROGRESS.md)，保留已有本地修改与私密配置。
 
-开始前先阅读 [AGENTS.md](AGENTS.md)、[PROJECT_BRIEF.md](PROJECT_BRIEF.md) 和 [PROGRESS.md](PROGRESS.md)。当前交接分支、同步情况和各环境的验证结果以 `PROGRESS.md` 及远端实际提交为准；不要仅凭旧聊天中的安装说明判断进度。
+当前桌面入口使用 **solo 单人模式**：浏览器电话、Twilio Voice/Media Streams、OpenAI Realtime；默认我说普通话、对方说英语。无需开通 Flex、Studio 或 TaskRouter。原版 Flex 仍保留，运行步骤在本文最后独立说明。
 
-这是 Twilio 通话翻译的后端中间服务，操作通话需要 Twilio Flex。它目前不是独立桌面拨号软件。代码放入 GitHub、安装依赖或编译成功，都不代表真实电话链路已接通。
+代码与界面已实现不等于 API 或真实电话已接通。2026-09-22 已完成桌面启动/停止/重启、真实 Cloudflare 隧道及访问边界验证，仍缺少 7 项供应商配置；真实 API、通话和延迟均待验证。OpenAI 本机保存确认返回 `not_approved`，未创建或写入密钥；Twilio 浏览器登录/连接受阻，未取得运行凭据。当前为尚未合入 `main` 的草稿开发分支，提交与同步状态以 Git 核验为准。
 
-## 1. 安装依赖与创建本地配置
+本轮 `npm run build`、54 项离线测试、solo ESLint、独立 scripts TypeScript 检查及锁文件 `npm ci --dry-run` 均通过；Windows 私密配置实际 fixture 验证了先为临时空文件设置私有 ACL、再写入测试秘密。完整证据见 [PROGRESS.md](PROGRESS.md)。
 
-安装 Git 和 Node.js；项目最低版本为 Node 20.10.0，建议本次安装使用 Node 24 LTS。
+## 1. 安装并打开本机工作台
 
-在电脑上用 Codex 打开项目文件夹。第一次下载时执行：
+项目要求 Node.js 20.10.0 及以上；本轮本机验证使用 Node.js 24.15.0、npm 11.12.1。在仓库目录执行：
 
-```sh
-git clone https://github.com/Richman2020/live-translation-openai-realtime-api.git
-cd live-translation-openai-realtime-api
-```
-
-确认当前分支已经包含本指南所对应的安装脚本；若交接记录指定了开发分支，先检出该分支，再执行：
-
-```sh
+```powershell
 npm ci
 npm run setup:local
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Install-DesktopShortcut.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Start-AIPhone.ps1
 ```
 
-如果已经下载了项目，先由 Codex 检查并保留本地修改，再获取和整合远端更新；不要覆盖本机已有的桌面程序或快捷方式相关代码，也不要重复应用已经合入的旧补丁。`setup:local` 仅在 `.env` 不存在时复制模板，保留已有配置。命令适用于 Windows、macOS 和 Linux。
+`setup:local` 仅在 `.env` 不存在时从模板创建，不覆盖已有文件。安装脚本创建桌面 **AI电话.lnk**，显示为「AI电话」；旧的「AI电话（预览）」保持原样。以后双击新入口即可打开。
 
-## 2. 填写私密配置
+本轮已在 `D:\桌面文件\AI电话.lnk` 创建新入口，并通过它实际启动当前 5050 服务；Windows PowerShell 5.1 的启动、停止/端口释放与重启均已验证。隔离 UI 测试页面及测试服务已关闭，当前桌面入口对应实际仓库服务。
 
-在本机编辑器中打开 `.env`，填入自己的 OpenAI API 密钥、Twilio Account SID/Auth Token、两个不同的 Twilio 电话号码、Flex Workflow SID，以及 ngrok 域名。
+启动器在后台运行 `npm run start:solo`，默认监听 `127.0.0.1:5050`；供应商配置缺失时也可打开设置页，但通话被拦截。它生成本机访问令牌，并用启动链接交给页面；页面将其保存到当前标签页会话后立即清除地址栏片段。不要共享启动链接或令牌。启动器会核对已运行服务的身份，不占用其他程序的端口。
 
-密钥应只保存在本机 `.env` 或运行环境的私密变量中，不要发到聊天、写进源代码或提交到 GitHub。创建 OpenAI 密钥不会自动将它配置到本机 Codex。
+`-NoOpen` 可仅启动后台服务。`npm run start:solo` 可用于开发终端启动，但桌面启动器负责安全打开带本机凭据的界面。关闭浏览器窗口不会停止后台服务。
 
-保留 `NODE_ENV=development`、`API_PORT=5050`，测试时保留 `FORWARD_AUDIO_BEFORE_TRANSLATION=false`。
+停止桌面启动器创建的服务：
 
-`OPENAI_REALTIME_MODEL` 默认使用 `gpt-realtime-1.5`。此版本已将旧 Beta 会话配置和音频事件迁移至 GA 格式，并等待 OpenAI 确认会话配置后再传入音频。两条音频流仍使用 Twilio 的 G.711 μ-law 编码。模型是否可用、实际翻译效果和费用需要用自己的账户验证。
-
-安装并登录 ngrok，在另一个终端运行：
-
-```sh
-ngrok http 5050
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Stop-AIPhone.ps1
 ```
 
-将 ngrok 显示的公网地址的**主机名**填入 `NGROK_DOMAIN`，不要带 `https://`、路径或末尾斜杠。例如公网地址是 `https://abc123.ngrok.app`，配置中填写 `abc123.ngrok.app`。
+停止脚本先确认服务和进程归属，再请求清理电话线路；只有服务返回 `ok: true`、`safeToStop: true` 才回收本启动器的后台进程。若提示线路关闭待确认，应在工作台点击「重试挂断」，保持服务运行直到清理得到确认。运行日志与进程记录位于忽略提交的 `.runtime/`。
 
-## 3. 完成 Twilio 配置，再启动
+## 2. 在设置页填写私密配置
 
-按顺序完成原版 [README 的 Twilio setup](README.md#twilio-setup)：
+先保存已有的 Twilio Account SID、Auth Token、当前账户拥有的美国语音号码和 OpenAI API Key。设置仅写入本机 `.env`，密钥输入不预填、不回显；留空表示保留已有值。不要把密钥发送到聊天、源代码、日志或 GitHub。
 
-1. 导入 `inbound_language_studio_flow.json`，将其中的 ngrok 地址改成自己的地址并发布。
-2. 将 `TWILIO_CALLER_NUMBER` 对应号码的来电处理设为刚发布的 Studio Flow。
-3. 将 `TWILIO_FLEX_NUMBER` 的来电 Webhook 设为 `https://自己的域名/outbound-call`（POST），将 TaskRouter Workspace 的 Event callback URL 设为 `https://自己的域名/reservation-accepted`，订阅 Reservation Accepted 事件。
+| 配置 | 用途 |
+| --- | --- |
+| `TWILIO_ACCOUNT_SID`、`TWILIO_AUTH_TOKEN` | 账户读取、资源准备与 Twilio 回调签名验证 |
+| `TWILIO_CALLER_NUMBER` | 已有的 `+1` 语音号码；不自动购买号码 |
+| `TWILIO_API_KEY_SID`、`TWILIO_API_KEY_SECRET` | 服务端签发短期浏览器语音令牌；可由后续 `--prepare` 准备 |
+| `TWILIO_TWIML_APP_SID` | 浏览器主动拨号使用的 TwiML App；可由后续 `--prepare` 准备 |
+| `OPENAI_API_KEY` | 当前账户可用的 OpenAI API 密钥 |
+| `OPENAI_REALTIME_MODEL` | 默认 `gpt-realtime-1.5`；账户权限仍须验证 |
+| `PUBLIC_BASE_URL` | 完整公网 HTTPS 根地址，例如 `https://example.trycloudflare.com`；由隧道脚本保存 |
+| `LOCAL_ACCESS_TOKEN` | 启动器生成的本机访问保护，不需要在设置页手动填写 |
 
-每次 ngrok 公网域名变化，都要同步修改 `.env` 和上述三处回调地址。根据仓库 `AGENTS.md`，Twilio 配置完成且 ngrok 正在运行后，才启动真实应用。
+保留 `API_HOST=127.0.0.1`，端口默认 `5050`。模板中的 `TWILIO_FLEX_NUMBER`、`TWILIO_FLEX_WORKFLOW_SID`、`NGROK_DOMAIN` 不参与 solo 模式检查。不要填假值绕过检查。
 
-先检查本地配置并编译：
+```powershell
+npm run check:solo
+```
 
-```sh
-npm run check:config
+该命令只输出字段名及 `ready/missing/invalid`，不联网、不打印值。所有字段格式通过也不证明账户或真实电话可用。
+
+## 3. 建立公开语音隧道
+
+Twilio 必须访问本机的 HTTPS 回调与 WSS 媒体流，电脑需开机、联网且服务保持运行。Cloudflare 临时隧道脚本需要事先将官方 Windows `cloudflared.exe` 放在仓库的 `.runtime\tools\cloudflared.exe`。脚本不会自动下载程序。
+
+先确认本机服务已启动，再执行：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Start-Tunnel.ps1
+```
+
+脚本以隐藏窗口启动临时隧道，将获得的 `https://…trycloudflare.com` 保存到本机设置的 `PUBLIC_BASE_URL`；进程信息与日志位于 `.runtime/`。此操作本身不改 Twilio 号码回调。
+
+公开端只开放语音路由及只返回应用标识的 `/api/health` 探针；设置、拨号 API 和工作台保持本机访问限制。探针通过只说明地址指向本应用，不代表 Twilio 签名、媒体流或通话成功。
+
+本轮真实隧道已启动并保存 `PUBLIC_BASE_URL`，未将临时域名写入共享文档。实测公网 `/api/health` 为 200、UI/状态接口为 403、无签名语音 POST 与 WSS 握手均为 403；本机未授权/非允许来源请求按预期返回 401/403。仍需供应商凭据后的成功签名与媒体流验证。
+
+临时地址在隧道重建后可能变化，每次变化都须重新运行后面的准备、验证与改绑步骤。该隧道是开发入口，尚无生产可用性承诺。`Stop-AIPhone.ps1` 负责电话服务；退出使用时，先安全停止电话服务，再单独停止隧道：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Stop-Tunnel.ps1
+```
+
+隧道停止脚本核对记录、程序路径、PID 和启动时间，只停止本项目的 cloudflared。若服务仍有通话、线路清理待确认或无法确认状态，保留隧道运行。停止隧道不会清空已保存的公开地址；下次启动后应核对新地址并重新准备、验证与改绑。
+
+## 4. 准备 Twilio 资源，再验证 API
+
+用户已授权复用现有号码、替换旧系统的语音回调，无需重复询问这一决定。切换必须留到有效配置、目标服务和 API 检查通过之后；这一授权不包含删除旧资源或开通 Flex。
+
+先查看实际配置计划，再准备：
+
+```powershell
+npm run configure:twilio
+npm run configure:twilio -- --prepare
+```
+
+无参数命令检查本机状态、公开探针及号码归属，输出计划，不改远端资源。`--prepare` 在 `.runtime/` 保存原号码语音配置备份；缺少 API Key 或 TwiML App 时创建相应资源并通过本机设置 API 私密保存，已有 TwiML App 时更新它的语音地址为 `/voice/client`（POST）。**准备阶段会创建/更新这些资源，但不切换号码的入站路由**，也不购买号码、不拨电话、不修改短信路由。
+
+如需复用已有 API Key，SID 和 Secret 必须成对有效；不要把其他业务共用的 TwiML App 当作隔离资源。备份用于核对和手动恢复，当前未提供自动回滚命令。
+
+完成后，在设置页点击「验证 API 连接」，或在终端执行：
+
+```powershell
+npm run verify:providers
+```
+
+验证会真实访问 Twilio/OpenAI，逐项确认账户启用、号码语音能力与归属、TwiML App 地址，以及 OpenAI Realtime 收到 `session.updated`。OpenAI 检查不发送语音或生成翻译；这些通过也不代表真实电话验收。设置页不会自动运行验证，修改设置后应重新验证。
+
+## 5. 最后改绑已授权复用的号码
+
+所有配置和 API 验证通过、没有正在进行的电话时执行：
+
+```powershell
+npm run configure:twilio -- --apply
+```
+
+`--apply` 会再次准备所需资源并验证供应商；只有全部通过，才清除号码原 `voiceApplicationSid`，将号码 Voice URL 改为当前 `PUBLIC_BASE_URL/voice/incoming`（POST），并清空旧 Voice fallback URL 和号码 status callback，避免语音失败回退或通话状态继续流向旧系统。私密备份包含这些旧地址及请求方法；短信路由保持不变。最后读取远端核对 Voice URL、旧应用/fallback/status callback 已清空。TwiML App 使用 `PUBLIC_BASE_URL/voice/client`（POST）。
+
+失败时检查输出与私密备份，不把 `prepared` 或健康检查当作已成功改绑。命令返回的 `realCallTested: false` 表明它没有发起测试电话。本轮尚未执行真实号码切换。
+
+## 6. 验收真实通话
+
+在工作台点击「开启通话」注册浏览器设备，然后向用户指定的测试号码拨号，或用另一部手机拨入 Twilio 号码并在桌面接听。号码采用 `+1` 加十位号码格式，具体可呼叫范围仍受 Twilio 账户权限影响。原旧系统号码不能自动当作测试接听对象。
+
+拨号或接听时浏览器需要麦克风权限，建议佩戴耳机。电脑端默认普通话，对方默认英语；两侧音频进入独立翻译会话。字幕只展示实际收到的原文/译文事件。浏览器本机历史记录需主动开启，默认不保存，不录制音频；导出的字幕也属于用户私密内容。
+
+分别验证主动外呼和来电、双向语音与字幕、静音/拒接/任一侧挂断、忙线/未接/断线、连续通话和线路清理重试。记录短句、长句、数字与姓名、打断场景，从说话结束到另一侧实际听到翻译的延迟。模型首音频耗时不是端到端延迟；没有实测时不承诺亚秒或逐词同传。
+
+代码检查：
+
+```powershell
 npm run build
 npm test
 ```
 
-`check:config` 只输出变量名及是否缺失、占位符、格式错误等状态，不输出值、不联网、不验证账户余额或远端权限。状态有误时返回非零退出码；全部通过仍需要完成 Twilio 配置和实测。
+离线测试使用替代连接与测试配置，不连接真实供应商、不拨电话。每次更新进度应分开记录编译、离线测试、界面验证、API 实连和真实通话。
 
-`npm test` 使用内存中的模拟音频连接验证双向转发、会话就绪和挂断边界，不连接任何付费 API。`npm run dev` 和 `npm start` 都先运行配置检查；未填写的示例配置会阻止启动。
+## 保留的上游 Flex 模式
 
-配置完成后启动：
+以下仅供继续使用原版 Flex 的开发者，不能和上述 solo 配置混用。原版仍通过 `npm run dev` / `npm start` 启动，使用 `npm run check:config` 检查，要求 OpenAI/Twilio 凭据、两个 Twilio 号码、Flex Workflow SID 和 `NGROK_DOMAIN`。
 
-```sh
-npm run dev
-```
+1. 按 [README 的 Twilio setup](README.md#twilio-setup) 导入并发布 `inbound_language_studio_flow.json`，将 `TWILIO_CALLER_NUMBER` 指向该 Studio Flow。
+2. 运行 `ngrok http 5050`，把主机名（不含 `https://`）填入 `NGROK_DOMAIN`；把 Flow 内网址、Flex 号码 `/outbound-call`（POST）、TaskRouter `/reservation-accepted` 与 Reservation Accepted 事件同步配置。
+3. 完成配置且 ngrok 正在运行后，执行 `npm run check:config`、`npm run build`、`npm test`，再 `npm run dev`。同一端口上不要同时启动两个模式。
+4. 打开 Flex Agent Desktop，坐席设为 **Available**；从手机拨入 `TWILIO_CALLER_NUMBER`，选择语言并在 Flex 接听。不要拨 `TWILIO_FLEX_NUMBER` 作为此入站测试。
 
-## 4. 验证双向通话
-
-打开 Twilio Flex Agent Desktop，将坐席状态设为 **Available**。用手机拨打 `TWILIO_CALLER_NUMBER`，选择普通话（Mandarin），再在 Flex 接听任务。不要拨打 `TWILIO_FLEX_NUMBER` 来测试。
-
-分别验证中文到英文、英文到中文，记录说话结束到对方实际听见翻译的延迟，并测试短句、长句、打断和连续通话。只有真实语音测试通过后，才能判断通话链路及延迟表现。
-
-这个原版流程由用户拨入 Twilio 号码并由 Flex 接听；直接输入美国客户号码向外拨号、中文操作页、字幕及 WhatsApp 接入仍需另行实现。
-
-## 当前安装的边界
-
-当前工作尚不代表部署或接通电话。缺少私密配置或未完成 Twilio/ngrok 配置时，可以安装、编译和检查代码，但不能声称已经接入 API 或通过真实通话测试。配置检查不会创建、购买或修改任何远端资源。
+原版 `src/routes/outbound-call.ts` 是 Flex 号码回调；solo 桌面主动拨号的实现位于 `src/solo/`，两者不是同一个入口。上游说明完整保留在 README 中。

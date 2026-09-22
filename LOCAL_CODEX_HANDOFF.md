@@ -1,59 +1,63 @@
-# 电脑端 Codex 接手：GitHub 同步与本地电话翻译
+# 电脑端 Codex 接手：本机 solo 电话翻译
 
-日期：2026-09-22。目标仓库：https://github.com/Richman2020/live-translation-openai-realtime-api 。
+日期：2026-09-22。共享仓库：<https://github.com/Richman2020/live-translation-openai-realtime-api>。
 
-本文件描述待执行工作。当前没有新的真实 API 连通、双向翻译或延迟实测结果。
+当前已实现独立本机通话工作台；已验证代码、Windows 编译/离线测试、隔离浏览器 UI、桌面启动/停止/重启及真实公网访问边界。**仍缺少 7 项供应商配置，真实 API 连接、电话和延迟验收尚未完成。** 完整步骤见 [LOCAL_SETUP.md](LOCAL_SETUP.md)。
 
-## 已确定的用户决定
+## 当前本机代码与协作边界
 
-1. 先在用户电脑上的 Codex 开发与运行，暂不部署 Railway 或其他云主机。
-2. 现有 Twilio 号码关联的旧系统无需保留其语音接入，可在新服务就绪后改绑；无需再次询问是否允许替换旧语音回调。这不授权删除旧系统数据或其他资源。
-3. 目标仍是中文使用者主动呼叫美国电话，中英双向语音翻译，可显示字幕，重点测试真实端到端延迟。
-4. 单人通话模式是建议路线，用户正在了解它与 Flex 的区别。尚未据此完成架构选择、开发或验收；不要把原版的 Flex 回调误认为主动拨号功能。
-5. 所有共享修改必须提交到这个仓库；密钥和用户私密配置不得提交。
+- 工作目录：`C:\Users\admin\Documents\ChatGPT\AI电话\live-translation-openai-realtime-api`。
+- 开发分支：`codex/local-phone-workbench`，本轮从 `main` 的 `1c9eddf548d9783dbb90d8297022f374b742e35f` 同步后开发。此处记录基线，不将其称为今后永远最新的远端。
+- 本轮新增 `src/solo/`、`public/`、桌面/隧道/供应商配置脚本及测试；保留上游 Flex 路由与服务代码。先检查 `git status`、分支与远端，再获取和安全整合并发修改，不能重置覆盖。
+- 同级 `desktop-preview` 和旧桌面「AI电话（预览）」继续保留。新「AI电话」入口启动当前仓库 solo 服务；不要再把旧静态预览当作真实通话实现。
+- 先读 [AGENTS.md](AGENTS.md)、[PROJECT_BRIEF.md](PROJECT_BRIEF.md)、[PROGRESS.md](PROGRESS.md)。历史补丁对应的内容已在共享基线中，不重复应用旧安装或交接补丁。
+- 当前为草稿开发分支，尚未合入 `main`。最终 commit 与推送以 Git 历史和远端核验为准，本机工作区变化或本地提交不能称为已经同步。
 
-## 先读取并核对共享进度
+## 用户既有决定
 
-此前 Work 环境的 GitHub 连接器写文件返回 `403 Resource not accessible by integration`，网页编辑器也加载异常。2026-09-22 用户调整权限后，真实写入已成功，首笔需求文档提交为 `d1ebefe2cb15e2ecaf05a11a2b728aa6726d4238`。当前能力以最新写入与远端核验为准，不再把“只能读取”当成永久限制。
+先在用户电脑开发和运行，暂不部署 Railway 等云主机。用户已授权复用现有 Twilio 号码、替换旧语音回调；新服务和 API 就绪后执行，无需再次询问是否保留旧回调。这不授权删除旧系统数据/资源或开通 Flex。
 
-1. 在用户电脑确认当前仓库路径、分支、`git status` 与远端，保留用户本地未提交改动。读取最新的 `AGENTS.md`、`PROJECT_BRIEF.md`、`PROGRESS.md`。
-2. 获取远端最新 `main`；`f1021446c3ee760a3c00d9683ec68ff72684a639` 是本轮同步前的基线，不再作为最新提交。确认工作区已包含本批三份共享文档，并保留同期其他开发者的修改。
-3. 如果用户带来了 `translation-handoff-20260922.patch`，先检查远端是否已有对应内容。该补丁是写入恢复前准备的备用交接件，包含较旧的同步状态；已经获取本批文档时不要重复应用。不要重复应用此前已合并的 18 项安装/Realtime 代码修改。有冲突时安全整合，不重置用户代码。
-4. 使用电脑上已有、正常授权的 Git 工作流提交和推送。若 Git 未认证，通过 GitHub 官方的交互式登录流程处理，不要求把密码或令牌发到聊天里，不创建无限制权限凭据。
-5. 核对远端能读取新文档，记录分支、commit 和是否合入 `main`。只有本地 commit 或补丁不能称为“GitHub 已同步”。
+目标是中文使用者主动拨打美国电话、接听来电，双方听到各自语言并查看字幕；真实端到端延迟是验收重点。当前代码已实现 solo 路线，早期文档中“候选、待开发”是历史状态。
 
-## 再核对电脑端实际实现与配置
+## 入口与实现地图
 
-- 用户已报告有桌面快捷方式，但 Work 环境无法读取电脑文件。先确认快捷方式启动什么程序、对应什么代码目录及版本，避免重复开发。
-- 在电脑执行 `npm run check:config`。此脚本仅检查本地值与格式，不联网、不打印密钥；通过不代表 API 真正连通。当前版本仍要求 Flex 变量，不能用虚假 Flex 值绕过检查。
-- Work 环境的 7 项必需变量都是占位值；此结论不能推断用户电脑也是相同状态。
-- 在电脑的私密运行环境配置真实 OpenAI 与 Twilio 凭据。已有 OpenAI key 若可用可继续使用，不必重复创建；未取得完整密钥时使用可用的受信任安全设置流程，禁止把密钥写进 Git、对话或日志。
-- 先验证 Twilio 只读 API 与号码归属，以及 OpenAI Realtime 身份验证、当前模型权限和 `session.updated`。不要把简单 HTTP 200、网页余额或离线测试当成真实语音链路验收。
+| 路径/命令 | 职责 |
+| --- | --- |
+| `src/solo/config.ts`、`npm run check:solo` | solo 配置校验、本机秘密保存；不要求 Flex 变量 |
+| `src/solo/server.ts`、`npm run start:solo` | 本机 UI/鉴权 API/SSE、语音 Webhook 与媒体流；公开 `/api/health` 仅返回应用标识 |
+| `src/solo/session-manager.ts` | 单通话、Voice SDK 接入、两侧配对、状态回调、号码限制及挂断清理 |
+| `src/solo/translation-bridge.ts` | 两个独立 Realtime 翻译会话；我方普通话→英语，对方英语→普通话；等待配置确认 |
+| `public/` | 实际状态与字幕驱动的中文工作台，私密设置、手动 API 验证、可选本机记录 |
+| `scripts/Start-AIPhone.ps1`、`Stop-AIPhone.ps1` | 识别服务与进程归属、隐藏启动、安全清理后停止 |
+| `scripts/Install-DesktopShortcut.ps1` | 新建「AI电话」桌面入口，保留旧预览 |
+| `scripts/Start-Tunnel.ps1`、`Stop-Tunnel.ps1` | 使用本机 cloudflared 建立临时隧道并保存公开地址；确认无通话后只停止本项目隧道 |
+| `npm run configure:twilio` | 默认只读计划；`-- --prepare` 准备资源；`-- --apply` 验证后切换号码 |
+| `npm run verify:providers`、设置页「验证 API 连接」 | 实际 Twilio 资源和 OpenAI Realtime `session.updated` 验证，不发起电话 |
 
-## 单人模式的建议实现范围（待选择及开发）
+浏览器只得到短期语音令牌，不得到供应商长期密钥。拨号使用服务端生成的会话标识和一次性连接参数，不能绕过后端另拨一通；SSE/记录不包含连接 nonce。忙线和线路关闭未确认时阻止下一通，允许重试挂断。停止脚本收到 `ok` 与 `safeToStop` 均为 `true` 后才能回收自己的后台进程。
 
-基础组合为 Twilio Voice JavaScript SDK 的本地浏览器界面、电脑上的 Node 服务、Twilio Voice/Media Streams，以及 OpenAI Realtime。可以后续用 Electron 或桌面快捷方式封装，不需要因为桌面形态直接引入 Flex。
+## 本轮已验证与尚未验证
 
-- 新增拨号、接听/挂断、连接状态和字幕入口；操作入口需要鉴权，不能向公网提供任意人可用的外呼接口。
-- 浏览器音频与远端电话分别进入独立语音流，由翻译桥输出给另一方；不得用直接转接原始语音冒充翻译。
-- 标准 Voice SDK 路线还需要本账户的 TwiML App、用于签发短期 Access Token 的 API Key/Secret，以及服务器上的 webhook 签名验证。不要将长期密钥发给网页。
-- 用唯一通话会话 ID 配对两侧，处理忙线、未接听、拒接、掉线、挂断和重复回调，及时结束对侧通话及 OpenAI 会话，避免留下计费中的电话。
-- 配置检查按实际模式区分；单人模式不应继续要求 Flex 号码和 TaskRouter Workflow，但只有其新流程实现后才能移除相应启动依赖。
-- 本地服务仍需 Twilio 可访问的公网 HTTPS 回调和 WSS 音频地址，可使用 ngrok 等开发隧道。电脑必须开机联网，地址变化时更新相关回调。暂不云端部署不代表 Twilio/OpenAI 离线运行或免费。
+本机 Node.js 24.15.0、npm 11.12.1 下，`npm run build`、最终 `npm test` 54/54、`src/solo/` ESLint、独立 scripts TypeScript 检查和锁文件 `npm ci --dry-run` 均通过。Windows 实际 fixture 验证空临时文件先应用私有 ACL，再写入测试秘密及原子替换；未使用供应商真实密钥。
 
-## 真实验收
+Windows PowerShell 5.1 下启动、停止/端口释放、重启均实测成功。`D:\桌面文件\AI电话.lnk` 已创建，并通过该快捷方式实际启动当前 5050 服务。隔离浏览器 UI 已检查工作台、设置保存与状态展示；测试页面及测试服务现已关闭。
 
-1. 新服务与公网入口可访问后，再修改已获授权的号码语音回调；主动外呼流程也要配置相应 TwiML App。入站与主动外呼分别验证。
-2. 使用用户明确指定的测试号码拨打电话。原来的旧系统号码不能自动当成测试接听对象。
-3. 验证中文到英语、英语到中文；测试数字、姓名、长短句、打断以及任一侧挂断。
-4. 分别记录从说话结束到另一侧实际听到翻译的时间。模型首音频耗时只是局部指标；不用 Flex 也不能承诺亚秒延迟。
-5. 将实际结果、限制和后续工作写入进度文件，提交推送并核验远端。
+真实 Cloudflare 临时隧道已启动，`PUBLIC_BASE_URL` 已写入本机设置。公网 `/api/health` 返回 200，工作台与状态接口返回 403，无签名语音 POST 和 WSS 握手返回 403；本机鉴权的 401/403 拒绝符合预期。这些证明可达性与访问边界，不证明真实 Twilio 签名成功、媒体流或电话接通。
 
-## 官方参考
+`check:solo` 当前模型、本机访问保护和公开地址就绪，仍缺少 7 项供应商配置；`configure:twilio` 默认检查按预期返回 blocked，没有改绑号码。OpenAI 安全写入本机的确认返回 `not_approved`，没有创建或写入新密钥；Twilio 内置浏览器登录页空白，Chrome 连接故障，未取得运行凭据。网页登录/历史账户核验不能代替本机 API 身份验证。
 
-- GitHub 连接与写入边界：https://help.openai.com/en/articles/11145903-connecting-github-to-chatgpt
-- GitHub 权限错误：https://docs.github.com/en/rest/using-the-rest-api/troubleshooting-the-rest-api
-- Flex 定位：https://www.twilio.com/docs/flex/admin-guide/what-is-twilio-flex
-- 浏览器电话与 Electron：https://www.twilio.com/docs/voice/sdks/javascript
-- 本地 webhook 隧道：https://www.twilio.com/docs/usage/webhooks/getting-started-twilio-webhooks
-- Media Streams：https://www.twilio.com/docs/voice/media-streams
+没有真实 OpenAI Realtime 会话、Twilio API 资源验证、号码切换、真实拨号或来电测试，也没有延迟、稳定性或费用验收。号码改绑脚本会备份旧语音设置，在最后切换时同时清空旧 Voice fallback 和号码 status callback，防止事件继续进入旧系统；短信配置不变，此远端变更尚未执行。
+
+## 接下来的执行顺序
+
+1. 保留本地与远端并发修改，检查当前实际分支，按共享规则提交推送到草稿开发分支并核对远端；不能称为已合入 `main`。
+2. 在用户电脑启动 solo 服务，通过已授权的安全设置流程补齐运行凭据。OpenAI 本机写入尚未获得确认，不绕过 `not_approved`；若继续该步骤，应说明此前确认未获批准。不要把密钥发送到聊天或提交仓库。
+3. 核对已运行的 Cloudflare 临时隧道及本机服务仍可用、`PUBLIC_BASE_URL` 仍匹配。保持机器、服务和隧道运行，域名变化后重做相关配置。
+4. 先查看 `npm run configure:twilio` 的计划，再 `npm run configure:twilio -- --prepare`。后者准备 Key/App 并保存号码语音设置备份，尚不替换号码入站路由。
+5. 点击「验证 API 连接」或运行 `npm run verify:providers`。各项真实通过后，执行 `npm run configure:twilio -- --apply`，让脚本再次验证并最后切换已授权号码、清空旧 Voice fallback/status callback，再读取远端核对。不要重复索取旧号码改绑授权。
+6. 用户点击「开启通话」后注册浏览器电话；向用户指定的测试接听号码拨打，并另测来电。拨号/接听时允许麦克风，建议耳机。
+7. 验证中文→英语、英语→中文、字幕、短长句、数字姓名、打断及任一侧挂断/清理。分别记录从说话结束到对端听到翻译的真实延迟，更新进度与共享提交。
+
+## 保留的 Flex 版本
+
+`npm run dev` / `npm start` 仍运行上游 Flex 流程，`npm run check:config` 仍要求 Flex 号码、Workflow 和 ngrok。不要将其检查失败误判为 solo 需要开通 Flex；不要同时占用 5050 端口。上游配置和真实验收步骤在 README 与 LOCAL_SETUP 的独立 Flex 章节。

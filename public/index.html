@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#152c49"><meta name="referrer" content="no-referrer">
+  <title>AI 电话 · 双向翻译工作台</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="stylesheet" href="/styles.css">
+  <script defer src="/vendor/twilio.min.js"></script><script defer src="/app.js"></script>
+</head>
+<body>
+  <svg class="icon-library" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
+    <symbol id="i-phone" viewBox="0 0 24 24"><path d="M8 3H4a1 1 0 0 0-1 1c0 9.4 7.6 17 17 17a1 1 0 0 0 1-1v-4l-5-2-2 2a14 14 0 0 1-6-6l2-2-2-5Z"/></symbol>
+    <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24"><path d="M4 7h16M4 17h16"/><circle cx="8" cy="7" r="3"/><circle cx="16" cy="17" r="3"/></symbol>
+    <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14m-5-5 5 5-5 5"/></symbol>
+    <symbol id="i-swap" viewBox="0 0 24 24"><path d="M4 7h16l-4-4M20 17H4l4 4"/></symbol>
+    <symbol id="i-mic" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 11v1a7 7 0 0 0 14 0v-1M12 19v3m-4 0h8"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5"/></symbol>
+    <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6m0-10v1"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M6 18 18 6"/></symbol>
+    <symbol id="i-backspace" viewBox="0 0 24 24"><path d="M9 5h12v14H9l-7-7 7-7Z"/><path d="m12 9 6 6m-6 0 6-6"/></symbol>
+    <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><ellipse cx="12" cy="12" rx="4" ry="9"/><path d="M3 12h18"/></symbol>
+  </svg>
+  <aside class="sidebar">
+    <a class="brand" href="#workspace" aria-label="AI 电话工作台"><span class="brand-icon"><svg class="icon"><use href="#i-phone"/></svg></span><span>AI 电话<small>VOICE, WITHOUT BORDERS</small></span></a>
+    <div class="sidebar-label">我的工作空间</div>
+    <nav aria-label="主导航">
+      <button class="nav-item active" data-view="workspace" aria-current="page"><svg class="icon"><use href="#i-grid"/></svg>通话工作台<span class="nav-mark"></span></button>
+      <button class="nav-item" data-view="history"><svg class="icon"><use href="#i-clock"/></svg>通话记录<span id="history-count" class="nav-count">0</span></button>
+      <button class="nav-item" data-view="settings"><svg class="icon"><use href="#i-settings"/></svg>连接设置</button>
+    </nav>
+    <div class="sidebar-bottom"><div class="local-status"><span class="status-dot"></span><span id="local-state">正在连接本机服务</span></div><p>中文说出你的想法，<br>用英语传递给对方。</p><div class="profile"><span class="avatar">我</span><div>个人工作空间<small>电脑端 · 单人通话</small></div></div></div>
+  </aside>
+  <main>
+    <header class="topbar"><div class="breadcrumb">工作空间 <span>/</span> <strong id="page-crumb">通话工作台</strong></div><div class="top-actions"><span class="preview-pill">LOCAL <span>本机运行</span></span><button class="icon-button" id="help-button" aria-label="查看使用说明"><svg class="icon"><use href="#i-info"/></svg></button></div></header>
+    <section id="workspace-view" class="view">
+      <div class="page-heading"><div><div class="eyebrow">YOUR CONVERSATION, TRANSLATED.</div><h1>说你的语言，聊你想聊的。</h1><p>你的中文，对方的英文。在一通电话里相遇。</p></div><button class="secondary-button" id="enable-device" disabled>开启通话</button></div>
+      <div class="preview-notice" role="status"><span class="notice-icon"><svg class="icon"><use href="#i-info"/></svg></span><p><strong id="readiness-title">正在检查连接</strong><span id="readiness-copy">请稍候，本机服务正在返回配置状态。</span></p><button class="text-button" data-navigate="settings">连接设置 <svg class="icon"><use href="#i-arrow"/></svg></button></div>
+      <div class="error-banner" id="app-error" role="alert" hidden></div>
+      <div class="incoming-banner" id="incoming-banner" role="alert" hidden><div><span class="eyebrow">INCOMING CALL</span><strong id="incoming-number">收到来电</strong><p>接听后启用麦克风并开始双向翻译。</p></div><div class="incoming-actions"><button class="secondary-button" id="reject-call">拒接</button><button class="primary-button" id="accept-call">接听来电</button></div></div>
+      <div class="workspace-grid">
+        <section class="dial-card card" aria-labelledby="dial-heading">
+          <div class="card-title"><h2 id="dial-heading">开始一通对话</h2><svg class="icon muted"><use href="#i-phone"/></svg></div>
+          <div class="number-field"><label for="phone-number">对方号码 <span>包含国家区号</span></label><div class="phone-entry"><span class="country-icon">TEL</span><input id="phone-number" type="tel" autocomplete="tel" inputmode="tel" placeholder="+1…" maxlength="24" aria-describedby="phone-error"><button class="icon-button" id="erase-number" aria-label="删除最后一位号码"><svg class="icon"><use href="#i-backspace"/></svg></button></div><span class="field-error" id="phone-error" role="alert"></span></div>
+          <div class="keypad" aria-label="拨号键盘"></div>
+          <div class="language-settings fixed-languages"><div class="language-field"><span>我的语言</span><strong>普通话</strong></div><span class="swap-button" aria-hidden="true"><svg class="icon"><use href="#i-swap"/></svg></span><div class="language-field"><span>对方语言</span><strong>English</strong></div></div>
+          <button class="primary-button" id="start-call" disabled><svg class="icon"><use href="#i-phone"/></svg><span>拨打电话</span><svg class="icon small"><use href="#i-arrow"/></svg></button>
+          <p class="dial-footnote">会拨出真实电话，并产生线路和翻译费用。</p>
+          <div class="microphone-note"><svg class="icon"><use href="#i-mic"/></svg><p>拨号或接听时，浏览器会请求麦克风权限。建议佩戴耳机，减少回声。</p></div>
+          <div class="availability"><span class="status-dot" id="device-dot"></span><span id="device-state">通话尚未开启</span></div>
+        </section>
+        <div class="conversation-column">
+          <section class="connection-card" aria-label="双向翻译连接"><div class="connection-top"><span class="overline">双向语音翻译</span><span class="connection-status" id="connection-status"><span class="status-dot"></span><span id="connection-text">等待开始</span></span></div><div class="language-bridge"><div class="person"><div class="person-badge mine">我<span></span></div><strong>你</strong><span>普通话</span></div><div class="bridge-middle"><div class="wave-line" aria-hidden="true"></div><span class="bridge-symbol"><svg class="icon"><use href="#i-swap"/></svg></span><div class="wave-line right-wave" aria-hidden="true"></div><small id="bridge-caption">连接后，听见彼此的语言</small></div><div class="person"><div class="person-badge theirs"><svg class="icon"><use href="#i-phone"/></svg><span></span></div><strong>对方</strong><span>English</span></div></div><div class="connection-bottom"><span><span class="mini-dot blue"></span>中文 → English</span><span><span class="mini-dot teal"></span>English → 中文</span></div></section>
+          <section class="transcript-card card" aria-labelledby="transcript-heading"><div class="transcript-header"><div><h2 id="transcript-heading">对话与译文 <span class="small-badge">实时字幕</span></h2><p id="transcript-subtitle">通话内容出现后，原文与译文将显示在这里</p></div><div class="transcript-tools"><span class="timer" id="call-timer" title="本页面观察到的通话时长">00:00</span><button class="icon-button" id="export-current" aria-label="导出本次对话" disabled><svg class="icon"><use href="#i-download"/></svg></button></div></div>
+            <div class="transcript-scroll" id="transcript-scroll"><div class="empty-conversation" id="empty-conversation"><div class="empty-symbol"><span>你</span><svg class="icon"><use href="#i-swap"/></svg><span>Hi</span></div><h3>下一句，不必担心怎么说。</h3><p>完成连接设置，点击「开启通话」，<br>然后输入号码拨打，或等待来电。</p><span class="sample-label"><span class="mini-dot"></span>此处只显示实际收到的字幕</span></div><div id="transcript" role="log" aria-live="polite" aria-relevant="additions text" aria-label="对话字幕"></div></div>
+            <div class="call-controls"><div class="control-buttons"><button class="control-button" id="mute-button" disabled aria-pressed="false"><svg class="icon"><use href="#i-mic"/></svg><span>静音</span></button><span class="control-hint" id="call-hint">麦克风未启用</span></div><button class="end-button" id="end-call" disabled><svg class="icon"><use href="#i-phone"/></svg><span id="end-call-label">结束通话</span></button></div>
+          </section>
+        </div>
+      </div>
+      <footer class="workspace-footer"><span><svg class="icon"><use href="#i-globe"/></svg>中文 / English · 双向通话</span><span>电脑与公网隧道需保持运行 · 通话内容经 Twilio / OpenAI 处理</span></footer>
+    </section>
+    <section id="history-view" class="view" hidden><div class="page-heading"><div><div class="eyebrow">YOUR CONVERSATIONS</div><h1>每一次对话，都有迹可循。</h1><p>开启保存后，仅在当前浏览器留存最近 30 通电话的文字记录。</p></div><button class="secondary-button" id="clear-history">清空本机记录</button></div><div class="history-layout"><section class="card history-list" id="history-list" aria-label="通话记录列表"></section><section class="card history-detail" id="history-detail" aria-label="通话详情"></section></div></section>
+    <section id="settings-view" class="view" hidden>
+      <div class="page-heading"><div><div class="eyebrow">GET CONNECTED</div><h1>准备好，再连接真实电话。</h1><p>在本机保存连接信息。配置通过后，还需要实际拨打验证。</p></div><button class="secondary-button" id="refresh-status">重新检查</button></div>
+      <div class="settings-grid"><div class="settings-stack"><section class="card settings-main"><div class="card-title"><h2>配置状态</h2><span class="small-badge" id="configuration-badge">检查中</span></div><div id="configuration-checks" aria-live="polite"></div><div class="settings-note"><svg class="icon"><use href="#i-info"/></svg><p>“已填写”只代表本机配置检查通过，不代表账户余额、模型权限或双向通话已验证。公网隧道必须将 HTTPS / WSS 请求送到本机服务。</p></div><button class="secondary-button verification-button" id="verify-connections" disabled>验证 API 连接</button><div id="verification-results" aria-live="polite"></div></section>
+      <section class="card settings-main"><div class="card-title"><h2>编辑连接信息</h2></div><p class="form-intro">留空会保留原值。密钥写入本机运行配置，保存后不会在界面显示；通话期间不能修改。</p><form id="settings-form" autocomplete="off"><div id="settings-fields" class="settings-fields"></div><p class="field-error" id="settings-error" role="alert"></p><button class="primary-button" id="save-settings" type="submit">保存到本机</button><p class="form-feedback" id="settings-feedback" role="status"></p></form></section></div>
+      <section class="card preferences"><h2>我的偏好</h2><div class="preference-row"><div><h3>保存通话文字</h3><p>仅保存在当前浏览器，默认关闭</p></div><button class="toggle" id="save-history-toggle" role="switch" aria-checked="false" aria-label="保存通话文字"><span></span></button></div><div class="preference-row"><div><h3>显示原文</h3><p>与译文同时显示</p></div><button class="toggle on" id="show-original-toggle" role="switch" aria-checked="true" aria-label="显示原文"><span></span></button></div><div class="privacy-note">开启通话用于注册电话线路。<br>拨号或接听时才请求麦克风。<br>关闭工作台前，请先结束通话。</div><button class="secondary-button full-width" data-navigate="workspace">回到工作台 <svg class="icon"><use href="#i-arrow"/></svg></button></section></div>
+    </section>
+  </main>
+  <dialog id="help-dialog"><div class="dialog-header"><span class="eyebrow">QUICK START</span><button class="icon-button" id="close-help" aria-label="关闭使用说明"><svg class="icon"><use href="#i-close"/></svg></button></div><h2>准备一通跨语言电话。</h2><ol><li><strong>填写连接信息</strong><p>设置 OpenAI、Twilio 与公网隧道。配置检查与真实通话验证是两步。</p></li><li><strong>开启通话</strong><p>注册后可以收到来电。拨号或接听时允许麦克风，建议使用耳机。</p></li><li><strong>拨打或接听</strong><p>你说普通话，对方说英语。字幕只显示实际服务返回的内容。</p></li></ol><p class="dialog-note">请先使用你确认的测试号码。Twilio 电话线路和 OpenAI 翻译按实际用量计费；端到端延迟需要在真实通话中测量。</p><button class="primary-button" id="help-start">回到工作台 <svg class="icon"><use href="#i-arrow"/></svg></button></dialog>
+  <dialog id="clear-dialog"><h2>清空这台设备的通话记录？</h2><p>将删除当前浏览器保存的全部文字记录，无法撤销。不会修改电话服务商的通话记录。</p><div class="dialog-actions"><button class="secondary-button" id="cancel-clear">保留记录</button><button class="end-button" id="confirm-clear">清空记录</button></div></dialog>
+  <div id="toast" role="status" class="toast" hidden></div>
+</body>
+</html>
