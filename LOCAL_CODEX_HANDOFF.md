@@ -6,7 +6,7 @@
 
 ## 当前本机代码与协作边界
 
-此前实现提交（`d9394f4ff12addcbceed3c88fa404edc75b8eb44`）未能推送。2026-09-22 晚间 GitHub 连接恢复，已获取并整合远端 `main` 的 `5fabf51`，保留网页版并发检查记录。本轮完整交付分支为 `codex/local-phone-workbench`，通过草稿 PR 与 `main` 对照；尚未合入 `main`。最终推送状态以远端提交核验为准。网页版读取时须明确该开发分支，不能只看仍为旧 Flex 版本的 `main`。
+此前实现提交（`d9394f4ff12addcbceed3c88fa404edc75b8eb44`）未能推送。2026-09-22 晚间 GitHub 连接恢复，已获取并整合远端 `main` 的 `5fabf51`，保留网页版并发检查记录。完整交付提交 `457ea22` 已推送到 `codex/local-phone-workbench` 并核对远端，已建立[草稿 PR #2](https://github.com/Richman2020/live-translation-openai-realtime-api/pull/2)，尚未合入 `main`。网页版读取时须明确该开发分支，不能只看仍为旧 Flex 版本的 `main`。
 
 - 工作目录：`C:\Users\admin\Documents\ChatGPT\AI电话\live-translation-openai-realtime-api`。
 - 开发分支：`codex/local-phone-workbench`，本轮从 `main` 的 `1c9eddf548d9783dbb90d8297022f374b742e35f` 同步后开发。此处记录基线，不将其称为今后永远最新的远端。

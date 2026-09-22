@@ -6,7 +6,7 @@
 
 ## 当前结论：核心 solo 代码已实现，供应商接入与真实通话待完成
 
-**2026-09-22 晚间完整复核：不能说只差两把 API 密钥，其余全部完成。** 本次恢复 GitHub 连接并获取 `main` 的 `5fabf51`，保留并合并网页版对旧代码的检查记录。完整能力表、7 项缺失配置、实现限制和验收步骤见 [READINESS_REVIEW.md](READINESS_REVIEW.md)。本轮交付分支为 `codex/local-phone-workbench`，尚未合入 `main`；远端同步以最终提交核验为准。
+**2026-09-22 晚间完整复核：不能说只差两把 API 密钥，其余全部完成。** 本次恢复 GitHub 连接并获取 `main` 的 `5fabf51`，保留并合并网页版对旧代码的检查记录。完整能力表、7 项缺失配置、实现限制和验收步骤见 [READINESS_REVIEW.md](READINESS_REVIEW.md)。完整交付提交 `457ea22` 已推送到 `codex/local-phone-workbench` 并核对远端，已建立[草稿 PR #2](https://github.com/Richman2020/live-translation-openai-realtime-api/pull/2)，尚未合入 `main`。
 
 本次重跑构建与 54 项离线测试均通过，solo 定向检查通过；全仓库 lint 仍有 1062 个旧 Flex 文件错误，不能称为全量检查通过。本次开始时本机服务与隧道已停止，现已用正式脚本恢复；本机健康检查、鉴权状态和公网访问边界通过。真实 API、号码改绑和电话仍未执行。另确认隧道自动恢复、字幕断线补发、通话中按键菜单、完整延迟/用量记录尚未实现；前端 API 验证超时预算已修正。
 
@@ -43,7 +43,7 @@
 
 ### 此前同步失败与本轮恢复
 
-此前本机实现提交为 `d9394f4ff12addcbceed3c88fa404edc75b8eb44`，随后推送因 `github.com:443` 连接失败而未完成，GitHub 连接器也曾返回传输错误；当时网页版无法读取该版本。2026-09-22 晚间连接已恢复，成功获取远端 `main` 的 `5fabf51` 并保留其并发文档记录。本轮完整版本交付到 `codex/local-phone-workbench` 并准备草稿 PR，尚未合入 `main`。请按开发分支读取；最终推送与提交核验结果由 Git 历史及交接消息确认，不再把此前网络故障当作当前必然阻塞。
+此前本机实现提交为 `d9394f4ff12addcbceed3c88fa404edc75b8eb44`，随后推送因 `github.com:443` 连接失败而未完成，GitHub 连接器也曾返回传输错误；当时网页版无法读取该版本。2026-09-22 晚间连接恢复，成功获取远端 `main` 的 `5fabf51` 并保留其并发文档记录。推送时使用本机已配置的系统代理，完整交付提交 `457ea22` 已通过 `git ls-remote` 核对，GitHub 文件接口也已读回本轮复核报告；[草稿 PR #2](https://github.com/Richman2020/live-translation-openai-realtime-api/pull/2) 已创建，尚未合入 `main`。请按 `codex/local-phone-workbench` 读取完整版本，不再把此前网络故障当作当前必然阻塞。
 
 最终补充实测：`Stop-Tunnel.ps1 -Quiet` 成功停止本项目隧道，随后 `Start-Tunnel.ps1` 成功启动新域名、保存到本机配置，新地址的 `/api/health` 返回 200。桌面服务与新隧道在本轮结束时保持运行；临时地址不写入共享文档。
 

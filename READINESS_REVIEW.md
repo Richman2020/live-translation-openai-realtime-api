@@ -9,7 +9,7 @@
 - 此前本机 `codex/local-phone-workbench` 包含实现提交 `d9394f4` 和说明提交 `5c1c8ac`，因网络失败没有推送。GitHub 主分支未包含 `src/solo/`、`public/` 和桌面启动器。
 - 本次重新连接 GitHub 成功。远端 `main` 为 `5fabf51cd6976131ac829b1b95c87f7239096184`，新增的是网页版 Work 对旧代码的复核记录，没有新增 solo 实现。
 - 本轮安全整合该远端记录，保留两边历史，明确 Work 旧环境和用户电脑 solo 环境的区别。没有重置或覆盖网页版提交。
-- 本轮交付分支为 `codex/local-phone-workbench`，目标是把完整代码、检查记录和剩余清单提交推送，并通过草稿 PR 对照 `main`。该开发分支不等于已合入 `main`；最终同步以远端提交核对结果为准。
+- 完整代码、检查记录和剩余清单已推送到 `codex/local-phone-workbench`，交付提交 `457ea22f99e7af3da3efe3777dd17dc7b84b8b7d` 已通过远端分支 SHA 和 GitHub 文件接口核对。已建立[草稿 PR #2](https://github.com/Richman2020/live-translation-openai-realtime-api/pull/2)，尚未合入 `main`；本记录后续维护提交以该分支最新提交为准。
 - 网页版后续应显式读取该开发分支及本文件。若仅读取尚未合并的 `main`，仍会看到旧 Flex 版本。GitHub 代码同步也不代表网页版能读取本机密钥或自动接通电话。
 
 ## 2. 当前能力与证据
