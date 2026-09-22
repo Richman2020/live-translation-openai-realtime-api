@@ -6,6 +6,8 @@
 
 ## 当前本机代码与协作边界
 
+本轮实现已经本地提交（`d9394f4ff12addcbceed3c88fa404edc75b8eb44`），但 Git 推送因无法连接 `github.com:443` 失败，GitHub 连接器也发生传输错误。因此没有远端新版、PR 或合并结果；网络恢复后必须先核对远端再推送 `codex/local-phone-workbench`。不要把本机提交当成网页版 GPT 已同步。
+
 - 工作目录：`C:\Users\admin\Documents\ChatGPT\AI电话\live-translation-openai-realtime-api`。
 - 开发分支：`codex/local-phone-workbench`，本轮从 `main` 的 `1c9eddf548d9783dbb90d8297022f374b742e35f` 同步后开发。此处记录基线，不将其称为今后永远最新的远端。
 - 本轮新增 `src/solo/`、`public/`、桌面/隧道/供应商配置脚本及测试；保留上游 Flex 路由与服务代码。先检查 `git status`、分支与远端，再获取和安全整合并发修改，不能重置覆盖。
