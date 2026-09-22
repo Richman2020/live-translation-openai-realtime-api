@@ -52,6 +52,8 @@
 
 ## 尚未实现或尚未验证
 
+2026-09-22 完整代码复核还确认：字幕断线补发、通话中 DTMF 按键菜单、完整延迟/用量记录与 Twilio 自动回滚命令尚未实现；桌面入口只启动本机服务，隧道和变化后的号码回调仍须手动恢复。详细能力与验收边界见 [READINESS_REVIEW.md](READINESS_REVIEW.md)，不将这些缺项归为“只差 API 密钥”。
+
 WhatsApp/其他渠道、其他翻译供应商、生产云端部署、自动隧道域名恢复以及真实电话效果/费用验收均未完成。Twilio/OpenAI 仍是在线服务，电脑端运行不等于离线或免费。
 
 代码来源为 [Twilio 官方示例](https://github.com/twilio-samples/live-translation-openai-realtime-api)。原版 Flex 的 Studio、TaskRouter、坐席与双号码说明保留在 README 和安装文档单独章节，不作为 solo 运行前提。

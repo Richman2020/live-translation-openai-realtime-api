@@ -141,7 +141,8 @@
   async function api(path, options = {}) {
     if (!accessToken) throw new Error('本机访问凭据缺失，请通过桌面「AI 电话」重新打开。');
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), path === '/api/verify' ? 45000 : 20000);
+    // Provider checks run four sequential 15-second requests; allow network overhead.
+    const timeout = setTimeout(() => controller.abort(), path === '/api/verify' ? 75000 : 20000);
     try {
       const response = await fetch(path, { ...options, cache: 'no-store', signal: controller.signal, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` } });
       let payload = {}; try { payload = await response.json(); } catch { /* A non-JSON error has a useful HTTP status. */ }

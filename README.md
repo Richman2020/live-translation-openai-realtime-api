@@ -7,6 +7,7 @@
 - [AGENTS.md](AGENTS.md)：共享协作、提交与推送规则，以及运行边界。
 - [PROJECT_BRIEF.md](PROJECT_BRIEF.md)：用户目标、当前范围与后续功能。
 - [PROGRESS.md](PROGRESS.md)：已完成工作、验证结果、尚未验证的内容与下一步。
+- [READINESS_REVIEW.md](READINESS_REVIEW.md)：2026-09-22 本机完整复核、缺失配置、实现限制与真实验收清单。
 - [LOCAL_SETUP.md](LOCAL_SETUP.md)：本机安装、私密配置和真实通话测试步骤。
 
 ## 本机单人通话版（solo）

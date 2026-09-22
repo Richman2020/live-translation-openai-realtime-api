@@ -2,11 +2,11 @@
 
 日期：2026-09-22。共享仓库：<https://github.com/Richman2020/live-translation-openai-realtime-api>。
 
-当前已实现独立本机通话工作台；已验证代码、Windows 编译/离线测试、隔离浏览器 UI、桌面启动/停止/重启及真实公网访问边界。**仍缺少 7 项供应商配置，真实 API 连接、电话和延迟验收尚未完成。** 完整步骤见 [LOCAL_SETUP.md](LOCAL_SETUP.md)。
+当前已实现独立本机通话工作台；已验证代码、Windows 编译/离线测试、隔离浏览器 UI、桌面启动/停止/重启及真实公网访问边界。**仍缺少 7 项供应商配置、资源准备/号码改绑和真实通话验收；另外尚缺隧道自动恢复、字幕断线补发、通话中按键菜单和完整指标记录。** 最新完整复核见 [READINESS_REVIEW.md](READINESS_REVIEW.md)，运行步骤见 [LOCAL_SETUP.md](LOCAL_SETUP.md)。
 
 ## 当前本机代码与协作边界
 
-本轮实现已经本地提交（`d9394f4ff12addcbceed3c88fa404edc75b8eb44`），但 Git 推送因无法连接 `github.com:443` 失败，GitHub 连接器也发生传输错误。因此没有远端新版、PR 或合并结果；网络恢复后必须先核对远端再推送 `codex/local-phone-workbench`。不要把本机提交当成网页版 GPT 已同步。
+此前实现提交（`d9394f4ff12addcbceed3c88fa404edc75b8eb44`）未能推送。2026-09-22 晚间 GitHub 连接恢复，已获取并整合远端 `main` 的 `5fabf51`，保留网页版并发检查记录。本轮完整交付分支为 `codex/local-phone-workbench`，通过草稿 PR 与 `main` 对照；尚未合入 `main`。最终推送状态以远端提交核验为准。网页版读取时须明确该开发分支，不能只看仍为旧 Flex 版本的 `main`。
 
 - 工作目录：`C:\Users\admin\Documents\ChatGPT\AI电话\live-translation-openai-realtime-api`。
 - 开发分支：`codex/local-phone-workbench`，本轮从 `main` 的 `1c9eddf548d9783dbb90d8297022f374b742e35f` 同步后开发。此处记录基线，不将其称为今后永远最新的远端。
