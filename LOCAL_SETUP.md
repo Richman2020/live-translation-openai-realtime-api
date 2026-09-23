@@ -4,9 +4,11 @@
 
 当前桌面入口使用 **solo 单人模式**：浏览器电话、Twilio Voice/Media Streams、OpenAI Realtime；默认我说普通话、对方说英语。无需开通 Flex、Studio 或 TaskRouter。原版 Flex 仍保留，运行步骤在本文最后独立说明。
 
-**2026-09-23 当前状态：7 项供应商设置中的 6 项 Twilio 设置已保存，账户、号码及 TwiML App 的真实 API 验证通过，仅 `OPENAI_API_KEY` 仍缺失。** Codex 内置浏览器已实际操作 Twilio Active numbers 页面和本机工作台；Chrome 控制仍存在连接故障。OpenAI 项目已选择，但本机保存确认被当前审批策略立即拒绝，尚未创建或写入密钥，恢复步骤见下文。号码未改绑，OpenAI Realtime、真实电话和延迟仍未验收；当前为尚未合入 `main` 的草稿开发分支，提交与同步状态以 Git 核验为准。
+**2026-09-23 当前状态：7 项供应商设置已全部保存，`check:solo` 的 10 项必需设置全部 `ready`，正式 `verify:providers` 4/4 通过，现有号码语音回调已改绑并回读核验，浏览器线路注册通过。** OpenAI 专用密钥已按用户明确批准通过网页创建，经本机设置 UI 保存到受限 `.env`；可选 `OPENAI_PROXY_URL` 已用于验证与实际翻译连接。号码切换返回 `status: configured`，SMS 未改；随后首轮真实 UI 拨号尝试在 75 秒后超时，未确认响铃、接通或字幕，真实双向音频与延迟仍待验收。当前为尚未合入 `main` 的草稿开发分支，提交与同步状态以 Git 核验为准。
 
 2026-09-22 已验证桌面启动/停止/重启、真实 Cloudflare 隧道及访问边界；当日 `npm run build`、54 项离线测试、solo ESLint、独立 scripts TypeScript 检查及锁文件 `npm ci --dry-run` 均通过。Windows 私密配置实际 fixture 验证了先为临时空文件设置私有 ACL、再写入测试秘密。上述代码与界面证据不代表真实电话接通；完整记录见 [PROGRESS.md](PROGRESS.md)。
+
+2026-09-23 的代理支持修复通过构建、59/59 项单元测试、TypeScript 检查及定向 lint；`npm ci --dry-run --ignore-scripts --offline` 通过，仅为安装计划验证。Codex 内置浏览器已实际操作 Twilio 页面、本机工作台、OpenAI 密钥创建流程及浏览器线路注册；此前 Chrome 控制曾连接失败，本轮未重新测试 Chrome。
 
 ## 1. 安装并打开本机工作台
 
@@ -47,6 +49,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Stop-AIPhone.p
 | `TWILIO_TWIML_APP_SID` | 浏览器主动拨号使用的 TwiML App；可由后续 `--prepare` 准备 |
 | `OPENAI_API_KEY` | 当前账户可用的 OpenAI API 密钥 |
 | `OPENAI_REALTIME_MODEL` | 默认 `gpt-realtime-1.5`；账户权限仍须验证 |
+| `OPENAI_PROXY_URL` | 可选的 HTTP(S) 代理根地址；用于 OpenAI Realtime 验证与实际翻译连接，留空则直连 |
 | `PUBLIC_BASE_URL` | 完整公网 HTTPS 根地址，例如 `https://example.trycloudflare.com`；由隧道脚本保存 |
 | `LOCAL_ACCESS_TOKEN` | 启动器生成的本机访问保护，不需要在设置页手动填写 |
 
@@ -58,11 +61,15 @@ npm run check:solo
 
 该命令只输出字段名及 `ready/missing/invalid`，不联网、不打印值。所有字段格式通过也不证明账户或真实电话可用。
 
-### OpenAI 本机保存确认立即返回 `decline`
+### OpenAI 密钥配置与连接排障（2026-09-23）
 
-2026-09-23 的确认工具报告耗时 0 ms，返回 `not_approved` / `decline`。本机 `approval_policy = "never"` 会拒绝带必填 `targetPath` 的 MCP 表单，确认界面可能根本没有显示，不能据此认定用户点击了拒绝；[Codex 官方源码](https://github.com/openai/codex/blob/main/codex-rs/codex-mcp/src/elicitation.rs)明确了该分支。
+**已解决：本机保存确认立即拒绝。** 此前确认工具报告耗时 0 ms，返回 `not_approved` / `decline`；`approval_policy = "never"` 会拒绝带必填 `targetPath` 的 MCP 表单，不能据此认定用户点击拒绝。[Codex 官方源码](https://github.com/openai/codex/blob/main/codex-rs/codex-mcp/src/elicitation.rs)明确了该分支。用户在当前任务输入框下方权限菜单选择 **Ask for approval** 后，本轮确认工具真实返回 `approved`，目标为仓库内 `.env`，无需继续重复处理旧审批故障。[官方权限说明](https://learn.chatgpt.com/docs/sandboxing)提供该入口；此次没有修改插件、批准逻辑或伪造确认结果。
 
-用户在**当前任务输入框下方权限菜单**选择 **Ask for approval**，使后续轮次采用 `approval_policy = "on-request"`、`approvals_reviewer = "user"`，再发送“继续”。下一轮重试本机保存确认，沿用已完成的 OpenAI 项目选择，无需重新打开 picker；得到真实 `approved` 后，才创建密钥并保存到确认返回的路径。[官方权限说明](https://learn.chatgpt.com/docs/sandboxing)提供该菜单入口。仅修改全局默认配置不能保证覆盖当前任务的权限选择；不要通过修改插件、批准逻辑或伪造确认结果处理此问题。
+**密钥已创建并保存。** 官方连接器曾两次返回 `OpenAI Platform rejected the API key request.`，没有错误码，原因未证实。随后用户明确批准网页表单创建操作，已通过 OpenAI 网页创建专用密钥，并由本机设置 UI 保存到受限 `.env`；服务内存配置同步更新，无需为该次保存重启。此问题已不再阻塞配置，不要再次创建密钥或打开 picker，也不要把历史连接器错误归因于余额、权限或网络。
+
+**Realtime 连接代理。** 密钥保存后，原直连检查返回 `SESSION_TIMEOUT`；裸 `ws` 连接没有自动使用 Windows 系统代理。显式使用已有本机 HTTP 代理后，真实诊断在 2470 ms 收到 `session.updated`，未发送音频或发起电话。共享代码现通过可选 `OPENAI_PROXY_URL` 将同一代理配置用于供应商验证和实际翻译 bridge；留空保留直连，也可通过本机设置 API 显式保存空字符串来清除已有代理、恢复直连。值必须是 HTTP(S) 代理根地址，不带路径、查询参数或片段；代理地址及认证信息仅保存在本机私密配置，不写入共享文档或日志。
+
+密钥与代理保存后应重新运行 `check:solo` 和 `verify:providers`；代理字段仅在填写时参加格式检查。本轮代理私密保存后，停止脚本确认线路清理并安全重启服务；正式 `verify:providers` 在 `2026-09-23T06:05:55.183Z` 返回 4/4 通过，随后号码改绑及独立的浏览器线路注册验证也已完成。上述检查不发送音频、不拨号，不能代替真实通话验收。
 
 ## 3. 建立公开语音隧道
 
@@ -121,9 +128,13 @@ npm run configure:twilio -- --apply
 
 `--apply` 会再次准备所需资源并验证供应商；只有全部通过，才清除号码原 `voiceApplicationSid`，将号码 Voice URL 改为当前 `PUBLIC_BASE_URL/voice/incoming`（POST），并清空旧 Voice fallback URL 和号码 status callback，避免语音失败回退或通话状态继续流向旧系统。私密备份包含这些旧地址及请求方法；短信路由保持不变。最后读取远端核对 Voice URL、旧应用/fallback/status callback 已清空。TwiML App 使用 `PUBLIC_BASE_URL/voice/client`（POST）。
 
-失败时检查输出与私密备份，不把 `prepared` 或健康检查当作已成功改绑。命令返回的 `realCallTested: false` 表明它没有发起测试电话。本轮尚未执行真实号码切换。
+失败时检查输出与私密备份，不把 `prepared` 或健康检查当作已成功改绑。2026-09-23 本轮 `--apply` 已返回 `status: configured` 并完成远端回读核验，现有号码 Voice 回调正式接入本机，SMS 路由保持不变，未购买新资源。结果仍为 `realCallTested: false`，表明没有发起测试电话。临时隧道地址变化后，须重新准备、验证并改绑；当前没有自动恢复与自动改绑机制。
 
 ## 6. 验收真实通话
+
+2026-09-23 已通过 Computer Use 点击本机工作台“开启通话”，页面显示“电话已开启”“已注册 · 可接收来电”，拨打按钮可用；这证明浏览器线路注册成功。随后按用户指定号码发起真实 UI 拨号，75 秒后返回 `CALL_SETUP_TIMEOUT`，未取得响铃、接通或字幕证据；超时清理后 `activeSession: null`，无残留活动通话。
+
+按测试目标及本项目浏览器身份查询近期 Twilio Calls 均为空，问题倾向浏览器音频或信令接入阶段，原因尚未确定。先确认用户是否看到麦克风授权提示，并检查相应接入状态，再继续测试；不要将麦克风写为已证实根因，也不要把注册成功当作实际电话接通。测试号码和浏览器身份值不写入共享文档。
 
 在工作台点击「开启通话」注册浏览器设备，然后向用户指定的测试号码拨号，或用另一部手机拨入 Twilio 号码并在桌面接听。号码采用 `+1` 加十位号码格式，具体可呼叫范围仍受 Twilio 账户权限影响。原旧系统号码不能自动当作测试接听对象。
 

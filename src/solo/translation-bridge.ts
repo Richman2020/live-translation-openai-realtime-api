@@ -1,5 +1,7 @@
 import WebSocket from 'ws';
 
+import { createOpenAIWebSocket } from './openai-websocket';
+
 export type TranslationRole = 'local' | 'remote';
 
 export type TranscriptEvent = {
@@ -22,6 +24,7 @@ export type TranslationMetric = {
 export type TranslationBridgeOptions = {
   apiKey: string;
   model: string;
+  proxyUrl?: string;
   onTranscript: (event: TranscriptEvent) => void;
   onFailure: (reason: string) => void;
   onMetric?: (metric: TranslationMetric) => void;
@@ -194,16 +197,15 @@ export class TranslationBridge {
       if (this.closed) break;
       try {
         const timeout = this.options.sessionTimeoutMs ?? 10000;
-        const create =
-          this.options.createWebSocket ||
-          ((url, options) => new WebSocket(url, options));
-        const socket = create(
+        const socket = createOpenAIWebSocket(
           `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(this.options.model)}`,
           {
             headers: { Authorization: `Bearer ${this.options.apiKey}` },
             handshakeTimeout: timeout,
             maxPayload: MAX_EVENT_BYTES,
           },
+          this.options.proxyUrl,
+          this.options.createWebSocket,
         );
         const provider: Provider = {
           socket,

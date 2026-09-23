@@ -22,6 +22,7 @@ const config: SoloConfig = {
   TWILIO_CALLER_NUMBER: '+12125550123',
   OPENAI_API_KEY: `sk-test-${'f'.repeat(32)}`,
   OPENAI_REALTIME_MODEL: 'gpt-realtime-1.5',
+  OPENAI_PROXY_URL: '',
   LOCAL_ACCESS_TOKEN: 't'.repeat(64),
 };
 async function fixture(t: any, overrides: Partial<SoloConfig> = {}) {
@@ -138,6 +139,71 @@ test('status and settings never echo secrets; blank secrets preserve existing co
     payload: { NODE_OPTIONS: '--require=evil' },
   });
   assert.equal(bad.statusCode, 400);
+});
+
+test('optional OpenAI proxy persists privately, rejects invalid values and can be cleared without clearing secrets', async (t) => {
+  const { app, dir, store } = await fixture(t);
+  assert.equal(store.configured(), true);
+  assert.equal(
+    store.checks().some((check) => check.name === 'OPENAI_PROXY_URL'),
+    false,
+  );
+  const proxy = 'http://fixture-user:fixture-password@127.0.0.1:8080';
+  const saved = await app.inject({
+    method: 'POST',
+    url: '/api/settings',
+    remoteAddress: '127.0.0.1',
+    headers,
+    payload: { OPENAI_PROXY_URL: proxy, OPENAI_API_KEY: config.OPENAI_API_KEY },
+  });
+  assert.equal(saved.statusCode, 200);
+  assert.equal(store.configured(), true);
+  assert.equal(store.value.OPENAI_PROXY_URL, proxy);
+  assert.ok(!saved.body.includes(proxy));
+  assert.ok(!saved.body.includes('fixture-password'));
+  const reloaded = new ConfigStore({
+    envPath: join(dir, '.env'),
+    generateToken: false,
+  });
+  assert.equal(reloaded.value.OPENAI_PROXY_URL, proxy);
+  const rejected = await app.inject({
+    method: 'POST',
+    url: '/api/settings',
+    remoteAddress: '127.0.0.1',
+    headers,
+    payload: { OPENAI_PROXY_URL: `${proxy}/private` },
+  });
+  assert.equal(rejected.statusCode, 400);
+  assert.ok(!rejected.body.includes('fixture-password'));
+  assert.equal(store.value.OPENAI_PROXY_URL, proxy);
+  assert.equal(
+    checkConfig({ ...config, OPENAI_PROXY_URL: `${proxy}/private` }).find(
+      (check) => check.name === 'OPENAI_PROXY_URL',
+    )?.status,
+    'invalid',
+  );
+  const cleared = await app.inject({
+    method: 'POST',
+    url: '/api/settings',
+    remoteAddress: '127.0.0.1',
+    headers,
+    payload: { OPENAI_PROXY_URL: '', OPENAI_API_KEY: '' },
+  });
+  assert.equal(cleared.statusCode, 200);
+  assert.equal(store.value.OPENAI_PROXY_URL, '');
+  assert.equal(store.value.OPENAI_API_KEY, config.OPENAI_API_KEY);
+  assert.equal(store.configured(), true);
+  assert.ok(!cleared.body.includes(config.OPENAI_API_KEY));
+  const direct = new ConfigStore({
+    envPath: join(dir, '.env'),
+    generateToken: false,
+  });
+  assert.equal(direct.value.OPENAI_PROXY_URL, '');
+  assert.equal(direct.value.OPENAI_API_KEY, config.OPENAI_API_KEY);
+  assert.equal(
+    direct.checks().some((check) => check.name === 'OPENAI_PROXY_URL'),
+    false,
+  );
 });
 
 test('unconfigured UI/status remains available while token and calls fail closed', async (t) => {

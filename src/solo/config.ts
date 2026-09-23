@@ -11,6 +11,8 @@ import {
 import { join, resolve } from 'node:path';
 import { parse } from 'dotenv';
 
+import { validOpenAIProxyUrl } from './openai-websocket';
+
 export const SETTING_NAMES = [
   'API_PORT',
   'API_HOST',
@@ -23,6 +25,7 @@ export const SETTING_NAMES = [
   'TWILIO_CALLER_NUMBER',
   'OPENAI_API_KEY',
   'OPENAI_REALTIME_MODEL',
+  'OPENAI_PROXY_URL',
   'LOCAL_ACCESS_TOKEN',
 ] as const;
 export type SettingName = (typeof SETTING_NAMES)[number];
@@ -119,7 +122,7 @@ export function validPublicUrl(value: string): boolean {
   }
 }
 export function checkConfig(config: SoloConfig): ConfigCheck[] {
-  return required.map((name) => {
+  const checks: ConfigCheck[] = required.map((name) => {
     const value = config[name] || '';
     if (!value || placeholder.test(value)) return { name, status: 'missing' };
     let valid = true;
@@ -137,6 +140,14 @@ export function checkConfig(config: SoloConfig): ConfigCheck[] {
     if (name === 'LOCAL_ACCESS_TOKEN') valid = value.length >= 32;
     return { name, status: valid ? 'ready' : 'invalid' };
   });
+  if (config.OPENAI_PROXY_URL)
+    checks.push({
+      name: 'OPENAI_PROXY_URL',
+      status: validOpenAIProxyUrl(config.OPENAI_PROXY_URL)
+        ? 'ready'
+        : 'invalid',
+    });
+  return checks;
 }
 
 export class ConfigStore {
@@ -197,9 +208,9 @@ export class ConfigStore {
       if (typeof raw !== 'string' || raw.length > 4096 || /[\r\n\0]/.test(raw))
         throw new Error('Invalid configuration value');
       const value = raw.trim();
-      // Blank form fields preserve existing secrets while validating the rest.
+      // Blank secrets stay unchanged; an explicitly blank proxy restores direct access.
       // eslint-disable-next-line no-continue
-      if (!value) continue;
+      if (!value && name !== 'OPENAI_PROXY_URL') continue;
       if (name === 'API_HOST' && !['127.0.0.1', '::1'].includes(value))
         throw new Error('API_HOST must be loopback');
       if (
@@ -209,6 +220,8 @@ export class ConfigStore {
         throw new Error('Invalid API_PORT');
       if (name === 'PUBLIC_BASE_URL' && !validPublicUrl(value))
         throw new Error('PUBLIC_BASE_URL must be an HTTPS origin');
+      if (name === 'OPENAI_PROXY_URL' && value && !validOpenAIProxyUrl(value))
+        throw new Error('OPENAI_PROXY_URL must be an HTTP or HTTPS origin');
       if (name === 'LOCAL_ACCESS_TOKEN' && value.length < 32)
         throw new Error('LOCAL_ACCESS_TOKEN must have at least 32 characters');
       accepted[name as SettingName] =

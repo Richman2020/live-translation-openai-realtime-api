@@ -3,6 +3,7 @@ import twilio from 'twilio';
 import RequestClient from 'twilio/lib/base/RequestClient';
 
 import { checkConfig, type SoloConfig, type SettingName } from './config';
+import { createOpenAIWebSocket } from './openai-websocket';
 
 type Check = {
   name: string;
@@ -35,12 +36,14 @@ export function checkRealtime(
       resolve({ name: 'openaiRealtime', status, code });
     };
     try {
-      socket = createSocket(
+      socket = createOpenAIWebSocket(
         `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(config.OPENAI_REALTIME_MODEL)}`,
         {
           headers: { Authorization: `Bearer ${config.OPENAI_API_KEY}` },
           handshakeTimeout: timeoutMs,
         },
+        config.OPENAI_PROXY_URL,
+        createSocket,
       );
       timer = setTimeout(() => finish('failed', 'SESSION_TIMEOUT'), timeoutMs);
       socket.on('error', () => finish('failed', 'CONNECTION_FAILED'));

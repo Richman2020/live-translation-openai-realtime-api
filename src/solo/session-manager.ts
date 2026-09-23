@@ -430,6 +430,7 @@ export class SessionManager extends EventEmitter {
         session.bridge = this.bridgeFactory({
           apiKey: session.config.OPENAI_API_KEY,
           model: session.config.OPENAI_REALTIME_MODEL,
+          proxyUrl: session.config.OPENAI_PROXY_URL,
           onTranscript: (transcript) => {
             if (!session.ended)
               this.emit('event', {

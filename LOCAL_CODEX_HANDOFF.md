@@ -2,22 +2,24 @@
 
 日期：2026-09-23。共享仓库：<https://github.com/Richman2020/live-translation-openai-realtime-api>。
 
-当前已实现独立本机通话工作台，既有 Windows 编译/离线测试、隔离浏览器 UI、桌面启停及公网访问边界证据保留。**2026-09-23 已补齐 6 项 Twilio 设置、完成资源准备并通过三项真实 Twilio API 检查；7 项供应商配置仅缺 `OPENAI_API_KEY`。** 号码尚未改绑，真实 OpenAI Realtime、双向电话与延迟尚未验收，不能称为可用。隧道自动恢复、字幕断线补发、通话中按键菜单和完整指标记录仍未完成。最新完整复核见 [READINESS_REVIEW.md](READINESS_REVIEW.md)，运行步骤见 [LOCAL_SETUP.md](LOCAL_SETUP.md)。
+当前已实现独立本机通话工作台，既有 Windows 编译/离线测试、隔离浏览器 UI、桌面启停及公网访问边界证据保留。**2026-09-23 已补齐全部 7 项供应商设置，正式供应商 API 验证 4/4 通过，现有号码语音回调已改绑并回读核验，浏览器线路注册成功。** 真实外呼/来电、双向音频与延迟尚未验收，不能称为完整电话链路已经可用。隧道自动恢复、字幕断线补发、通话中按键菜单和完整指标记录仍未完成。最新完整复核见 [READINESS_REVIEW.md](READINESS_REVIEW.md)，运行步骤见 [LOCAL_SETUP.md](LOCAL_SETUP.md)。
 
 ## 2026-09-23 最新交接状态
 
-- Codex 内置浏览器已实际读取、点击 Twilio 已登录页面；Chrome 仍 fetch 失败。不要再把内置浏览器描述为只显示空白登录页，也不把该结果说成 Chrome 已修复。
-- Twilio 账户凭据和已有号码已通过本机设置保存，`configure:twilio -- --prepare` 已真实创建并保存项目 Key/Secret 与 TwiML App；6 项均在忽略的 `.env`，不将值、SID、号码或私密账户资料写入共享文档。
-- 本机服务与新隧道运行，公开健康探针通过；临时域名仅留本机。`verify:providers` 在 `2026-09-23T04:33:26.857Z` 的 `twilioAccount`、`twilioNumber`、`twilioApplication` 均为 `passed`，`openaiRealtime` 为 `missing`。
-- 旧 Voice/SMS 路由未动，原语音配置已备份到私密 `.runtime/`。尚未运行 `--apply`，没有真实电话或延迟结果。
-- 正进入 OpenAI 项目专用密钥安全流程，尚未创建/写入。保留此前 `not_approved` 为历史记录，不绕过当前安全创建与本机保存流程。
-- 开始本轮时 HEAD 与刚获取的远端工作分支均为 `ea68ed1`，远端 `main` 仍为 `5fabf51`；PR #2 尚未合入。文档编辑不等于已推送，结束时须核对实际远端。
+- Codex 内置浏览器已实际操作 Twilio 页面、本机工作台和 OpenAI 密钥创建流程。此前 Chrome 曾 fetch 失败，本轮未重新测试 Chrome；不要把该历史故障说成全部网页不可操作，也不把内置浏览器成功说成 Chrome 已修复。
+- Twilio 账户、已有号码、项目 API Key/Secret 与 TwiML App 均已保存；OpenAI 专用密钥已按用户明确批准通过网页创建并经本机设置 UI 保存。7 项供应商设置全部在受限且忽略提交的 `.env`；`check:solo` 的 10 项必需设置全部 `ready`。不重复创建密钥或资源，不将值、SID、号码或私密账户资料写入共享文档。
+- 本机服务与隧道运行，公开健康探针通过；临时域名仅留本机。正式 `verify:providers` 在 `2026-09-23T06:05:55.183Z` 返回 4/4 通过：三个 Twilio 项为 `VERIFIED_RESOURCE`，OpenAI 为 `SESSION_UPDATED`，未发送音频或拨号。
+- `configure:twilio -- --apply` 已返回 `status: configured`，现有号码 Voice 回调正式接入本机并完成远端回读核验；SMS 未改，原语音配置保存在私密 `.runtime/`。未购买新资源，`realCallTested: false` 表示改绑工具本身不拨号，不包含随后单独的 UI 拨号尝试。
+- 已实际点击“开启通话”，页面显示“电话已开启”“已注册 · 可接收来电”，拨打按钮可用，浏览器线路注册通过。随后对用户指定号码发起真实 UI 拨号，75 秒后返回 `CALL_SETUP_TIMEOUT`，未取得响铃、接通或字幕证据；清理后 `activeSession: null`，无残留活动通话。
+- 按测试目标和本项目浏览器身份查询近期 Twilio Calls 均为空，倾向浏览器音频或信令接入阶段，具体原因未定；待用户确认是否出现麦克风授权提示，不能认定根因是麦克风。测试号码及身份值不入共享文档。
+- 原本机保存审批故障已解决，官方密钥连接器两次拒绝留作未明原因的历史记录；网页创建及本机保存已完成。OpenAI 直连超时已通过可选 `OPENAI_PROXY_URL` 解决，验证和实际翻译连接共用该配置，留空直连；代理私密保存后已清理线路并安全重启服务。
+- 本轮最终 `npm run build`、59/59 项单元测试、TypeScript 及定向 lint 通过，离线 `npm ci --dry-run --ignore-scripts --offline` 安装计划检查通过。开发分支仍为 `codex/local-phone-workbench`，PR #2 尚未合入；新修改是否推送须按 Git 及远端核验。
 
 ## 当前接下来的执行顺序（2026-09-23）
 
-1. 完成 OpenAI 项目专用密钥的安全创建及本机保存，再检查配置和运行 `verify:providers`，取得真实 Realtime `session.updated`；密钥不发送到聊天、日志或 GitHub。
-2. 核对本机服务和隧道仍在线、地址仍匹配；Twilio 资源已准备，不重复创建。隧道变化时更新 App 并重新验证。
-3. 全部 API 检查通过后执行 `configure:twilio -- --apply`，最后切换已授权号码并读取远端核对；保留私密旧语音配置备份，短信路由不变，不重复询问旧号码改绑授权。
+1. 配置、四项供应商 API、号码改绑和浏览器线路注册已经完成；先核对服务、隧道及注册状态，确认麦克风授权提示并定位首轮 `CALL_SETUP_TIMEOUT`，不重复创建密钥或资源。
+2. 核对隧道地址仍匹配；临时隧道重启可能换址，当前没有自动恢复或自动改绑。
+3. 仅在隧道地址变化或相关配置改变时重新准备 App、验证 API，并运行 `configure:twilio -- --apply` 更新回调和回读核验；保留私密旧语音配置备份，短信路由不变，不重复询问旧号码改绑授权。
 4. 使用用户指定测试号码，验收外呼、来电、中英两个方向、字幕、挂断/故障清理及真实延迟和用量。没有实际结果前不宣称电话可用。
 5. 保留并发改动，把非秘密交接结果提交推送到 `codex/local-phone-workbench` 并核对远端；不得称为已合入 `main`。
 
@@ -57,7 +59,7 @@
 
 ## 2026-09-22 已验证与尚未验证（历史快照）
 
-以下保留当时检查结果；其中“7 项配置缺失”“Twilio 页面空白”和“没有 Twilio API 验证”已被上方 2026-09-23 的实际结果更新，不代表当前状态。
+以下保留当时检查结果；其中“7 项配置缺失”“Twilio 页面空白”“没有供应商 API 验证”“号码未切换”等均已被上方 2026-09-23 的实际结果更新，不代表当前状态。真实电话与延迟尚未验证的边界仍适用。
 
 本机 Node.js 24.15.0、npm 11.12.1 下，`npm run build`、最终 `npm test` 54/54、`src/solo/` ESLint、独立 scripts TypeScript 检查和锁文件 `npm ci --dry-run` 均通过。Windows 实际 fixture 验证空临时文件先应用私有 ACL，再写入测试秘密及原子替换；未使用供应商真实密钥。
 

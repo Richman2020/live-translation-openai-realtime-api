@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { setTimeout as delay } from 'node:timers/promises';
 import { test } from 'node:test';
+import createHttpsProxyAgent from 'https-proxy-agent';
 import WebSocket from 'ws';
 import {
   TranslationBridge,
@@ -204,8 +205,28 @@ test('providers start only after both authenticated legs attach and identical at
       'Authorization',
     ]);
     assert.equal(connection.options.handshakeTimeout, 10000);
+    assert.equal(connection.options.agent, undefined);
   }
   f.bridge.close();
+});
+
+test('both translation directions use the configured explicit OpenAI proxy', () => {
+  const f = fixture({ proxyUrl: 'http://127.0.0.1:8080' });
+  try {
+    f.pair();
+    assert.equal(f.connections.length, 2);
+    for (const connection of f.connections) {
+      assert.ok(
+        connection.options.agent instanceof
+          createHttpsProxyAgent.HttpsProxyAgent,
+      );
+      assert.equal(connection.options.handshakeTimeout, 10000);
+      assert.equal(connection.options.maxPayload, 1024 * 1024);
+    }
+    assert.deepEqual(f.failures, []);
+  } finally {
+    f.bridge.close();
+  }
 });
 
 test('pre-pair and pre-ack PCMU input is capped at two seconds and never crosses sessions', () => {

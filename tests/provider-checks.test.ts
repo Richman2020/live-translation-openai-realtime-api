@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { test } from 'node:test';
+import createHttpsProxyAgent from 'https-proxy-agent';
 import WebSocket from 'ws';
 import { checkRealtime } from '../src/solo/provider-checks';
 import type { SoloConfig } from '../src/solo/config';
@@ -41,6 +42,25 @@ test('provider verification requires actual session.updated, never submits audio
   socket.emit('message', JSON.stringify({ type: 'session.updated' }));
   assert.equal((await result).status, 'passed');
   assert.equal(socket.readyState, WebSocket.CLOSED);
+});
+
+test('provider verification uses the configured explicit proxy without losing acknowledgement checks', async () => {
+  const socket = new FakeSocket();
+  const result = checkRealtime(
+    { ...config, OPENAI_PROXY_URL: 'http://127.0.0.1:8080' },
+    (_url, options: WebSocket.ClientOptions) => {
+      assert.ok(options.agent instanceof createHttpsProxyAgent.HttpsProxyAgent);
+      assert.equal(options.handshakeTimeout, 15000);
+      return socket as unknown as WebSocket;
+    },
+  );
+  socket.open();
+  assert.deepEqual(
+    socket.sent.map((event) => event.type),
+    ['session.update'],
+  );
+  socket.emit('message', JSON.stringify({ type: 'session.updated' }));
+  assert.equal((await result).code, 'SESSION_UPDATED');
 });
 
 test('provider verification errors are redacted and a missing acknowledgement times out', async () => {

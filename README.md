@@ -7,7 +7,7 @@
 - [AGENTS.md](AGENTS.md)：共享协作、提交与推送规则，以及运行边界。
 - [PROJECT_BRIEF.md](PROJECT_BRIEF.md)：用户目标、当前范围与后续功能。
 - [PROGRESS.md](PROGRESS.md)：已完成工作、验证结果、尚未验证的内容与下一步。
-- [READINESS_REVIEW.md](READINESS_REVIEW.md)：2026-09-22 本机完整复核、缺失配置、实现限制与真实验收清单。
+- [READINESS_REVIEW.md](READINESS_REVIEW.md)：2026-09-23 接入验证、历史代码复核、实现限制与真实验收清单。
 - [LOCAL_SETUP.md](LOCAL_SETUP.md)：本机安装、私密配置和真实通话测试步骤。
 
 ## 本机单人通话版（solo）
@@ -16,7 +16,7 @@
 
 已实现桌面入口、主动拨号、来电接听/拒接、挂断、静音、实际字幕事件、可选本机历史记录、私密配置及手动 API 验证。默认模型为 `gpt-realtime-1.5`，实际账户可用性与翻译效果须联网实测。实现依据是 `src/solo/`、`public/` 与 `scripts/`；界面不会生成假对话或把“配置已填写”当作“通话已接通”。
 
-当前验证包括 Windows 本机编译、离线测试、隔离浏览器界面检查和服务启停。**尚无真实 OpenAI/Twilio API 连通、真实电话或端到端延迟结果**。当前本机供应商凭据尚未配置；最终测试数、具体证据和阻塞见 [PROGRESS.md](PROGRESS.md)。
+**2026-09-23：7 项供应商设置已保存，正式 OpenAI/Twilio API 验证 4/4 通过，现有号码语音回调已改绑并回读核验，浏览器线路注册成功。** 最终构建与 59 项离线测试通过；首轮真实 UI 拨号在 75 秒后返回 `CALL_SETUP_TIMEOUT`，未取得响铃、接通或字幕证据，超时后会话已清理。原因仍待定位，真实双向音频与端到端延迟未验收；具体证据和下一步见 [PROGRESS.md](PROGRESS.md)。
 
 在仓库目录安装并创建桌面入口：
 
@@ -28,7 +28,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Install-Deskto
 
 点击桌面「AI 电话」打开；首次供应商配置缺失时会进入设置页。也可运行 `scripts/Start-AIPhone.ps1`；停止用 `scripts/Stop-AIPhone.ps1`，关闭浏览器窗口不等于停止本机服务。已有的「AI 电话（预览）」快捷方式保留为旧预览。
 
-接通顺序是：**启动本机服务 → 在设置页保存私密凭据 → 启动 Cloudflare 临时隧道 → `npm run configure:twilio -- --prepare` → 验证 API 连接 → `npm run configure:twilio -- --apply` → 真实双向电话验收**。`--prepare` 准备 API Key/TwiML App，`--apply` 在再次验证成功后才改绑用户已授权复用的号码。完整命令和每步影响见 [LOCAL_SETUP.md](LOCAL_SETUP.md)。
+新环境接通顺序是：**启动本机服务 → 在设置页保存私密凭据 → 启动 Cloudflare 临时隧道 → `npm run configure:twilio -- --prepare` → 验证 API 连接 → `npm run configure:twilio -- --apply` → 真实双向电话验收**。当前本机已完成号码改绑与浏览器注册，接下来定位首轮拨号超时再继续实测，不重复创建资源。`--prepare` 准备 API Key/TwiML App，`--apply` 在再次验证成功后才改绑用户已授权复用的号码。完整命令和每步影响见 [LOCAL_SETUP.md](LOCAL_SETUP.md)。
 
 Twilio/OpenAI 仍需联网。本机界面/API 不对公网开放；隧道提供语音回调和媒体流入口。临时域名变化后必须重新配置。点击「开启通话」注册接听设备，拨号/接听时需要麦克风权限，建议戴耳机。WhatsApp、其他翻译供应商与云端部署尚未实现。
 
