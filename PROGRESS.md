@@ -6,9 +6,10 @@
 
 ## 当前结论（2026-09-23）：供应商配置、4 项真实 API 验证与号码改绑完成，真实通话待验收
 
-**7 项供应商设置已全部真实保存；`check:solo` 的 10 项必需设置全部 `ready`，正式 `verify:providers` 4/4 通过，现有号码语音回调已改绑并回读核验，浏览器线路注册也已通过。** 首轮真实 UI 拨号尝试在 75 秒后返回 `CALL_SETUP_TIMEOUT`，未取得响铃、接通或字幕证据；真实双向音频与端到端延迟仍待验收，不能将 API 验证、号码配置或线路注册称为完整电话验收。
+**7 项供应商设置、正式 API 验证 4/4、号码语音回调改绑及浏览器线路注册均已完成。** 首轮拨号的 75 秒 `CALL_SETUP_TIMEOUT` 已进一步定位到麦克风授权/准备阶段受阻；前端现先预检麦克风，30 秒超时或取消时不创建后端电话，真机验证通过。当前网站麦克风权限仍为 `prompt`，等待用户处理地址栏外层授权；尚无响铃、接通、字幕或双向音频证据，真实电话与端到端延迟仍待验收。
 
-- Computer Use 已通过 Codex 内置浏览器实际读取、点击已登录的 Twilio 控制台，成功打开 Active numbers 页面并切换本机工作台视图；本轮 OpenAI 网页登录及 MFA 完成后，API keys 页面也已可读取。此前 Chrome 控制曾返回 fetch 失败，本轮未重新测试 Chrome，已使用内置浏览器完成操作。
+- Computer Use 已通过 Codex 内置浏览器实际操作 Twilio、OpenAI 及本机工作台，本轮继续完成麦克风预检、超时和取消验证。Chrome 控制本轮再次约 21 秒后 fetch 失败，独立浏览器连接诊断仍在进行，不影响已取得的内置浏览器证据。
+- Chrome 独立故障只读诊断确认：应用插件同步会重写 CUA 环境并清除同名用户覆盖，此前缓存代理补丁因此不能持久保留；Codex 专用启动器继承代理仍为待重启验证的候选，本轮未改这些配置或中断应用，不能把此故障归因到当前内置浏览器麦克风准备问题。
 - Twilio 账户凭据和现有号码已通过本机设置保存；`configure:twilio -- --prepare` 已真实创建并保存项目 API Key/Secret 和 TwiML App。6 项设置保存在忽略提交的本机 `.env`，不记录任何秘密值或账户资料。
 - 本机服务和新 Cloudflare 临时隧道已运行，公开 `/api/health` 探针通过，当前地址已保存到本机设置。临时域名不写入共享文档；服务和隧道是否持续在线仍需下次接手时重新核对。
 - 正式 `verify:providers` 在 `2026-09-23T06:05:55.183Z` 返回 4/4 通过：`twilioAccount`、`twilioNumber`、`twilioApplication` 为 `VERIFIED_RESOURCE`，`openaiRealtime` 为 `SESSION_UPDATED`。检查没有发送音频或发起电话。
@@ -16,14 +17,17 @@
 - **OpenAI 密钥创建与保存已完成。** 本机 `.env` 保存目标真实获批后，官方密钥创建连接器两次返回 `OpenAI Platform rejected the API key request.`，没有错误码，原因未证实。随后按用户对网页表单的明确批准，通过 OpenAI 网页创建专用密钥并经本机配置 UI 保存到受限 `.env`；配置同步到服务内存，未为保存密钥而重启服务。秘密未输出到聊天或共享文档，无需重新创建密钥或打开 picker。
 - **原审批故障已解决并留作历史。** 用户切换为 **Ask for approval** 后，本机保存确认真实返回 `approved`。此前 `approval_policy = "never"` 在显示带必填 `targetPath` 的 MCP 表单前拒绝它，0 ms 的 `decline` 不能归因为用户点击拒绝；此次未修改插件或批准逻辑。依据见 [Codex elicitation 官方源码](https://github.com/openai/codex/blob/main/codex-rs/codex-mcp/src/elicitation.rs)及[官方权限说明](https://learn.chatgpt.com/docs/sandboxing)。
 - 原 OpenAI 直连曾返回 `SESSION_TIMEOUT`，裸 `ws` 连接未使用 Windows 系统代理；显式代理诊断在 2470 ms 收到 `session.updated`。共享代码新增可选 `OPENAI_PROXY_URL`，供供应商验证和实际翻译 bridge 共用，未配置时保留直连。代理已私密保存；停止脚本确认线路清理后安全重启服务，正式 4/4 验证和号码改绑均使用修复后的代码。
-- 本轮 `npm run build`、59/59 项单元测试、TypeScript 检查及定向 lint 通过；`npm ci --dry-run --ignore-scripts --offline` 通过，只证明离线安装计划可解析，不能替代新环境完整安装。代理配置支持通过本机设置 API 显式保存空字符串恢复直连，相关测试已包含在 59 项中。
+- 本轮最终 `npm test` 为 76/76 通过，`npm run build`、`node --check public/app.js`、`node --check public/call-lifecycle.js` 和 `git diff --check` 通过。此前代理修复的 TypeScript、定向 lint 和离线安装计划检查证据保留；它们不等于新环境完整安装或真实电话验收。
 - Computer Use 已实际点击本机工作台“开启通话”，页面显示“电话已开启”“已注册 · 可接收来电”，拨打按钮可用，浏览器线路注册验证通过。随后向用户指定的测试号码发起真实 UI 拨号，75 秒后出现 `CALL_SETUP_TIMEOUT`，未取得响铃、接通或字幕证据。超时清理后本机 `activeSession: null`，无残留活动通话。
-- 按测试目标和本项目浏览器身份查询近期 Twilio Calls 均为空；问题倾向浏览器音频或信令接入阶段，具体原因尚未确定。待用户确认是否出现麦克风授权提示，再继续定位；尚不能认定根因是麦克风。测试号码及身份值不写入共享文档。
-- 本轮文档更新基线为 `7668145`；开发分支为 `codex/local-phone-workbench`，[草稿 PR #2](https://github.com/Richman2020/live-translation-openai-realtime-api/pull/2) 尚未合入 `main`。本次文档修改是否已推送以随后 Git 提交及远端核验为准。
+- 本轮重新核对 TwiML App 的 Voice 地址与方法匹配，公网健康探针返回 200 且应用标识正确，无签名 `/voice/client` 表单请求返回 403；最近 45 分钟的 Twilio Calls 查询为空。签名 Webhook → 媒体流开始 → 外呼创建的全内存探针通过，但供应商连接均为替身，不能计为真实 Twilio 电话。
+- 独立本机麦克风诊断不经过 Twilio、不上传音频：安全上下文与 `mediaDevices` 均可用，权限状态为 `prompt`，`getUserMedia` 等待 15 秒仍未完成，证实麦克风准备受阻。Codex 应用实现支持 microphone 权限，授权提示属于标签页地址栏外层，后台标签页请求可能保持等待；不能据此声称内置浏览器不支持麦克风，也不能将 Codex 任务批准模式与网站麦克风授权混为一谈。
+- 新增 `public/call-lifecycle.js`：先取得麦克风再创建后端会话，预检限时 30 秒，预备流只交给 SDK 使用一次；取消、延迟返回、旧 Device 连接及准备中的来电拒接均按所属尝试清理，避免旧结果干扰新通话。缺少本机访问令牌的错误改为全局显示，设置页也能看到重新从桌面入口打开的指引，已真机核验。
+- 修复后刷新已认证工作台可再次注册。点击拨号显示“等待麦克风授权，请查看地址栏…”及“取消准备”；同时本机 `activeSession: null`，Twilio 按测试目标及浏览器身份查询均为空，未创建后端电话。约 30 秒后明确显示 `MICROPHONE_TIMEOUT` 并恢复拨号；再次准备后点击取消也立即恢复，麦克风未启用、结束按钮禁用。用户尚未回复网站麦克风授权提示，授权后的真实电话仍待继续验证。
+- 本轮开始时本机与远端开发分支基线均为 `f67fb41`；开发分支为 `codex/local-phone-workbench`，[草稿 PR #2](https://github.com/Richman2020/live-translation-openai-realtime-api/pull/2) 尚未合入 `main`。本次代码与文档修改是否已推送以随后 Git 提交及远端核验为准。
 
 ## 当前下一步（2026-09-23）
 
-1. 先定位首轮拨号的 `CALL_SETUP_TIMEOUT`，确认浏览器麦克风授权提示及音频/信令接入状态；7 项设置、4 项供应商 API、号码改绑及浏览器线路注册已完成，不重复创建密钥或资源，不将未定原因写成已证实的麦克风故障。
+1. 用户在当前内置浏览器标签页的地址栏外层允许网站麦克风访问，再执行预检并继续真实电话验收。当前准备阶段阻塞已确认；授权后的设备打开、SDK 连接及音频仍须实测，不能宣称所有电话问题均已解决。7 项设置、4 项 API、号码改绑和注册已完成，不重复创建密钥或资源。
 2. 保持并核对本机服务和隧道；临时隧道重启后地址可能变化，届时重新准备 TwiML App、验证 API 并运行 `configure:twilio -- --apply` 更新号码回调，再读取远端核对。当前尚无隧道自动恢复及地址变化后的自动改绑。
 3. 使用用户指定测试号码分别验收外呼、来电、中英两个方向、字幕、挂断和故障清理，记录真实延迟与用量；未实测前不承诺可用、效果或费用。
 4. 保留并发改动，将非秘密代码与交接结果提交、推送到开发分支并核对远端；不将草稿 PR 称为已合入 `main`。

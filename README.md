@@ -16,7 +16,7 @@
 
 已实现桌面入口、主动拨号、来电接听/拒接、挂断、静音、实际字幕事件、可选本机历史记录、私密配置及手动 API 验证。默认模型为 `gpt-realtime-1.5`，实际账户可用性与翻译效果须联网实测。实现依据是 `src/solo/`、`public/` 与 `scripts/`；界面不会生成假对话或把“配置已填写”当作“通话已接通”。
 
-**2026-09-23：7 项供应商设置已保存，正式 OpenAI/Twilio API 验证 4/4 通过，现有号码语音回调已改绑并回读核验，浏览器线路注册成功。** 最终构建与 59 项离线测试通过；首轮真实 UI 拨号在 75 秒后返回 `CALL_SETUP_TIMEOUT`，未取得响铃、接通或字幕证据，超时后会话已清理。原因仍待定位，真实双向音频与端到端延迟未验收；具体证据和下一步见 [PROGRESS.md](PROGRESS.md)。
+**2026-09-23：7 项供应商设置、正式 API 验证 4/4、号码语音回调改绑及浏览器注册已完成。** 本轮构建与 76 项离线测试通过。首轮拨号超时已进一步定位到麦克风授权/准备阶段；新增预检后再建会话，真机验证 30 秒超时及取消均能恢复，未创建后端电话。当前等待用户允许内置浏览器地址栏外层的网站麦克风权限，尚无真实接通、双向音频或延迟验收；证据见 [PROGRESS.md](PROGRESS.md)。
 
 在仓库目录安装并创建桌面入口：
 
@@ -28,9 +28,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Install-Deskto
 
 点击桌面「AI 电话」打开；首次供应商配置缺失时会进入设置页。也可运行 `scripts/Start-AIPhone.ps1`；停止用 `scripts/Stop-AIPhone.ps1`，关闭浏览器窗口不等于停止本机服务。已有的「AI 电话（预览）」快捷方式保留为旧预览。
 
-新环境接通顺序是：**启动本机服务 → 在设置页保存私密凭据 → 启动 Cloudflare 临时隧道 → `npm run configure:twilio -- --prepare` → 验证 API 连接 → `npm run configure:twilio -- --apply` → 真实双向电话验收**。当前本机已完成号码改绑与浏览器注册，接下来定位首轮拨号超时再继续实测，不重复创建资源。`--prepare` 准备 API Key/TwiML App，`--apply` 在再次验证成功后才改绑用户已授权复用的号码。完整命令和每步影响见 [LOCAL_SETUP.md](LOCAL_SETUP.md)。
+新环境接通顺序是：**启动本机服务 → 在设置页保存私密凭据 → 启动 Cloudflare 临时隧道 → `npm run configure:twilio -- --prepare` → 验证 API 连接 → `npm run configure:twilio -- --apply` → 真实双向电话验收**。当前本机已完成号码改绑与注册，接下来允许网站麦克风、通过预检后继续实测，不重复创建资源。`--prepare` 准备 API Key/TwiML App，`--apply` 在再次验证成功后才改绑用户已授权复用的号码。完整命令和每步影响见 [LOCAL_SETUP.md](LOCAL_SETUP.md)。
 
-Twilio/OpenAI 仍需联网。本机界面/API 不对公网开放；隧道提供语音回调和媒体流入口。临时域名变化后必须重新配置。点击「开启通话」注册接听设备，拨号/接听时需要麦克风权限，建议戴耳机。WhatsApp、其他翻译供应商与云端部署尚未实现。
+Twilio/OpenAI 仍需联网。本机界面/API 不对公网开放；隧道提供语音回调和媒体流入口。临时域名变化后必须重新配置。点击「开启通话」注册接听设备，拨号/接听前先准备麦克风；Codex 内置浏览器的权限提示在标签页地址栏外层，任务 Full access 不能替代网站授权。准备超时或取消不会继续外呼，建议戴耳机。WhatsApp、其他翻译供应商与云端部署尚未实现。
 
 ## 上游 Flex 示例（独立保留）
 

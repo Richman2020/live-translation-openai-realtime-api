@@ -34,10 +34,10 @@
   </aside>
   <main>
     <header class="topbar"><div class="breadcrumb">工作空间 <span>/</span> <strong id="page-crumb">通话工作台</strong></div><div class="top-actions"><span class="preview-pill">LOCAL <span>本机运行</span></span><button class="icon-button" id="help-button" aria-label="查看使用说明"><svg class="icon"><use href="#i-info"/></svg></button></div></header>
+    <div class="error-banner global-error" id="app-error" role="alert" hidden></div>
     <section id="workspace-view" class="view">
       <div class="page-heading"><div><div class="eyebrow">YOUR CONVERSATION, TRANSLATED.</div><h1>说你的语言，聊你想聊的。</h1><p>你的中文，对方的英文。在一通电话里相遇。</p></div><button class="secondary-button" id="enable-device" disabled>开启通话</button></div>
       <div class="preview-notice" role="status"><span class="notice-icon"><svg class="icon"><use href="#i-info"/></svg></span><p><strong id="readiness-title">正在检查连接</strong><span id="readiness-copy">请稍候，本机服务正在返回配置状态。</span></p><button class="text-button" data-navigate="settings">连接设置 <svg class="icon"><use href="#i-arrow"/></svg></button></div>
-      <div class="error-banner" id="app-error" role="alert" hidden></div>
       <div class="incoming-banner" id="incoming-banner" role="alert" hidden><div><span class="eyebrow">INCOMING CALL</span><strong id="incoming-number">收到来电</strong><p>接听后启用麦克风并开始双向翻译。</p></div><div class="incoming-actions"><button class="secondary-button" id="reject-call">拒接</button><button class="primary-button" id="accept-call">接听来电</button></div></div>
       <div class="workspace-grid">
         <section class="dial-card card" aria-labelledby="dial-heading">

@@ -1,6 +1,7 @@
 'use strict';
 
-(() => {
+(async () => {
+  const { createCallLifecycle, createDeviceMediaOwner, microphoneMessages } = await import('./call-lifecycle.js');
   const $ = id => document.getElementById(id);
   const tokenKey = 'ai-phone-local-token';
   const historyKey = 'ai-phone-calls-v1';
@@ -71,11 +72,13 @@
   let state = null;
   let activeSession = null;
   let device = null;
+  let deviceMediaOwner = null;
   let sdkCall = null;
   let incomingCall = null;
   let registered = false;
   let enabling = false;
   let dialing = false;
+  let acceptingAttempt = null;
   let ending = false;
   let saving = false;
   let verifying = false;
@@ -88,6 +91,11 @@
   let selectedHistory = null;
   let toastTimer = null;
   let disposed = false;
+  const callLifecycle = createCallLifecycle({
+    requestMedia: navigator.mediaDevices?.getUserMedia ? constraints => navigator.mediaDevices.getUserMedia(constraints) : null,
+    onChange: () => renderStatus(),
+  });
+  const callPhases = { preparing: '正在准备电话线路', microphone: '等待麦克风授权，请查看地址栏的麦克风或权限图标', signaling: '麦克风已就绪，正在连接电话线路', connected: '浏览器线路已连接，等待电话音频', reconnecting: '电话音频连接中断，正在恢复' };
   const safeRead = (key, fallback) => { try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; } };
   let preferences = { saveHistory: false, showOriginal: true, ...safeRead(preferencesKey, {}) };
   preferences = { saveHistory: preferences.saveHistory === true, showOriginal: preferences.showOriginal !== false };
@@ -178,12 +186,12 @@
     $('start-call').querySelector('span').textContent = dialing ? '正在拨号…' : busy() ? '通话进行中' : '拨打电话';
     $('phone-number').disabled = busy(); $('erase-number').disabled = busy();
     document.querySelectorAll('.dial-key').forEach(button => { button.disabled = busy(); });
-    $('end-call').disabled = !activeSession || (terminal(activeSession.status) && !cleanupPending) || ending;
-    $('end-call-label').textContent = ending ? '正在结束…' : cleanupPending ? '重试挂断' : '结束通话';
+    $('end-call').disabled = (!activeSession && !callLifecycle.current) || (activeSession && terminal(activeSession.status) && !cleanupPending) || ending;
+    $('end-call-label').textContent = ending ? '正在结束…' : cleanupPending ? '重试挂断' : !activeSession && callLifecycle.current ? '取消准备' : '结束通话';
     $('mute-button').disabled = !sdkCall || sdkCall === incomingCall || ending;
     $('mute-button').setAttribute('aria-pressed', String(muted)); $('mute-button').querySelector('span').textContent = muted ? '取消静音' : '静音';
-    $('call-hint').textContent = sdkCall && sdkCall !== incomingCall ? (muted ? '你的麦克风已静音' : '麦克风随通话启用') : '麦克风未启用';
-    $('accept-call').disabled = !incomingCall || ending; $('reject-call').disabled = !incomingCall || ending;
+    $('call-hint').textContent = callLifecycle.current?.microphoneReady ? (muted ? '你的麦克风已静音' : '麦克风已就绪') : callLifecycle.current?.phase === 'microphone' ? '正在等待麦克风' : '麦克风未启用';
+    $('accept-call').disabled = !incomingCall || ending || Boolean(acceptingAttempt); $('reject-call').disabled = !incomingCall || ending;
     $('incoming-banner').hidden = !incomingCall;
     $('save-settings').disabled = !state || busy() || saving || verifying;
     $('verify-connections').disabled = !state || !configured || busy() || saving || verifying;
@@ -191,10 +199,11 @@
     $('settings-fields').querySelectorAll('input').forEach(input => { input.disabled = busy() || saving; });
     $('export-current').disabled = !record?.lines.length;
     const currentState = activeSession?.status || (record?.endedAt ? record.status : '');
-    $('connection-text').textContent = cleanupPending ? '线路关闭待确认' : statusNames[currentState] || '等待开始';
+    const phase = callLifecycle.current?.phase;
+    $('connection-text').textContent = cleanupPending ? '线路关闭待确认' : phase === 'reconnecting' ? '正在恢复音频连接' : statusNames[currentState] || '等待开始';
     $('connection-status').classList.toggle('active', currentState === 'active');
     document.body.classList.toggle('is-active', currentState === 'active');
-    $('bridge-caption').textContent = currentState === 'active' ? '中文与英文，正在传递' : currentState === 'ringing' ? '等待对方接听' : '连接后，听见彼此的语言';
+    $('bridge-caption').textContent = phase === 'reconnecting' ? callPhases[phase] : currentState === 'active' ? '中文与英文，正在传递' : phase === 'microphone' ? callPhases[phase] : currentState === 'ringing' ? '正在呼叫对方，等待接听' : callPhases[phase] || '连接后，听见彼此的语言';
     $('call-timer').textContent = timeText(duration());
   }
   function renderChecks() {
@@ -218,8 +227,18 @@
     renderHistory();
   }
   function clearSdkCall() {
-    const oldCall = sdkCall || incomingCall; sdkCall = null; incomingCall = null; muted = false;
-    try { oldCall?.disconnect(); } catch { /* Backend end state remains authoritative. */ }
+    const attempt = callLifecycle.current;
+    const wasIncoming = Boolean(incomingCall);
+    const oldCall = sdkCall || incomingCall; sdkCall = null; incomingCall = null; acceptingAttempt = null; muted = false;
+    try { if (wasIncoming && (!oldCall?.status || oldCall.status() === 'pending')) oldCall?.reject(); else oldCall?.disconnect(); } catch { /* Backend end state remains authoritative. */ }
+    callLifecycle.cancel(attempt);
+    if (attempt?.mediaOwner?.retireIfPending(attempt) && device === attempt.device) {
+      // Destroy only this old Device. A later registration gets a fresh AudioHelper.
+      const oldDevice = device; device = null; deviceMediaOwner = null; registered = false;
+      clearInterval(heartbeat); heartbeat = null;
+      try { oldDevice.destroy(); } catch { /* The stale owner remains retired. */ }
+      presence(false).catch(() => {});
+    }
   }
   function applySession(session) {
     if (session && (typeof session.id !== 'string' || typeof session.status !== 'string')) return;
@@ -286,7 +305,7 @@
   async function presence(available) { if (accessToken) await post('/api/presence', { available }); }
   async function destroyDevice() {
     clearInterval(heartbeat); heartbeat = null; registered = false;
-    const oldDevice = device; device = null;
+    const oldDevice = device; device = null; deviceMediaOwner = null;
     try { await oldDevice?.unregister(); } catch { /* Still destroy locally. */ }
     try { oldDevice?.destroy(); } catch { /* Already destroyed. */ }
     await presence(false).catch(() => {}); renderStatus();
@@ -302,8 +321,15 @@
       if (!window.Twilio?.Device) throw new Error('电话组件尚未加载，请重新启动桌面工作台。');
       if (device) await destroyDevice();
       const data = await api('/api/token');
-      const next = new window.Twilio.Device(data.token, { logLevel: 'silent', tokenRefreshMs: 60000, closeProtection: true });
-      device = next;
+      // Official DeviceOptions.getUserMedia receives constraints and returns Promise<MediaStream>.
+      // https://www.twilio.com/docs/voice/sdks/javascript/twiliodevice#deviceoptions
+      const mediaOwner = createDeviceMediaOwner(callLifecycle);
+      const next = new window.Twilio.Device(data.token, {
+        logLevel: 'silent', tokenRefreshMs: 60000, closeProtection: true,
+        enableImprovedSignalingErrorPrecision: true,
+        getUserMedia: constraints => mediaOwner.getUserMedia(constraints),
+      });
+      device = next; deviceMediaOwner = mediaOwner;
       next.on('registered', () => {
         if (device !== next) return; registered = true; clearInterval(heartbeat);
         presence(true).catch(error => showError(error.message));
@@ -317,25 +343,29 @@
     } catch (error) { showError(error.message); await destroyDevice(); }
     finally { enabling = false; renderStatus(); }
   }
-  function bindCall(call) {
+  function bindCall(call, attempt) {
     sdkCall = call;
-    call.on('accept', () => { if (sdkCall !== call) return; incomingCall = null; renderStatus(); refreshStatus().catch(error => showError(error.message)); });
+    call.on('accept', () => { if (sdkCall !== call || !callLifecycle.isCurrent(attempt)) return; incomingCall = null; callLifecycle.update(attempt, { phase: 'connected' }); renderStatus(); refreshStatus().catch(error => showError(error.message)); });
+    call.on('reconnecting', () => { if (sdkCall === call) callLifecycle.update(attempt, { phase: 'reconnecting' }); });
+    call.on('reconnected', () => { if (sdkCall === call) callLifecycle.update(attempt, { phase: 'connected' }); });
     call.on('mute', value => { if (sdkCall !== call) return; muted = value === true; renderStatus(); });
     for (const event of ['disconnect', 'cancel', 'reject']) call.on(event, () => {
       if (sdkCall !== call && incomingCall !== call) return;
       sdkCall = null; incomingCall = null; muted = false;
-      if (activeSession && !terminal(activeSession.status)) endCall().catch(error => showError(error.message));
-      else refreshStatus().catch(error => showError(error.message)); renderStatus();
+      callLifecycle.cancel(attempt);
+      endCall(attempt).catch(error => showError(error.message)); renderStatus();
     });
     call.on('error', error => {
       if (sdkCall !== call && incomingCall !== call) return;
-      showError(`通话音频连接失败${Number.isInteger(error.code) ? `（${error.code}）` : ''}。请允许麦克风访问，并检查网络和耳机。`);
-      endCall().catch(error => showError(error.message));
+      showError(microphoneMessages[attempt?.failureCode] || `电话线路连接失败${Number.isInteger(error.code) ? `（${error.code}）` : ''}。请检查网络与电话配置后重试。`);
+      endCall(attempt).catch(error => showError(error.message));
     });
   }
   function receiveIncoming(call) {
     if (sdkCall || incomingCall || dialing || ending) { call.reject(); return; }
-    incomingCall = call; bindCall(call);
+    const attempt = callLifecycle.begin(activeSession?.id || null);
+    Object.assign(attempt, { direction: 'inbound', device, mediaOwner: deviceMediaOwner });
+    incomingCall = call; bindCall(call, attempt);
     $('incoming-number').textContent = call.customParameters?.get('from') || call.parameters?.From || activeSession?.from || '收到来电';
     navigate('workspace'); renderStatus(); refreshStatus().catch(error => showError(error.message));
   }
@@ -344,37 +374,67 @@
     const to = $('phone-number').value.replace(/[\s()-]/g, '');
     if (!/^\+[1-9]\d{6,14}$/.test(to)) { $('phone-error').textContent = '请输入含国家区号的号码，例如 +1 加十位美国号码。'; $('phone-number').setAttribute('aria-invalid', 'true'); $('phone-number').focus(); return; }
     dialing = true; clearError(); renderStatus();
+    const attempt = callLifecycle.begin();
+    const attemptDevice = device;
+    Object.assign(attempt, { direction: 'outbound', device: attemptDevice, mediaOwner: deviceMediaOwner });
     let createdId = null;
     try {
+      // Permission and device acquisition finish before creating any server-side call.
+      await callLifecycle.prepareMicrophone(attempt);
+      if (!callLifecycle.isCurrent(attempt)) return;
       const created = await post('/api/calls', { to }); createdId = created.id;
       if (!createdId || !created.connectionParams) throw new Error('电话服务未返回有效连接信息。');
+      if (!callLifecycle.isCurrent(attempt)) { await post(`/api/calls/${encodeURIComponent(createdId)}/hangup`).catch(() => {}); return; }
+      callLifecycle.update(attempt, { sessionId: createdId });
       applySession(created);
-      const call = await device.connect({ params: created.connectionParams });
+      const call = await attempt.mediaOwner.connect(attempt, () => attemptDevice.connect({ params: created.connectionParams }));
+      if (!call) return;
       if (activeSession?.id !== createdId || terminal(activeSession.status)) { call.disconnect(); return; }
-      bindCall(call);
+      bindCall(call, attempt);
     } catch (error) {
-      if (createdId) await post(`/api/calls/${encodeURIComponent(createdId)}/hangup`).catch(() => { showError('拨号未完成，远端清理仍待确认，请点击结束通话重试。'); });
-      clearSdkCall(); showError(error.message); await refreshStatus().catch(() => {});
-    } finally { dialing = false; renderStatus(); }
+      if (!callLifecycle.isCurrent(attempt)) return;
+      const message = microphoneMessages[attempt.failureCode] || error.message;
+      showError(message);
+      if (createdId) await post(`/api/calls/${encodeURIComponent(createdId)}/hangup`).catch(() => { if (callLifecycle.isCurrent(attempt)) showError('拨号未完成，远端清理仍待确认，请点击结束通话重试。'); });
+      if (!callLifecycle.isCurrent(attempt)) return;
+      dialing = false; clearSdkCall(); showError(message); await refreshStatus().catch(() => {});
+    } finally { if (callLifecycle.isCurrent(attempt)) { dialing = false; renderStatus(); } }
   }
-  async function endCall() {
+  async function endCall(attempt = callLifecycle.current) {
     if (ending) return;
-    ending = true; renderStatus();
+    if (attempt && callLifecycle.current && !callLifecycle.isCurrent(attempt)) return;
+    let id = attempt?.sessionId || activeSession?.id;
+    ending = true; dialing = false; clearSdkCall(); renderStatus();
     try {
-      if (!activeSession) await refreshStatus();
-      const id = activeSession?.id;
-      clearSdkCall();
+      if (!id) {
+        const next = await api('/api/status');
+        if (callLifecycle.current && callLifecycle.current !== attempt) return;
+        // Incoming SDK events can precede the server's SSE snapshot.
+        if (next.activeSession && (!attempt || next.activeSession.direction === attempt.direction)) {
+          id = next.activeSession.id; state = next; applySession(next.activeSession);
+        }
+      }
       if (id) await post(`/api/calls/${encodeURIComponent(id)}/hangup`);
-      await refreshStatus();
-    } catch (error) { showError(`结束通话尚未确认：${error.message}`); await refreshStatus().catch(() => {}); }
-    finally { ending = false; renderStatus(); }
+      if (!callLifecycle.current || callLifecycle.current === attempt) await refreshStatus();
+    } catch (error) { if (!callLifecycle.current || callLifecycle.current === attempt) { showError(`结束通话尚未确认：${error.message}`); await refreshStatus().catch(() => {}); } }
+    finally { if (!callLifecycle.current || callLifecycle.current === attempt) { ending = false; renderStatus(); } }
   }
   async function acceptCall() {
-    const call = incomingCall; if (!call || ending) return;
+    const call = incomingCall; if (!call || ending || acceptingAttempt) return;
+    const attempt = callLifecycle.current;
+    acceptingAttempt = attempt;
     $('accept-call').disabled = true;
-    try { await refreshStatus(); if (incomingCall !== call || !activeSession) return; call.accept(); }
-    catch (error) { showError(error.message); }
-    finally { renderStatus(); }
+    try {
+      await callLifecycle.prepareMicrophone(attempt);
+      if (incomingCall !== call || !callLifecycle.isCurrent(attempt)) { callLifecycle.cancel(attempt); return; }
+      await refreshStatus();
+      if (incomingCall !== call || !activeSession || !callLifecycle.isCurrent(attempt)) { callLifecycle.cancel(attempt); return; }
+      callLifecycle.update(attempt, { sessionId: activeSession.id });
+      attempt.mediaOwner.bind(attempt); call.accept();
+    } catch (error) {
+      if (callLifecycle.isCurrent(attempt)) { showError(microphoneMessages[attempt.failureCode] || error.message); await endCall(attempt); }
+    }
+    finally { if (acceptingAttempt === attempt) acceptingAttempt = null; renderStatus(); }
   }
   async function rejectCall() {
     const call = incomingCall; if (!call) return;
@@ -451,7 +511,7 @@
   document.querySelectorAll('[data-view]').forEach(button => button.addEventListener('click', () => navigate(button.dataset.view)));
   document.querySelectorAll('[data-navigate]').forEach(button => button.addEventListener('click', () => navigate(button.dataset.navigate)));
   document.querySelector('.brand').addEventListener('click', event => { event.preventDefault(); navigate('workspace'); });
-  $('enable-device').addEventListener('click', enableDevice); $('start-call').addEventListener('click', startCall); $('end-call').addEventListener('click', endCall);
+  $('enable-device').addEventListener('click', enableDevice); $('start-call').addEventListener('click', startCall); $('end-call').addEventListener('click', () => endCall());
   $('accept-call').addEventListener('click', acceptCall); $('reject-call').addEventListener('click', rejectCall);
   $('mute-button').addEventListener('click', () => { if (!sdkCall || sdkCall === incomingCall) return; try { const nextMuted = !muted; sdkCall.mute(nextMuted); muted = nextMuted; renderStatus(); } catch { showError('未能切换麦克风状态，请检查通话连接。'); } });
   $('erase-number').addEventListener('click', () => { if (!busy()) { $('phone-number').value = $('phone-number').value.slice(0, -1); $('phone-number').focus(); } });
@@ -467,6 +527,7 @@
   window.addEventListener('beforeunload', event => { if (busy()) { event.preventDefault(); event.returnValue = ''; } });
   window.addEventListener('pagehide', () => {
     disposed = true; clearInterval(heartbeat); eventSource?.close();
+    callLifecycle.cancel();
     // Best effort only; server-side presence expiry and call lifecycle are authoritative.
     if (accessToken) fetch('/api/presence', { method: 'POST', keepalive: true, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` }, body: JSON.stringify({ available: false }) }).catch(() => {});
     try { device?.destroy(); } catch { /* Navigation continues. */ }
@@ -476,4 +537,9 @@
   setInterval(() => { if (state && !disposed) refreshStatus().catch(error => showError(error.message)); }, 10000);
   if (!accessToken) { showError('请通过桌面「AI 电话」打开此页面，以取得本机访问权限。'); navigate('settings'); }
   else refreshStatus().then(next => { connectEvents(); if (!next.configured) navigate('settings'); }).catch(error => { showError(error.message); navigate('settings'); });
-})();
+})().catch(() => {
+  const banner = document.getElementById('app-error');
+  if (banner) { banner.textContent = '电话组件加载失败。请从桌面「AI 电话」重新打开；仍未恢复时请重启本机服务。'; banner.hidden = false; }
+  const view = document.getElementById('workspace-view'); if (view) view.hidden = false;
+  for (const id of ['enable-device', 'start-call', 'accept-call']) { const button = document.getElementById(id); if (button) button.disabled = true; }
+});
