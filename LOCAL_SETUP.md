@@ -4,9 +4,9 @@
 
 当前桌面入口使用 **solo 单人模式**：浏览器电话、Twilio Voice/Media Streams、OpenAI Realtime；默认我说普通话、对方说英语。无需开通 Flex、Studio 或 TaskRouter。原版 Flex 仍保留，运行步骤在本文最后独立说明。
 
-代码与界面已实现不等于 API 或真实电话已接通。2026-09-22 已完成桌面启动/停止/重启、真实 Cloudflare 隧道及访问边界验证，仍缺少 7 项供应商配置；真实 API、通话和延迟均待验证。OpenAI 本机保存确认返回 `not_approved`，未创建或写入密钥；Twilio 浏览器登录/连接受阻，未取得运行凭据。当前为尚未合入 `main` 的草稿开发分支，提交与同步状态以 Git 核验为准。
+**2026-09-23 当前状态：7 项供应商设置中的 6 项 Twilio 设置已保存，账户、号码及 TwiML App 的真实 API 验证通过，仅 `OPENAI_API_KEY` 仍缺失。** Codex 内置浏览器已实际操作 Twilio Active numbers 页面和本机工作台；Chrome 控制仍存在连接故障。OpenAI 项目已选择，但本机保存确认被当前审批策略立即拒绝，尚未创建或写入密钥，恢复步骤见下文。号码未改绑，OpenAI Realtime、真实电话和延迟仍未验收；当前为尚未合入 `main` 的草稿开发分支，提交与同步状态以 Git 核验为准。
 
-本轮 `npm run build`、54 项离线测试、solo ESLint、独立 scripts TypeScript 检查及锁文件 `npm ci --dry-run` 均通过；Windows 私密配置实际 fixture 验证了先为临时空文件设置私有 ACL、再写入测试秘密。完整证据见 [PROGRESS.md](PROGRESS.md)。
+2026-09-22 已验证桌面启动/停止/重启、真实 Cloudflare 隧道及访问边界；当日 `npm run build`、54 项离线测试、solo ESLint、独立 scripts TypeScript 检查及锁文件 `npm ci --dry-run` 均通过。Windows 私密配置实际 fixture 验证了先为临时空文件设置私有 ACL、再写入测试秘密。上述代码与界面证据不代表真实电话接通；完整记录见 [PROGRESS.md](PROGRESS.md)。
 
 ## 1. 安装并打开本机工作台
 
@@ -57,6 +57,12 @@ npm run check:solo
 ```
 
 该命令只输出字段名及 `ready/missing/invalid`，不联网、不打印值。所有字段格式通过也不证明账户或真实电话可用。
+
+### OpenAI 本机保存确认立即返回 `decline`
+
+2026-09-23 的确认工具报告耗时 0 ms，返回 `not_approved` / `decline`。本机 `approval_policy = "never"` 会拒绝带必填 `targetPath` 的 MCP 表单，确认界面可能根本没有显示，不能据此认定用户点击了拒绝；[Codex 官方源码](https://github.com/openai/codex/blob/main/codex-rs/codex-mcp/src/elicitation.rs)明确了该分支。
+
+用户在**当前任务输入框下方权限菜单**选择 **Ask for approval**，使后续轮次采用 `approval_policy = "on-request"`、`approvals_reviewer = "user"`，再发送“继续”。下一轮重试本机保存确认，沿用已完成的 OpenAI 项目选择，无需重新打开 picker；得到真实 `approved` 后，才创建密钥并保存到确认返回的路径。[官方权限说明](https://learn.chatgpt.com/docs/sandboxing)提供该菜单入口。仅修改全局默认配置不能保证覆盖当前任务的权限选择；不要通过修改插件、批准逻辑或伪造确认结果处理此问题。
 
 ## 3. 建立公开语音隧道
 

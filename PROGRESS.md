@@ -8,17 +8,18 @@
 
 **7 项供应商设置中，6 项 Twilio 设置已真实保存，仅 `OPENAI_API_KEY` 仍缺失。** Twilio 账户、号码及 TwiML App 的真实 API 检查均已通过；号码尚未改绑，OpenAI Realtime、双向电话与延迟尚未验收，不能称为已经可以使用。
 
-- Computer Use 已通过 Codex 内置浏览器实际读取、点击已登录的 Twilio 控制台；Chrome 控制仍返回 fetch 失败。可继续使用内置浏览器，不把 Chrome 故障描述为所有网页均不可操作。
+- Computer Use 已通过 Codex 内置浏览器实际读取、点击已登录的 Twilio 控制台，本轮再次成功打开 Active numbers 页面并切换本机工作台视图；Chrome 控制仍返回 fetch 失败。可继续使用内置浏览器，不把 Chrome 故障描述为所有网页均不可操作。
 - Twilio 账户凭据和现有号码已通过本机设置保存；`configure:twilio -- --prepare` 已真实创建并保存项目 API Key/Secret 和 TwiML App。6 项设置保存在忽略提交的本机 `.env`，不记录任何秘密值或账户资料。
 - 本机服务和新 Cloudflare 临时隧道已运行，公开 `/api/health` 探针通过，当前地址已保存到本机设置。临时域名不写入共享文档；服务和隧道是否持续在线仍需下次接手时重新核对。
 - `verify:providers` 在 `2026-09-23T04:33:26.857Z` 返回 `twilioAccount`、`twilioNumber`、`twilioApplication` 全部 `passed`；`openaiRealtime` 为 `missing`。该检查没有发起电话。
 - 旧号码 Voice/SMS 路由未改动；原语音配置备份保存在私密 `.runtime/`。尚未运行号码切换，未测真实来电、外呼、双向翻译或端到端延迟。
-- 正进入 OpenAI 项目专用密钥的安全创建/本机保存流程，尚未创建或写入密钥。此前未批准的本机保存确认属于历史结果，不能绕过新的安全流程。
-- 本轮开始时，本机 HEAD 与刚获取的远端 `FETCH_HEAD` 均为 `ea68ed1`；开发分支为 `codex/local-phone-workbench`，[草稿 PR #2](https://github.com/Richman2020/live-translation-openai-realtime-api/pull/2) 尚未合入 `main`。本次文档修改是否已推送以随后 Git 提交及远端核验为准。
+- OpenAI 安全流程已取得项目选择，但本机保存确认立即返回 `not_approved` / `decline`（工具报告耗时 0 ms），尚未创建或写入密钥。已确认当前 `approval_policy = "never"`；本地插件请求的是带必填 `targetPath` 的 MCP 表单，Codex 在此策略下会在显示表单前拒绝它。该结果不能归因为用户点击拒绝；依据见 [Codex elicitation 官方源码](https://github.com/openai/codex/blob/main/codex-rs/codex-mcp/src/elicitation.rs)。
+- 恢复方式是由用户在当前任务输入框下方权限菜单选择 **Ask for approval**（`approval_policy = "on-request"`、`approvals_reviewer = "user"`），下一轮再调用本机保存确认；沿用已完成的 OpenAI 项目选择，无需重开 picker。此次没有修改插件、批准逻辑或伪造确认结果，实际获批前不创建或写入密钥；操作依据见 [官方权限说明](https://learn.chatgpt.com/docs/sandboxing)。
+- 本轮诊断开始时，本机 HEAD 与已核对的远端开发分支均为 `8ebb24e`；开发分支为 `codex/local-phone-workbench`，[草稿 PR #2](https://github.com/Richman2020/live-translation-openai-realtime-api/pull/2) 尚未合入 `main`。本次文档修改是否已推送以随后 Git 提交及远端核验为准。
 
 ## 当前下一步（2026-09-23）
 
-1. 完成 OpenAI 项目专用密钥的安全创建与本机保存，重新运行配置检查及 `verify:providers`，取得 OpenAI Realtime `session.updated`；不将“密钥已保存”当作模型权限验证通过。
+1. 用户将当前任务权限切为 **Ask for approval** 后，在下一轮重试 OpenAI 本机保存确认，实际获批后完成项目专用密钥的安全创建与保存；重新运行配置检查及 `verify:providers`，取得 OpenAI Realtime `session.updated`，不将“密钥已保存”当作模型权限验证通过。
 2. 保持并核对本机服务和隧道；若地址变化，重新准备 TwiML App。现有 Twilio 资源已创建，不重复创建；各项 API 验证全部通过后，再运行 `configure:twilio -- --apply` 改绑已获授权的号码并读取远端核对。
 3. 使用用户指定测试号码分别验收外呼、来电、中英两个方向、字幕、挂断和故障清理，记录真实延迟与用量；未实测前不承诺可用、效果或费用。
 4. 保留并发改动，将非秘密代码与交接结果提交、推送到开发分支并核对远端；不将草稿 PR 称为已合入 `main`。
