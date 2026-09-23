@@ -23,6 +23,8 @@ export type CallView = {
   to: string;
   from: string;
   error?: string;
+  providerErrorCode?: number;
+  providerHttpStatus?: number;
   cleanupUnconfirmed?: boolean;
 };
 export type CallProvider = {
@@ -491,6 +493,24 @@ export class SessionManager extends EventEmitter {
       if (session.ended) await this.terminateLeg(session, created.sid);
     } catch (error) {
       const status = Number((error as { status?: number })?.status);
+      // Only bounded numeric diagnostics may leave this process. SDK messages,
+      // URLs, request options and stacks can contain credentials or phone data.
+      const code = (error as { code?: unknown })?.code;
+      if (
+        typeof code === 'number' &&
+        Number.isInteger(code) &&
+        code > 0 &&
+        code <= 999999
+      )
+        session.view.providerErrorCode = code;
+      const providerStatus = (error as { status?: unknown })?.status;
+      if (
+        typeof providerStatus === 'number' &&
+        Number.isInteger(providerStatus) &&
+        providerStatus >= 400 &&
+        providerStatus <= 599
+      )
+        session.view.providerHttpStatus = providerStatus;
       // A definitive 4xx rejects creation. Transport failures/5xx may have
       // accepted it: keep the callback nonce alive and refuse a safe shutdown
       // until a signed callback reveals and terminates that call.

@@ -240,6 +240,12 @@ async function pageFixture(requestMedia: (constraints: unknown) => Promise<unkno
   element('phone-number').value = '+12125551234';
   return {
     element, requests, device, sdkConnects: () => sdkConnects, media: () => mediaHandedToSdk,
+    callEvent(patch: Record<string, unknown>) {
+      assert.ok(activeSession, 'create a call before delivering its provider event');
+      activeSession = { ...activeSession, ...patch };
+      sources[0].handlers.get('call')({ data: JSON.stringify(activeSession) });
+      if (['failed', 'completed'].includes(activeSession.status)) activeSession = null;
+    },
     incoming() {
       activeSession = { id: `incoming-${++sessionCounter}`, direction: 'inbound', status: 'ringing', from: '+12125551234' };
       const call = new FakeCall('pending');
@@ -285,6 +291,23 @@ test('real page handlers reuse authorized microphone media and distinguish permi
   assert.match(denied.element('app-error').textContent, /麦克风访问未获允许/);
   assert.equal(denied.requests.includes('POST /api/calls'), false);
   assert.equal(denied.element('start-call').disabled, false);
+});
+
+test('a rejected provider call event visibly identifies Twilio 21216 without inventing its cause or retaining a busy call', async () => {
+  const stream = streamFixture();
+  const f = await pageFixture(async () => stream.stream);
+  await f.element('start-call').events.click();
+  assert.equal(f.element('start-call').disabled, true);
+  f.callEvent({ status: 'failed', error: 'TWILIO_CALL_FAILED', providerErrorCode: 21216, providerHttpStatus: 400, message: 'private-provider-message' });
+  assert.equal(f.element('app-error').hidden, false);
+  const message = f.element('app-error').textContent;
+  assert.match(message, /Twilio 已拦截这次外呼/);
+  assert.match(message, /Trust Hub/);
+  assert.match(message, /21216/);
+  assert.match(message, /HTTP 400/);
+  assert.doesNotMatch(message, /Business|必须|余额|private-provider-message/);
+  assert.equal(f.element('start-call').disabled, false);
+  assert.equal(f.element('end-call').disabled, true);
 });
 
 test('hanging up an incoming call before its status snapshot rejects SDK ringing and finds the backend session', async () => {

@@ -132,6 +132,17 @@
     return result.replace(/(?:Bearer\s+|sk-(?:proj-)?)[A-Za-z0-9_.-]+/gi, '[已隐藏]');
   }
   function toast(message) { clearTimeout(toastTimer); $('toast').textContent = message; $('toast').hidden = false; toastTimer = setTimeout(() => { $('toast').hidden = true; }, 5000); }
+  function callFailureMessage(session) {
+    let message = cleanMessage(typeof session.error === 'string' ? session.error : '', '本次通话未完成，请检查配置及号码后重试。');
+    if (session.error !== 'TWILIO_CALL_FAILED') return message;
+    // 21216 has several causes; do not infer a specific missing profile or account restriction.
+    // https://www.twilio.com/docs/api/errors/21216
+    if (session.providerErrorCode === 21216) message = 'Twilio 已拦截这次外呼，请检查 Trust Hub 客户资料审核及号码拨号限制。';
+    const diagnostics = [];
+    if (Number.isInteger(session.providerErrorCode) && session.providerErrorCode > 0 && session.providerErrorCode <= 999999) diagnostics.push(`Twilio 错误 ${session.providerErrorCode}`);
+    if (Number.isInteger(session.providerHttpStatus) && session.providerHttpStatus >= 400 && session.providerHttpStatus <= 599) diagnostics.push(`HTTP ${session.providerHttpStatus}`);
+    return diagnostics.length ? `${message}（${diagnostics.join('，')}）` : message;
+  }
   function showError(message) { $('app-error').textContent = cleanMessage(message); $('app-error').hidden = false; }
   function clearError() { $('app-error').hidden = true; $('app-error').textContent = ''; }
   function saveLocal(key, data) { try { localStorage.setItem(key, JSON.stringify(data)); return true; } catch { toast('浏览器未能保存记录，本次对话仍可导出。'); return false; } }
@@ -245,7 +256,7 @@
     if (session && terminal(session.status) && !requiresCleanup(session)) {
       if (activeSession?.id !== session.id && record?.id !== session.id) return;
       finishRecord(session.status); activeSession = null; dialing = false; ending = false; clearSdkCall();
-      if (session.error) showError(cleanMessage(typeof session.error === 'string' ? session.error : '', '本次通话未完成，请检查配置及号码后重试。'));
+      if (session.error) showError(callFailureMessage(session));
     } else if (session) {
       if (!record || record.id !== session.id) { if (record && !record.endedAt) finishRecord('completed'); record = makeRecord(session); $('transcript').replaceChildren(); $('empty-conversation').hidden = false; }
       activeSession = session; record.status = session.status;

@@ -216,6 +216,99 @@ test('provider failure ends both legs and produces a failed call, without exposi
   assert.deepEqual(f.ended.sort(), [localSid, remoteSid].sort());
 });
 
+test('definitive call creation rejection exposes only numeric diagnostics and cleans up the browser leg', async (t) => {
+  const secret = 'private-provider-details-never-publish';
+  const f = fixture(t, {
+    create: async () => {
+      throw Object.assign(new Error(secret), {
+        code: 21215,
+        status: 403,
+        moreInfo: `https://example.com/${secret}`,
+        details: { account: secret, token: secret },
+      });
+    },
+  });
+  const call = browser(f);
+  const local = attach(
+    f.manager,
+    call.id,
+    'local',
+    call.connectionParams.nonce,
+    localSid,
+  );
+  await tick();
+  assert.equal(f.manager.activeSession, null);
+  assert.equal(f.manager.isCleanupConfirmed(call.id), true);
+  assert.equal(local.socket.readyState, 3);
+  assert.deepEqual(f.ended, [localSid]);
+  const ended = f.events.at(-1).data;
+  assert.equal(ended.status, 'failed');
+  assert.equal(ended.error, 'TWILIO_CALL_FAILED');
+  assert.equal(ended.providerErrorCode, 21215);
+  assert.equal(ended.providerHttpStatus, 403);
+  assert.equal(JSON.stringify(f.events).includes(secret), false);
+});
+
+test('malformed provider codes are omitted rather than coerced or echoed', async (t) => {
+  for (const code of [
+    'private-code',
+    '21215',
+    -1,
+    0,
+    1.5,
+    1000000,
+    NaN,
+    Infinity,
+  ]) {
+    const f = fixture(t, {
+      create: async () => {
+        throw { status: 400, code };
+      },
+    });
+    const call = browser(f);
+    attach(f.manager, call.id, 'local', call.connectionParams.nonce, localSid);
+    await tick();
+    assert.equal(f.manager.activeSession, null);
+    assert.equal(f.manager.isCleanupConfirmed(call.id), true);
+    assert.equal(f.events.at(-1).data.providerHttpStatus, 400);
+    assert.equal(
+      Object.hasOwn(f.events.at(-1).data, 'providerErrorCode'),
+      false,
+    );
+    assert.equal(JSON.stringify(f.events).includes('private-code'), false);
+  }
+});
+
+test('safe diagnostics preserve ambiguous creation cleanup until a signed callback confirms the leg', async (t) => {
+  const f = fixture(t, {
+    create: async () => {
+      throw Object.assign(new Error('private transport details'), {
+        status: 503,
+        code: 20500,
+      });
+    },
+  });
+  const call = browser(f);
+  attach(f.manager, call.id, 'local', call.connectionParams.nonce, localSid);
+  await tick();
+  assert.equal(f.manager.activeSession.cleanupUnconfirmed, true);
+  assert.equal(f.manager.activeSession.providerHttpStatus, 503);
+  assert.equal(f.manager.activeSession.providerErrorCode, 20500);
+  assert.equal(f.manager.isCleanupConfirmed(call.id), false);
+  assert.equal(
+    JSON.stringify(f.events).includes('private transport details'),
+    false,
+  );
+  const nonce = new URL(f.created[0].statusCallback).searchParams.get('nonce');
+  f.manager.handleStatus(call.id, 'remote', nonce, {
+    CallSid: remoteSid,
+    CallStatus: 'completed',
+  });
+  await tick();
+  assert.equal(f.manager.activeSession, null);
+  assert.equal(f.manager.isCleanupConfirmed(call.id), true);
+});
+
 test('a late successful create after hangup is immediately terminated and never revives the session', async (t) => {
   let resolveCreate: (value: { sid: string }) => void;
   const pending = new Promise<{ sid: string }>((resolve) => {
