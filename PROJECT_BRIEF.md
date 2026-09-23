@@ -1,8 +1,10 @@
 # 中英双向电话翻译：项目目标与范围
 
-共享仓库：<https://github.com/Richman2020/live-translation-openai-realtime-api>。更新日期：2026-09-22。
+共享仓库：<https://github.com/Richman2020/live-translation-openai-realtime-api>。更新日期：2026-09-23。
 
 本文件保存用户需求、决定与实现范围；验证进度见 [PROGRESS.md](PROGRESS.md)，运行步骤见 [LOCAL_SETUP.md](LOCAL_SETUP.md)，协作规则见 [AGENTS.md](AGENTS.md)。
+
+**2026-09-23 当前进度：6 项 Twilio 设置已保存，资源准备完成，账户/号码/TwiML App 的真实 API 验证通过；7 项供应商配置中仅 `OPENAI_API_KEY` 仍缺失。** 本机服务、新隧道与公开探针已验证；正在进入 OpenAI 项目专用密钥安全流程，尚未创建。号码未改绑，旧 Voice/SMS 路由未动，真实通话与延迟未测，项目尚不能称为可用。Codex 内置浏览器已实际操作 Twilio 页面，Chrome 控制仍 fetch 失败。
 
 ## 用户要完成的事情
 
@@ -27,17 +29,19 @@
 | 通话操作 | 单通话主动拨号、接听/拒接、挂断、静音、忙线拦截与失败状态 | 尚未用真实 Twilio 电话验证 |
 | 双向翻译 | 我方普通话→英语、对方英语→普通话；双流配对，默认 `gpt-realtime-1.5` | 模型权限、音质、效果与延迟尚未实测 |
 | 字幕与记录 | 实际事件驱动原文/译文；可选浏览器本机历史与导出，默认不保存 | 隔离界面检查不是实际语音转写证据 |
-| 配置与准备 | 本机私密设置、配置检查、手动供应商 API 验证、临时隧道与 Twilio 准备/改绑脚本 | 当前供应商运行凭据未配置，未完成真实连接或改绑 |
+| 配置与准备 | 本机私密设置、配置检查、手动供应商 API 验证、临时隧道与 Twilio 准备/改绑脚本；6 项 Twilio 设置及资源准备已完成 | Twilio 三项真实 API 检查通过；OpenAI 密钥、Realtime 验证、号码改绑仍待完成 |
 | 线路结束 | 挂断清理；未确认时保留会话、允许重试并阻止新拨号；停止服务先取得安全确认 | 已有离线边界测试，真实故障与计费停止待实测 |
 
 页面不生成模拟对话，不把“配置齐全”显示为通话验收成功。浏览器只有用户开启通话后才注册设备，拨号或接听时请求麦克风权限。控制 API 只允许本机鉴权访问；公开入口提供签名校验的语音路由及最小健康探针，长期供应商密钥不发到浏览器。
 
-当前证据为编译、离线测试和隔离浏览器 UI 验证；尚无真实 OpenAI/Twilio API、双向电话或端到端延迟结果。上游的 `src/routes/outbound-call.ts` 仍是 Flex 号码回调，不应与新增 solo 主动拨号混淆。
+当前证据包括既有编译、离线测试和隔离浏览器 UI 验证，以及 2026-09-23 的真实 Twilio API 结果：`verify:providers` 在 `2026-09-23T04:33:26.857Z` 的 `twilioAccount`、`twilioNumber`、`twilioApplication` 全部 `passed`，`openaiRealtime` 为 `missing`。尚无真实 OpenAI Realtime、双向电话或端到端延迟结果。上游的 `src/routes/outbound-call.ts` 仍是 Flex 号码回调，不应与新增 solo 主动拨号混淆。
+
+2026-09-22 的“供应商运行凭据未配置、尚无真实 OpenAI/Twilio API 结果”保留为历史快照，详见 [PROGRESS.md](PROGRESS.md)；不可再作为本机当前状态。真实设置只在忽略的 `.env`，原号码语音备份只在私密 `.runtime/`；共享文档不保存 SID、号码、密钥、临时域名或私密账户资料。
 
 ## 下一阶段：配置并验收真实链路
 
-1. 使用已有安全渠道完成本机 OpenAI/Twilio 私密配置；缺少完整凭据时明确缺失，不把网页登录成功当成应用已接入。
-2. 本机服务先运行并保存设置，建立公开 HTTPS/WSS 隧道，再运行 `configure:twilio -- --prepare` 准备 API Key/TwiML App。该步骤会创建或更新资源，但不切换号码入站回调。
+1. 通过 OpenAI 项目专用密钥的安全创建/本机保存流程补齐 `OPENAI_API_KEY`，再验证 Realtime 会话；当前尚未创建，不把网页登录或密钥保存当作真实模型验证。
+2. 保持并核对本机服务和公开 HTTPS/WSS 隧道。`configure:twilio -- --prepare` 已完成，不重复创建已有资源；隧道地址改变后再更新 TwiML App 并重新验证。旧号码 Voice/SMS 路由仍未改动。
 3. 实际供应商 API 验证通过后，运行 `configure:twilio -- --apply`。它再次验证，最后切换已获授权复用的号码并核对远端结果。
 4. 使用用户指定的测试号码，分别验证主动外呼和来电、中英两个方向、字幕、拒接/忙线/掉线及任一侧挂断，记录延迟和费用。
 5. 根据真实结果优化体验，再决定额外渠道、模型或桌面封装；当前快捷方式打开浏览器应用，并非 Electron 原生安装包。

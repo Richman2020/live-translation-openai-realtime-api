@@ -1,8 +1,28 @@
 # 项目完整复核：已实现与剩余工作
 
-复核日期：2026-09-22（用户 Windows 电脑）。共享仓库：<https://github.com/Richman2020/live-translation-openai-realtime-api>。
+复核更新：2026-09-23（用户 Windows 电脑）。共享仓库：<https://github.com/Richman2020/live-translation-openai-realtime-api>。
 
-**结论：独立 solo 工作台及核心通话代码已实现，但尚不能真实使用；不能说只差两个 API 密钥、其余已经全部完成。** 供应商配置、资源准备、号码改绑与真实通话验收均未完成，另有明确的体验和恢复能力缺项。
+**当前结论：6 项 Twilio 设置和资源准备已完成，真实 Twilio API 检查通过；7 项供应商配置中仅 `OPENAI_API_KEY` 仍缺失。** 号码尚未改绑，OpenAI Realtime 与真实通话/延迟尚未验证，因此仍不能称为可以使用。第 4 节的体验和恢复能力缺项仍存在。
+
+## 2026-09-23 最新接入与验证
+
+| 检查对象 | 本轮实际结果 | 证据边界 |
+| --- | --- | --- |
+| 网页控制 | Codex 内置浏览器实际读取、点击已登录的 Twilio 页面；Chrome 仍 fetch 失败 | 内置浏览器可操作不代表 Chrome 已修复 |
+| 6 项 Twilio 配置 | 账户凭据、现有号码已通过本机设置保存；`configure:twilio -- --prepare` 已真实创建并保存 API Key/Secret 与 TwiML App | 只保存在忽略的 `.env`；不记录 SID、号码、秘密值或账户资料 |
+| 本机与公开入口 | 本机服务、新 Cloudflare 临时隧道运行，公开 `/api/health` 探针通过 | 临时地址不入库；下次接手须重查在线状态 |
+| Twilio API | `twilioAccount`、`twilioNumber`、`twilioApplication` 全部 `passed` | `verify:providers` 时间为 `2026-09-23T04:33:26.857Z`；真实 API 检查没有拨号 |
+| OpenAI | `OPENAI_API_KEY` 缺失，`openaiRealtime` 为 `missing`；正进入项目专用密钥安全流程，尚未创建 | 尚无 Realtime `session.updated`、模型权限或语音证据 |
+| 号码路由与电话 | 旧 Voice/SMS 路由未动，原语音配置已备份到私密 `.runtime/` | 未改绑、未实测外呼/来电、双向翻译或延迟 |
+| 共享版本 | 开始本轮时 HEAD 与刚获取的远端工作分支均为 `ea68ed1`，远端 `main` 仍为 `5fabf51` | [草稿 PR #2](https://github.com/Richman2020/live-translation-openai-realtime-api/pull/2) 未合入；新文档推送以 Git 核验为准 |
+
+当前顺序：完成 OpenAI 安全创建与本机保存 → 重跑配置及供应商验证，取得全部通过 → 核对服务与当前隧道地址 → `configure:twilio -- --apply` 最后改绑并读取远端核验 → 用用户指定号码验收真实电话、两个翻译方向、字幕、挂断与延迟。Twilio 资源已准备，不重复创建；域名变化后应更新 App 并重新验证。
+
+## 2026-09-22 完整代码复核历史快照
+
+下方第 1–3 节保留 2026-09-22 的证据与当时执行计划，包括“7 项 missing”“没有创建供应商资源”等旧状态；当前接入结果以上方 2026-09-23 为准。第 4–5 节的实现限制与正式验收口径仍适用。
+
+**2026-09-22 当时结论：独立 solo 工作台及核心通话代码已实现，但尚不能真实使用；不能说只差两个 API 密钥、其余已经全部完成。** 当时供应商配置、资源准备、号码改绑与真实通话验收均未完成，另有明确的体验和恢复能力缺项。
 
 ## 1. 本机与 GitHub 为什么此前结论不同
 
@@ -12,7 +32,7 @@
 - 完整代码、检查记录和剩余清单已推送到 `codex/local-phone-workbench`，交付提交 `457ea22f99e7af3da3efe3777dd17dc7b84b8b7d` 已通过远端分支 SHA 和 GitHub 文件接口核对。已建立[草稿 PR #2](https://github.com/Richman2020/live-translation-openai-realtime-api/pull/2)，尚未合入 `main`；本记录后续维护提交以该分支最新提交为准。
 - 网页版后续应显式读取该开发分支及本文件。若仅读取尚未合并的 `main`，仍会看到旧 Flex 版本。GitHub 代码同步也不代表网页版能读取本机密钥或自动接通电话。
 
-## 2. 当前能力与证据
+## 2. 2026-09-22 能力与证据快照
 
 | 项目 | 代码/实际检查 | 仍缺什么 |
 | --- | --- | --- |
@@ -29,7 +49,7 @@
 
 本轮只验证界面 HTTP 可达和已有启动入口，没有重新取得浏览器视觉操作结果；先前的隔离浏览器 UI 检查属于历史证据。
 
-## 3. 必须完成的供应商接入
+## 3. 2026-09-22 供应商缺项与当时计划（历史）
 
 `npm run check:solo` 本轮实际输出以下 7 项 `missing`，只记录名称，不记录秘密值：
 

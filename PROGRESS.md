@@ -1,10 +1,31 @@
 # 项目进度与交接
 
-更新日期：2026-09-22。共享仓库：<https://github.com/Richman2020/live-translation-openai-realtime-api>。
+更新日期：2026-09-23。共享仓库：<https://github.com/Richman2020/live-translation-openai-realtime-api>。
 
 需求见 [PROJECT_BRIEF.md](PROJECT_BRIEF.md)，工作规则见 [AGENTS.md](AGENTS.md)，运行步骤见 [LOCAL_SETUP.md](LOCAL_SETUP.md)，后续执行入口见 [LOCAL_CODEX_HANDOFF.md](LOCAL_CODEX_HANDOFF.md)。
 
-## 当前结论：核心 solo 代码已实现，供应商接入与真实通话待完成
+## 当前结论（2026-09-23）：Twilio 已准备并通过 API 验证，OpenAI 与真实通话待完成
+
+**7 项供应商设置中，6 项 Twilio 设置已真实保存，仅 `OPENAI_API_KEY` 仍缺失。** Twilio 账户、号码及 TwiML App 的真实 API 检查均已通过；号码尚未改绑，OpenAI Realtime、双向电话与延迟尚未验收，不能称为已经可以使用。
+
+- Computer Use 已通过 Codex 内置浏览器实际读取、点击已登录的 Twilio 控制台；Chrome 控制仍返回 fetch 失败。可继续使用内置浏览器，不把 Chrome 故障描述为所有网页均不可操作。
+- Twilio 账户凭据和现有号码已通过本机设置保存；`configure:twilio -- --prepare` 已真实创建并保存项目 API Key/Secret 和 TwiML App。6 项设置保存在忽略提交的本机 `.env`，不记录任何秘密值或账户资料。
+- 本机服务和新 Cloudflare 临时隧道已运行，公开 `/api/health` 探针通过，当前地址已保存到本机设置。临时域名不写入共享文档；服务和隧道是否持续在线仍需下次接手时重新核对。
+- `verify:providers` 在 `2026-09-23T04:33:26.857Z` 返回 `twilioAccount`、`twilioNumber`、`twilioApplication` 全部 `passed`；`openaiRealtime` 为 `missing`。该检查没有发起电话。
+- 旧号码 Voice/SMS 路由未改动；原语音配置备份保存在私密 `.runtime/`。尚未运行号码切换，未测真实来电、外呼、双向翻译或端到端延迟。
+- 正进入 OpenAI 项目专用密钥的安全创建/本机保存流程，尚未创建或写入密钥。此前未批准的本机保存确认属于历史结果，不能绕过新的安全流程。
+- 本轮开始时，本机 HEAD 与刚获取的远端 `FETCH_HEAD` 均为 `ea68ed1`；开发分支为 `codex/local-phone-workbench`，[草稿 PR #2](https://github.com/Richman2020/live-translation-openai-realtime-api/pull/2) 尚未合入 `main`。本次文档修改是否已推送以随后 Git 提交及远端核验为准。
+
+## 当前下一步（2026-09-23）
+
+1. 完成 OpenAI 项目专用密钥的安全创建与本机保存，重新运行配置检查及 `verify:providers`，取得 OpenAI Realtime `session.updated`；不将“密钥已保存”当作模型权限验证通过。
+2. 保持并核对本机服务和隧道；若地址变化，重新准备 TwiML App。现有 Twilio 资源已创建，不重复创建；各项 API 验证全部通过后，再运行 `configure:twilio -- --apply` 改绑已获授权的号码并读取远端核对。
+3. 使用用户指定测试号码分别验收外呼、来电、中英两个方向、字幕、挂断和故障清理，记录真实延迟与用量；未实测前不承诺可用、效果或费用。
+4. 保留并发改动，将非秘密代码与交接结果提交、推送到开发分支并核对远端；不将草稿 PR 称为已合入 `main`。
+
+## 历史快照：2026-09-22 晚间结论
+
+以下至“历史记录说明”前的内容保留 2026-09-22 当时的代码和验收证据；其中“7 项缺失”“没有真实 Twilio API 验证”及旧下一步已由上方 2026-09-23 结果更新，不代表当前配置状态。
 
 **2026-09-22 晚间完整复核：不能说只差两把 API 密钥，其余全部完成。** 本次恢复 GitHub 连接并获取 `main` 的 `5fabf51`，保留并合并网页版对旧代码的检查记录。完整能力表、7 项缺失配置、实现限制和验收步骤见 [READINESS_REVIEW.md](READINESS_REVIEW.md)。完整交付提交 `457ea22` 已推送到 `codex/local-phone-workbench` 并核对远端，已建立[草稿 PR #2](https://github.com/Richman2020/live-translation-openai-realtime-api/pull/2)，尚未合入 `main`。
 
@@ -16,7 +37,7 @@
 
 **已完成代码、54 项离线测试、隔离浏览器 UI、本机桌面启停及真实公网访问边界验证；没有真实 OpenAI/Twilio API 连通、真实电话、双向翻译听感或端到端延迟结果。** 本机服务与 Cloudflare 临时隧道已经运行，`PUBLIC_BASE_URL` 已保存；仍缺少 7 项供应商配置。OpenAI 本机保存确认返回 `not_approved`，未创建或写入密钥；Twilio 内置浏览器登录页空白且 Chrome 连接故障，未取得本机运行凭据。没有改绑号码、开通 Flex 或发起电话。
 
-## 本轮本机代码与验证（2026-09-22）
+## 历史本机代码与验证（2026-09-22）
 
 本机目录为 `C:\Users\admin\Documents\ChatGPT\AI电话\live-translation-openai-realtime-api`，开发分支 `codex/local-phone-workbench`；开始开发时已同步 `main` 基线 `1c9eddf548d9783dbb90d8297022f374b742e35f`。当前作为草稿开发分支交付，尚未合入 `main`；最终 commit 和推送以 Git 历史及远端核验为准，不能把尚在本机的修改称为已同步。
 
@@ -39,7 +60,7 @@
 
 供应商长期密钥留在本机 `.env`；本机访问令牌不打印到日志。工作台/API 只接受本机鉴权访问，公开路由限签名校验的语音入口和最小 `/api/health` 标识探针。挂断失败保留“线路关闭待确认”，允许重试并阻止新拨；停止脚本只有收到 `ok: true` 与 `safeToStop: true` 后才回收自己的后台进程。
 
-## 当前下一步
+## 历史下一步（2026-09-22，当前执行以上方为准）
 
 ### 此前同步失败与本轮恢复
 
