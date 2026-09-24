@@ -1,10 +1,12 @@
 # 中英双向电话翻译：项目目标与范围
 
-共享仓库：<https://github.com/Richman2020/live-translation-openai-realtime-api>。更新日期：2026-09-23。
+共享仓库：<https://github.com/Richman2020/live-translation-openai-realtime-api>。更新日期：2026-09-24。
 
 本文件保存用户需求、决定与实现范围；验证进度见 [PROGRESS.md](PROGRESS.md)，运行步骤见 [LOCAL_SETUP.md](LOCAL_SETUP.md)，协作规则见 [AGENTS.md](AGENTS.md)。
 
 **2026-09-23 当前进度：7 项供应商设置、正式 API 验证 4/4、号码改绑、浏览器注册和真实麦克风预检均已通过。** 两次拨号到达 Twilio 浏览器线路，但目标手机通话未创建；第二次取得 Twilio `21216` / HTTP 400。当前需核对供应商对目标外呼的限制，不能断言某一账户资料缺项已被证实为根因。手机接通、来电、双向翻译音频与延迟仍未验收。内置浏览器可操作，Chrome 控制故障独立处理。
+
+2026-09-24 补充：用户说明账户是美国账户，要求继续使用此前注册的 Twilio 号码。实时核对原有号码的归属、语音能力、运行配置和回调均正确；再次实测仍返回 21216/HTTP 400，目标手机通话未创建。不得把企业档案缺失作为已确定原因，具体拒绝规则仍待供应商核实，见 [PROGRESS.md](PROGRESS.md)。
 
 ## 用户要完成的事情
 
@@ -40,7 +42,7 @@
 
 ## 下一阶段：验收真实电话链路
 
-1. 核对 Twilio 21216 对应的风险、监管和适用的 +1 Primary Profile 限制；开户地区尚待用户确认。已有获批 Individual Primary、缺 Business Primary 不足以单独证明根因；不重建已通过验证的密钥或资源，详细只读核验见 [PROGRESS.md](PROGRESS.md)。
+1. 核对 Twilio 21216 对应的风险、监管和适用的 +1 Primary Profile 限制；用户已于 2026-09-24 说明为美国账户。已有获批 Individual Primary、缺 Business Primary 不足以单独证明根因；不重建已通过验证的密钥或资源，详细只读核验见 [PROGRESS.md](PROGRESS.md)。
 2. 保持本机服务和公开 HTTPS/WSS 隧道运行。临时地址变化后更新 TwiML App 并重新验证，当前没有隧道自动恢复及自动改绑。
 3. 仅在公开地址或相关配置变化后，重新运行 `configure:twilio -- --apply` 更新号码回调并回读核验；SMS 配置保持不变。
 4. 使用用户指定的测试号码，分别验证主动外呼和来电、中英两个方向、字幕、拒接/忙线/掉线及任一侧挂断，记录延迟和费用。
