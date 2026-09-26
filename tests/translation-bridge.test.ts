@@ -215,10 +215,7 @@ test('providers start only after both authenticated legs attach and identical at
     assert.equal(update.session.type, 'realtime');
     assert.equal(update.session.audio.input.format.type, 'audio/pcmu');
     assert.equal(update.session.audio.output.format.type, 'audio/pcmu');
-    assert.equal(
-      update.session.audio.input.transcription.model,
-      'whisper-1',
-    );
+    assert.equal(update.session.audio.input.transcription.model, 'whisper-1');
     assert.equal(
       update.session.audio.input.transcription.language,
       role === 'local' ? 'zh' : 'en',
@@ -369,7 +366,132 @@ test('both speech directions translate to the opposite leg with no original-audi
     value: 350,
     at: 1350,
     scope: 'provider_generation',
+    transcriptionMs: 0,
+    queueMs: 0,
+    generationMs: 350,
   });
+  f.bridge.close();
+});
+
+test('timing separates ASR completion, queue wait and first generated audio by turn', () => {
+  const f = fixture();
+  f.pair();
+  f.responding('local', 'first', 'one');
+  f.setNow(1100);
+  f.commit('local', 'two');
+  f.setNow(1500);
+  f.transcribe('local', 'two', '第二句');
+  f.setNow(1700);
+  f.done('local', 'first');
+  f.provider('local').receive({
+    type: 'response.created',
+    response: { id: 'second' },
+  });
+  f.setNow(2000);
+  f.audio('local', Buffer.alloc(160, 10).toString('base64'), 'second');
+  assert.deepEqual(f.metrics, [
+    {
+      role: 'local',
+      name: 'speech_stop_to_first_audio_ms',
+      value: 900,
+      at: 2000,
+      scope: 'provider_generation',
+      transcriptionMs: 400,
+      queueMs: 200,
+      generationMs: 300,
+    },
+  ]);
+  f.setNow(2300);
+  f.audio('local', Buffer.alloc(160, 10).toString('base64'), 'second');
+  assert.equal(
+    f.metrics.length,
+    1,
+    'only the first audio chunk reports timing',
+  );
+  f.bridge.close();
+});
+
+test('ASR arriving before commit, late stop and missing stop do not fabricate timing', () => {
+  const f = fixture();
+  f.pair();
+  f.transcribe('remote', 'one', 'Hello');
+  f.setNow(1200);
+  f.commit('remote', 'one');
+  f.provider('remote').receive({
+    type: 'response.created',
+    response: { id: 'first' },
+  });
+  f.setNow(1400);
+  f.audio('remote', Buffer.alloc(160, 10).toString('base64'), 'first');
+  assert.equal(f.metrics[0].transcriptionMs, 0);
+  assert.equal(f.metrics[0].generationMs, 200);
+  f.done('remote', 'first');
+  f.provider('local').receive({
+    type: 'input_audio_buffer.committed',
+    item_id: 'late',
+  });
+  f.setNow(1500);
+  f.provider('local').receive({
+    type: 'input_audio_buffer.speech_stopped',
+    item_id: 'late',
+  });
+  f.setNow(1600);
+  f.transcribe('local', 'late', '你好');
+  f.provider('local').receive({
+    type: 'response.created',
+    response: { id: 'late' },
+  });
+  f.setNow(1800);
+  f.audio('local', Buffer.alloc(160, 10).toString('base64'), 'late');
+  assert.equal(f.metrics[1].transcriptionMs, 100);
+  assert.equal(f.metrics[1].generationMs, 200);
+  f.done('local', 'late');
+  f.provider('local').receive({
+    type: 'input_audio_buffer.committed',
+    item_id: 'missing',
+  });
+  f.transcribe('local', 'missing', '没有停止事件');
+  f.provider('local').receive({
+    type: 'response.created',
+    response: { id: 'missing' },
+  });
+  f.audio('local', Buffer.alloc(160, 10).toString('base64'), 'missing');
+  f.setNow(1900);
+  f.provider('local').receive({
+    type: 'input_audio_buffer.speech_stopped',
+    item_id: 'missing',
+  });
+  f.setNow(2000);
+  f.audio('local', Buffer.alloc(160, 10).toString('base64'), 'missing');
+  assert.equal(f.metrics.length, 2);
+  f.bridge.close();
+});
+
+test('a clock moving backward omits timing instead of reporting zero latency', () => {
+  const f = fixture();
+  f.pair();
+  f.responding('local');
+  f.setNow(900);
+  f.audio('local', Buffer.alloc(160, 10).toString('base64'));
+  f.setNow(1100);
+  f.audio('local', Buffer.alloc(160, 10).toString('base64'));
+  assert.deepEqual(f.metrics, []);
+  assert.equal(f.phones.remote.sent.length, 2);
+  f.bridge.close();
+});
+
+test('a failing timing subscriber never interrupts delivery or changes its scope to hearing', () => {
+  const f = fixture({
+    onMetric() {
+      throw new Error('diagnostic-only');
+    },
+  });
+  f.pair();
+  f.responding('local');
+  f.setNow(1250);
+  f.audio('local', Buffer.alloc(160, 10).toString('base64'));
+  assert.equal(f.phones.remote.sent[0].event, 'media');
+  assert.deepEqual(f.failures, []);
   f.bridge.close();
 });
 
@@ -767,9 +889,9 @@ test('source JSON preserves quotes, newlines and instruction-shaped text as one 
         f.pair();
         f.commit(role, 'source_boundary');
         f.transcribe(role, 'source_boundary', sourceText);
-        const requests = f.provider(role).sent.filter(
-          (event) => event.type === 'response.create',
-        );
+        const requests = f
+          .provider(role)
+          .sent.filter((event) => event.type === 'response.create');
         assert.equal(requests.length, 1);
         const response = requests[0].response;
         assert.equal(response.conversation, 'none');

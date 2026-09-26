@@ -20,6 +20,9 @@ export type TranslationMetric = {
   value: number;
   at: number;
   scope: 'provider_generation';
+  transcriptionMs?: number;
+  queueMs?: number;
+  generationMs?: number;
 };
 
 export type TranslationConnection = {
@@ -76,6 +79,8 @@ type AudioDelivery = {
   streamSid?: string;
 };
 type ActiveTurn = Turn & {
+  requestedAt: number;
+  transcribedAt: number;
   responseId?: string;
   measured: boolean;
   timer: ReturnType<typeof setTimeout>;
@@ -97,7 +102,7 @@ type Provider = {
   stopped: Map<string, number>;
   committed: Set<string>;
   transcribed: Set<string>;
-  transcriptions: Map<string, string>;
+  transcriptions: Map<string, { text: string; at: number }>;
   closingTimer?: ReturnType<typeof setTimeout>;
 };
 
@@ -596,7 +601,14 @@ export class TranslationBridge {
       event.type === 'input_audio_buffer.speech_stopped' &&
       isId(event.item_id)
     ) {
-      provider.stopped.set(event.item_id, this.now());
+      const stoppedAt = this.now();
+      const existingTurn =
+        provider.active?.itemId === event.item_id
+          ? provider.active
+          : provider.turns.find((turn) => turn.itemId === event.item_id);
+      if (existingTurn) existingTurn.stoppedAt ??= stoppedAt;
+      else if (!provider.stopped.has(event.item_id))
+        provider.stopped.set(event.item_id, stoppedAt);
       if (provider.stopped.size > 64)
         provider.stopped.delete(provider.stopped.keys().next().value);
     } else if (event.type === 'input_audio_buffer.committed') {
@@ -638,7 +650,10 @@ export class TranslationBridge {
           provider.transcribed.delete(
             provider.transcribed.values().next().value,
           );
-        provider.transcriptions.set(event.item_id, event.transcript);
+        provider.transcriptions.set(event.item_id, {
+          text: event.transcript,
+          at: this.now(),
+        });
         if (provider.transcriptions.size > MAX_TURNS) {
           this.fail(`translation_queue_full:${role}`);
           return;
@@ -692,16 +707,39 @@ export class TranslationBridge {
           this.deliveryProgress(turn.audio);
         },
       );
-      if (!this.closed && !turn.measured && turn.stoppedAt !== undefined) {
+      if (!this.closed && !turn.measured) {
         turn.measured = true;
         const at = this.now();
-        this.options.onMetric?.({
+        // Never relabel a later chunk as the first, even if stop arrives late.
+        if (
+          turn.stoppedAt === undefined ||
+          at < turn.stoppedAt ||
+          at < turn.requestedAt
+        )
+          return;
+        const readyAt = Math.max(turn.stoppedAt, turn.transcribedAt);
+        const ordered = turn.requestedAt >= readyAt && at >= turn.requestedAt;
+        // Server receipt times only. VAD silence, input transit, output transit,
+        // playback queues and actual hearing are outside this measurement.
+        const metric: TranslationMetric = {
           role,
           name: 'speech_stop_to_first_audio_ms',
-          value: Math.max(0, at - turn.stoppedAt),
+          value: at - turn.stoppedAt,
           at,
           scope: 'provider_generation',
-        });
+          ...(ordered
+            ? {
+                transcriptionMs: readyAt - turn.stoppedAt,
+                queueMs: turn.requestedAt - readyAt,
+                generationMs: at - turn.requestedAt,
+              }
+            : {}),
+        };
+        try {
+          this.options.onMetric?.(metric);
+        } catch {
+          /* Diagnostics cannot interrupt audio delivery. */
+        }
       }
     } else if (
       event.type === 'response.output_audio_transcript.delta' ||
@@ -724,7 +762,7 @@ export class TranslationBridge {
     // Silence needs neither generation nor a queue deadline, even while a
     // previous nonempty sentence is still being translated.
     provider.turns = provider.turns.filter((turn) => {
-      const text = provider.transcriptions.get(turn.itemId);
+      const text = provider.transcriptions.get(turn.itemId)?.text;
       if (text === undefined || text.trim()) return true;
       clearTimeout(turn.timer);
       provider.transcriptions.delete(turn.itemId);
@@ -737,7 +775,8 @@ export class TranslationBridge {
     if (!provider.transcriptions.has(turn.itemId)) return;
     provider.turns.shift();
     clearTimeout(turn.timer);
-    const text = provider.transcriptions.get(turn.itemId);
+    const transcription = provider.transcriptions.get(turn.itemId);
+    const { text } = transcription;
     provider.transcriptions.delete(turn.itemId);
     const timer = setTimeout(
       () => this.fail(`openai_response_timeout:${role}`),
@@ -746,6 +785,8 @@ export class TranslationBridge {
     timer.unref?.();
     provider.active = {
       ...turn,
+      requestedAt: this.now(),
+      transcribedAt: transcription.at,
       measured: false,
       timer,
       audio: {

@@ -458,6 +458,13 @@ export class SessionManager extends EventEmitter {
               data: { ...audio, sessionId: session.view.id },
             });
           },
+          onMetric: (metric) => {
+            if (!session.ended)
+              this.emit('event', {
+                event: 'translation-metric',
+                data: { ...metric, sessionId: session.view.id },
+              });
+          },
         });
       }
       session.bridge.attach(role, socket, start.streamSid);

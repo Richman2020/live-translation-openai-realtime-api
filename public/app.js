@@ -3,6 +3,7 @@
 (async () => {
   const { createCallLifecycle, createDeviceMediaOwner, microphoneMessages } = await import('./call-lifecycle.js');
   const { createAudioOutput } = await import('./audio-output.js');
+  const { createMicrophoneInput } = await import('./microphone-input.js');
   const $ = id => document.getElementById(id);
   const tokenKey = 'ai-phone-local-token';
   const historyKey = 'ai-phone-calls-v1';
@@ -102,7 +103,9 @@
   const recoveringTranslationRoles = new Set();
   let translationRecoveryHint = false;
   const audioDelivery = new Map();
+  const translationTiming = new Map();
   const audioOutput = createAudioOutput({ onChange: () => renderStatus() });
+  const microphoneInput = createMicrophoneInput({ mediaDevices: navigator.mediaDevices, onChange: snapshot => renderMicrophoneInput(snapshot) });
   const callLifecycle = createCallLifecycle({
     requestMedia: navigator.mediaDevices?.getUserMedia ? constraints => navigator.mediaDevices.getUserMedia(constraints) : null,
     onChange: () => renderStatus(),
@@ -265,6 +268,7 @@
     $('bridge-caption').textContent = phase === 'reconnecting' ? callPhases[phase] : translationRecovering ? '翻译短暂中断，正在恢复；请稍后重说刚才未完成的一句。' : currentState === 'active' && translationRecoveryHint ? '翻译连接已恢复，请重说刚才未完成的一句。' : currentState === 'active' ? '中文与英文，正在传递' : phase === 'microphone' ? callPhases[phase] : currentState === 'ringing' ? '正在呼叫对方，等待接听' : callPhases[phase] || '连接后，听见彼此的语言';
     $('call-timer').textContent = timeText(duration());
     renderAudioOutput();
+    renderMicrophoneInput();
     $('browser-playback').textContent = !callDiagnostics ? '浏览器接收与播放器状态将在通话时显示。' :
       `${callDiagnostics.outputDetected ? '本次已检测到接收声音' : '尚未检测到接收声音'} · ${callDiagnostics.playerState || '等待播放器状态'}`;
   }
@@ -281,6 +285,24 @@
     select.disabled = !registered || busy() || enabling || !snapshot.supported || snapshot.status !== 'idle';
     $('test-audio-output').disabled = !registered || busy() || enabling || snapshot.status !== 'idle';
     $('audio-output-status').textContent = !registered ? '开启通话后，可选择耳机并试听；试听不会拨号。' : snapshot.message;
+  }
+  function renderMicrophoneInput(snapshot = microphoneInput.snapshot) {
+    const select = $('microphone-input');
+    const devices = [{ deviceId: '', label: '系统默认麦克风', available: true }, ...snapshot.devices];
+    const signature = JSON.stringify(devices);
+    if (select.dataset.devices !== signature) {
+      select.replaceChildren(...devices.map(item => {
+        const option = element('option', '', item.label); option.value = item.deviceId; option.disabled = !item.available; return option;
+      }));
+      select.dataset.devices = signature;
+    }
+    select.value = snapshot.selectedId;
+    select.disabled = busy() || enabling || snapshot.status === 'refreshing';
+    $('refresh-microphones').disabled = busy() || enabling || snapshot.status === 'refreshing';
+    $('microphone-input-status').textContent = snapshot.message;
+    $('microphone-actual').textContent = callLifecycle.current?.microphoneReady
+      ? `本次实际采音：${callLifecycle.current.microphoneName || '浏览器未提供设备名称'}。`
+      : '尚未启用麦克风；通话时显示实际采音设备。';
   }
   function renderChecks() {
     $('configuration-checks').replaceChildren();
@@ -330,7 +352,7 @@
       clearCleanupError();
       if (session.error) showError(callFailureMessage(session));
     } else if (session) {
-      if (!record || record.id !== session.id) { if (record && !record.endedAt) finishRecord('completed'); audioDelivery.clear(); renderAudioDelivery(); record = makeRecord(session); $('transcript').replaceChildren(); $('empty-conversation').hidden = false; }
+      if (!record || record.id !== session.id) { if (record && !record.endedAt) finishRecord('completed'); audioDelivery.clear(); translationTiming.clear(); renderAudioDelivery(); record = makeRecord(session); $('transcript').replaceChildren(); $('empty-conversation').hidden = false; }
       activeSession = session; record.status = session.status;
       if (session.status === 'active' && !record.connectedAt) record.connectedAt = Date.now();
       $('transcript-subtitle').textContent = `${session.direction === 'inbound' ? '来电' : '拨出'} · ${record.number} · ${statusNames[session.status] || session.status}`;
@@ -364,6 +386,7 @@
     receive('transcript', appendTranscript);
     receive('translation-connection', applyTranslationConnection);
     receive('translation-audio', applyAudioDelivery);
+    receive('translation-metric', applyTranslationTiming);
     receive('error', value => showError(cleanMessage(value.message || value.error, '通话服务报告错误，请检查连接状态。')));
     eventSource.onerror = () => { eventsOnline = false; renderStatus(); };
   }
@@ -387,7 +410,23 @@
       const target = role === 'local' ? '英语 → 手机' : '中文 → 电脑';
       $(`audio-delivery-${role}`).textContent = !counts ? `${target}：尚无译音记录` :
         `${target}：生成 ${counts.generated} 段 · 已送出 ${counts.sent} 段 · 线路确认播放 ${counts.playback_confirmed} 段${counts.unconfirmed ? ` · 未确认 ${counts.unconfirmed} 段` : ''}${counts.silent ? ` · ${counts.silent} 段未生成声音` : ''}`;
+      const timing = translationTiming.get(role);
+      const seconds = value => `${(value / 1000).toFixed(2)} 秒`;
+      $(`translation-timing-${role}`).textContent = !timing ? `${target}：尚无服务端计时` :
+        `${target}最近一句：服务端停说事件 → 首个译音数据 ${seconds(timing.value)}` +
+        (timing.parts ? `（等待转写 ${seconds(timing.parts[0])} · 等待发起 ${seconds(timing.parts[1])} · 生成首音 ${seconds(timing.parts[2])}）` : '（分项时间不可用）');
     }
+  }
+  function applyTranslationTiming(value) {
+    if (!value || !activeSession || value.sessionId !== activeSession.id || terminal(activeSession.status) || activeSession.status === 'ending') return;
+    if (!['local', 'remote'].includes(value.role) || value.name !== 'speech_stop_to_first_audio_ms' || value.scope !== 'provider_generation') return;
+    if (!Number.isFinite(value.value) || value.value < 0 || !Number.isFinite(value.at)) return;
+    const previous = translationTiming.get(value.role);
+    if (previous && value.at < previous.at) return;
+    const parts = [value.transcriptionMs, value.queueMs, value.generationMs];
+    const complete = parts.every(part => Number.isFinite(part) && part >= 0) && Math.abs(parts.reduce((sum, part) => sum + part, 0) - value.value) < 1;
+    translationTiming.set(value.role, { value: value.value, at: value.at, parts: complete ? parts : null });
+    renderAudioDelivery();
   }
   function applyAudioDelivery(value) {
     if (!value || !record || value.sessionId !== record.id || !['local', 'remote'].includes(value.role)) return;
@@ -592,7 +631,9 @@
     let createdId = null;
     try {
       // Permission and device acquisition finish before creating any server-side call.
-      await callLifecycle.prepareMicrophone(attempt);
+      const constraints = await microphoneInput.constraints();
+      if (!callLifecycle.isCurrent(attempt)) return;
+      await callLifecycle.prepareMicrophone(attempt, constraints);
       if (!callLifecycle.isCurrent(attempt)) return;
       audioOutput.refresh();
       callLifecycle.update(attempt, { phase: 'checking' });
@@ -639,7 +680,9 @@
     acceptingAttempt = attempt;
     $('accept-call').disabled = true;
     try {
-      await callLifecycle.prepareMicrophone(attempt);
+      const constraints = await microphoneInput.constraints();
+      if (incomingCall !== call || !callLifecycle.isCurrent(attempt)) return;
+      await callLifecycle.prepareMicrophone(attempt, constraints);
       if (incomingCall !== call || !callLifecycle.isCurrent(attempt)) { callLifecycle.cancel(attempt); return; }
       audioOutput.refresh();
       await refreshStatus();
@@ -729,6 +772,8 @@
   $('enable-device').addEventListener('click', enableDevice); $('start-call').addEventListener('click', startCall); $('end-call').addEventListener('click', () => endCall());
   $('accept-call').addEventListener('click', acceptCall); $('reject-call').addEventListener('click', rejectCall);
   $('audio-output').addEventListener('change', async () => { if (!registered || busy()) return; const pending = audioOutput.select($('audio-output').value); renderStatus(); await pending; renderStatus(); });
+  $('microphone-input').addEventListener('change', () => { if (busy() || enabling) return; microphoneInput.select($('microphone-input').value); renderStatus(); });
+  $('refresh-microphones').addEventListener('click', async () => { if (busy() || enabling) return; await microphoneInput.refresh(); renderStatus(); });
   $('test-audio-output').addEventListener('click', async () => { if (!registered || busy()) return; const pending = audioOutput.test(); renderStatus(); await pending; renderStatus(); });
   $('mute-button').addEventListener('click', () => { if (!sdkCall || sdkCall === incomingCall) return; try { const nextMuted = !muted; sdkCall.mute(nextMuted); muted = nextMuted; renderStatus(); } catch { showError('未能切换麦克风状态，请检查通话连接。'); } });
   $('erase-number').addEventListener('click', () => { if (!busy()) { $('phone-number').value = $('phone-number').value.slice(0, -1); $('phone-number').focus(); } });
@@ -745,6 +790,7 @@
   window.addEventListener('pagehide', () => {
     disposed = true; clearInterval(heartbeat); eventSource?.close();
     audioOutput.bind(null);
+    microphoneInput.dispose();
     callLifecycle.cancel();
     // Best effort only; server-side presence expiry and call lifecycle are authoritative.
     if (accessToken) fetch('/api/presence', { method: 'POST', keepalive: true, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` }, body: JSON.stringify({ available: false }) }).catch(() => {});
@@ -752,6 +798,7 @@
   });
   renderSettingsForm(); applyPreferences(); renderHistory(); renderStatus(); renderAudioDelivery();
   setInterval(() => { $('call-timer').textContent = timeText(duration()); }, 1000);
+  microphoneInput.refresh();
   setInterval(() => { if (state && !disposed) refreshStatus().catch(error => showError(error.message)); }, 10000);
   if (!accessToken) { showError('请通过桌面「AI 电话」打开此页面，以取得本机访问权限。'); navigate('settings'); }
   else refreshStatus().then(next => { connectEvents(); if (!next.configured) navigate('settings'); }).catch(error => { showError(error.message); navigate('settings'); });

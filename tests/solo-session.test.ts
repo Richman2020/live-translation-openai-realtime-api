@@ -158,12 +158,34 @@ test('outbound pays for no PSTN call until authenticated local stream; then pair
   const remote = attach(f.manager, call.id, 'remote', remoteNonce, remoteSid);
   assert.equal(remote.accepted, true);
   assert.equal(f.manager.activeSession.status, 'active');
+  const metric = {
+    role: 'local' as const,
+    name: 'speech_stop_to_first_audio_ms' as const,
+    scope: 'provider_generation' as const,
+    value: 900,
+    at: 2000,
+    transcriptionMs: 400,
+    queueMs: 200,
+    generationMs: 300,
+  };
+  f.bridge().onMetric?.(metric);
+  assert.deepEqual(f.events.at(-1), {
+    event: 'translation-metric',
+    data: { ...metric, sessionId: call.id },
+  });
   assert.deepEqual(f.attached, ['local', 'remote']);
   local.socket.close();
   await tick();
   assert.equal(f.manager.activeSession, null);
   assert.equal(remote.socket.readyState, 3);
   assert.equal(f.events.at(-1).data.error, 'PHONE_STREAM_CLOSED');
+  const count = f.events.length;
+  f.bridge().onMetric?.(metric);
+  assert.equal(
+    f.events.length,
+    count,
+    'ended sessions do not emit late timing',
+  );
   f.manager.handleStatus(call.id, 'remote', remoteNonce, {
     CallSid: remoteSid,
     CallStatus: 'completed',

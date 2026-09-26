@@ -16,7 +16,14 @@ if (
   throw new Error('Invalid API_PORT');
 const sessionManager = new SessionManager();
 sessionManager.on('event', ({ event, data }) => {
-  if (!['translation-connection', 'translation-audio'].includes(event)) return;
+  if (
+    ![
+      'translation-connection',
+      'translation-audio',
+      'translation-metric',
+    ].includes(event)
+  )
+    return;
   // Fixed connection metadata only: no IDs, credentials, audio or transcripts.
   // eslint-disable-next-line no-console -- Retain the numeric close code for diagnosis.
   console.log(
@@ -32,6 +39,16 @@ sessionManager.on('event', ({ event, data }) => {
             stage: data.stage,
             generatedBytes: data.generatedBytes,
             sentBytes: data.sentBytes,
+          }
+        : {}),
+      ...(event === 'translation-metric'
+        ? {
+            name: data.name,
+            scope: data.scope,
+            value: data.value,
+            transcriptionMs: data.transcriptionMs,
+            queueMs: data.queueMs,
+            generationMs: data.generationMs,
           }
         : {}),
     }),

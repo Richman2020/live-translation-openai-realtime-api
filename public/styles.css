@@ -23,9 +23,9 @@ dialog{border:1px solid #e3e9f1;border-radius:16px;width:430px;max-width:calc(10
 
 .global-error{max-width:1390px;margin:20px auto 0}
 .audio-delivery{padding:14px 18px;font-size:12px;line-height:1.7;color:#66758a}.audio-delivery summary{cursor:pointer;font-weight:600;color:#334155}.audio-delivery p{margin:8px 0}.audio-delivery small{display:block;color:#748297}
-.audio-output-panel{margin-top:18px;padding-top:16px;border-top:1px solid #edf1f5}
-.audio-output-panel label{font-size:12px;font-weight:600;color:#526a89}
+.audio-output-panel,.microphone-input-panel{margin-top:18px;padding-top:16px;border-top:1px solid #edf1f5}
+.audio-output-panel label,.microphone-input-panel label{font-size:12px;font-weight:600;color:#526a89}
 .audio-output-controls{display:flex;gap:8px;margin-top:8px;align-items:stretch}
 .audio-output-controls select{min-width:0;flex:1;border:1px solid #dbe4ef;background:#fafcfe;border-radius:7px;padding:8px;color:var(--ink);font-size:12px}
 .audio-output-controls button{white-space:nowrap;padding:9px 11px;font-size:12px}
-.audio-output-panel p{font-size:11px;line-height:1.7;color:#66758a;margin-top:8px;overflow-wrap:anywhere}
+.audio-output-panel p,.microphone-input-panel p{font-size:11px;line-height:1.7;color:#66758a;margin-top:8px;overflow-wrap:anywhere}

@@ -38,6 +38,102 @@ test('audio diagnostics distinguish generated, sent and playback, isolate old se
   assert.match(f.element('audio-delivery-local').textContent, /尚无译音记录/);
 });
 
+test('translation timing displays each direction with milliseconds converted to seconds and genuine zero components', async () => {
+  const f = await pageFixture(async () => streamFixture().stream);
+  await f.element('start-call').events.click();
+  f.callEvent({ status: 'active' });
+  f.metricEvent({ role: 'local', value: 2300, transcriptionMs: 800, queueMs: 0, generationMs: 1500 });
+  assert.equal(f.element('translation-timing-local').textContent,
+    '英语 → 手机最近一句：服务端停说事件 → 首个译音数据 2.30 秒（等待转写 0.80 秒 · 等待发起 0.00 秒 · 生成首音 1.50 秒）');
+  assert.match(f.element('translation-timing-remote').textContent, /尚无服务端计时/);
+  f.metricEvent({ role: 'remote', value: 45125, transcriptionMs: 30000, queueMs: 125, generationMs: 15000 });
+  assert.equal(f.element('translation-timing-remote').textContent,
+    '中文 → 电脑最近一句：服务端停说事件 → 首个译音数据 45.13 秒（等待转写 30.00 秒 · 等待发起 0.13 秒 · 生成首音 15.00 秒）');
+  f.metricEvent({ role: 'local', at: 1001, value: 0, transcriptionMs: 0, queueMs: 0, generationMs: 0 });
+  assert.match(f.element('translation-timing-local').textContent, /首个译音数据 0\.00 秒（等待转写 0\.00 秒 · 等待发起 0\.00 秒 · 生成首音 0\.00 秒）/);
+  assert.match(f.element('translation-timing-remote').textContent, /45\.13 秒/);
+});
+
+test('translation timing ignores wrong metric scope, invalid totals and malformed timestamps without overwriting valid data', async () => {
+  const f = await pageFixture(async () => streamFixture().stream);
+  await f.element('start-call').events.click();
+  const valid = { role: 'local', value: 1200, transcriptionMs: 300, queueMs: 100, generationMs: 800 };
+  f.metricEvent(valid);
+  const expected = f.element('translation-timing-local').textContent;
+  const invalid: Record<string, unknown>[] = [
+    { scope: 'end_to_end' }, { name: 'round_trip_ms' }, { role: 'unknown' },
+    { value: -1 }, { value: null }, { value: undefined }, { value: '1200' },
+    { value: Infinity }, { value: NaN },
+    { at: null }, { at: undefined }, { at: '1001' }, { at: Infinity },
+  ];
+  for (const patch of invalid) {
+    f.metricEvent({ ...valid, at: 1001, ...patch });
+    assert.equal(f.element('translation-timing-local').textContent, expected, `invalid metric ${JSON.stringify(patch)}`);
+    assert.match(f.element('translation-timing-remote').textContent, /尚无服务端计时/);
+  }
+});
+
+test('translation timing reports unavailable components when fields are missing, invalid or do not add up', async () => {
+  const f = await pageFixture(async () => streamFixture().stream);
+  await f.element('start-call').events.click();
+  const valid = { role: 'local', value: 2000, transcriptionMs: 500, queueMs: 250, generationMs: 1250 };
+  const invalid: Record<string, unknown>[] = [
+    { transcriptionMs: undefined }, { queueMs: undefined }, { generationMs: undefined },
+    { transcriptionMs: null }, { queueMs: '250' }, { generationMs: -1 },
+    { generationMs: Infinity }, { generationMs: 0 }, { generationMs: 1251 },
+  ];
+  let at = 1000;
+  for (const patch of invalid) {
+    f.metricEvent({ ...valid, at: at++ });
+    assert.match(f.element('translation-timing-local').textContent, /等待转写 0\.50 秒/);
+    f.metricEvent({ ...valid, at: at++, ...patch });
+    assert.equal(f.element('translation-timing-local').textContent,
+      '英语 → 手机最近一句：服务端停说事件 → 首个译音数据 2.00 秒（分项时间不可用）');
+  }
+});
+
+test('translation timing isolates sessions, freezes during ending and after completion, and clears both directions for the next call', async () => {
+  const f = await pageFixture(async () => streamFixture().stream);
+  const metric = { role: 'local', value: 1000, transcriptionMs: 200, queueMs: 0, generationMs: 800 };
+  f.metricEvent({ ...metric, sessionId: 'session-1' });
+  assert.match(f.element('translation-timing-local').textContent, /尚无服务端计时/);
+  await f.element('start-call').events.click();
+  f.metricEvent(metric);
+  f.metricEvent({ ...metric, role: 'remote' });
+  const local = f.element('translation-timing-local').textContent;
+  const remote = f.element('translation-timing-remote').textContent;
+  f.metricEvent({ ...metric, at: 1001, value: 9000, sessionId: 'retired-session' });
+  assert.equal(f.element('translation-timing-local').textContent, local);
+  f.callEvent({ status: 'ending' });
+  f.metricEvent({ ...metric, at: 1002, value: 9000 });
+  assert.equal(f.element('translation-timing-local').textContent, local);
+  f.callEvent({ status: 'completed' });
+  for (const role of ['local', 'remote']) f.metricEvent({ ...metric, role, at: 1003, value: 9000, sessionId: 'session-1' });
+  assert.equal(f.element('translation-timing-local').textContent, local);
+  assert.equal(f.element('translation-timing-remote').textContent, remote);
+  await f.element('start-call').events.click();
+  for (const role of ['local', 'remote']) {
+    assert.match(f.element(`translation-timing-${role}`).textContent, /尚无服务端计时/);
+    f.metricEvent({ ...metric, role, at: 1004, sessionId: 'session-1' });
+    assert.match(f.element(`translation-timing-${role}`).textContent, /尚无服务端计时/);
+  }
+  f.metricEvent({ ...metric, value: 700, at: 1, transcriptionMs: 100, generationMs: 600 });
+  assert.match(f.element('translation-timing-local').textContent, /首个译音数据 0\.70 秒/);
+});
+
+test('translation timing keeps the most recent event per direction without imposing ordering across directions', async () => {
+  const f = await pageFixture(async () => streamFixture().stream);
+  await f.element('start-call').events.click();
+  f.metricEvent({ role: 'local', at: 2000, value: 1100 });
+  const latest = f.element('translation-timing-local').textContent;
+  f.metricEvent({ role: 'local', at: 1999, value: 9999 });
+  assert.equal(f.element('translation-timing-local').textContent, latest);
+  f.metricEvent({ role: 'remote', at: 1000, value: 2200 });
+  assert.match(f.element('translation-timing-remote').textContent, /首个译音数据 2\.20 秒/);
+  f.metricEvent({ role: 'local', at: 2001, value: 1500 });
+  assert.match(f.element('translation-timing-local').textContent, /首个译音数据 1\.50 秒/);
+});
+
 test('31603 preserves cleanup while avoiding a claim that the destination phone declined', async () => {
   const f = await pageFixture(async () => streamFixture().stream);
   await f.element('start-call').events.click();
@@ -170,6 +266,50 @@ test('SDK capture without a prepared stream preserves explicit device and proces
   lifecycle.cancel();
 });
 
+test('selected input is frozen for the attempt and survives SDK reacquisition of default', async () => {
+  const requests: any[] = [];
+  const stream = { ...streamFixture().stream, getAudioTracks: () => [{ label: 'Meeting N earphone', getSettings: () => ({ deviceId: 'private-device' }) }] };
+  const lifecycle = createCallLifecycle({ requestMedia: async constraints => { requests.push(constraints); return stream; } });
+  const owner = createDeviceMediaOwner(lifecycle); const attempt = lifecycle.begin();
+  const constraints = { audio: { deviceId: { exact: 'fixture-headset' }, autoGainControl: false } };
+  await lifecycle.prepareMicrophone(attempt, constraints);
+  constraints.audio.deviceId.exact = 'fixture-camera';
+  owner.bind(attempt);
+  assert.equal(await owner.getUserMedia({ audio: true }), stream);
+  assert.equal(requests.length, 1);
+  await owner.getUserMedia({ audio: { deviceId: { exact: 'default' }, autoGainControl: true } });
+  assert.equal(requests.length, 2);
+  assert.deepEqual(requests.map(value => value.audio.deviceId), [{ exact: 'fixture-headset' }, { exact: 'fixture-headset' }]);
+  assert.equal(requests[1].audio.autoGainControl, false);
+  assert.equal(attempt.microphoneName, 'Meeting N earphone');
+  lifecycle.cancel();
+  assert.equal(attempt.microphoneName, null); assert.equal(attempt.microphoneConstraints, null);
+});
+
+test('default input does not override later SDK constraints and missing labels stay unknown', async () => {
+  const requests: any[] = [];
+  const lifecycle = createCallLifecycle({ requestMedia: async constraints => { requests.push(constraints); return streamFixture().stream; } });
+  const attempt = lifecycle.begin(); await lifecycle.prepareMicrophone(attempt);
+  await lifecycle.useMicrophone(attempt, { audio: true });
+  await lifecycle.useMicrophone(attempt, { audio: { deviceId: { exact: 'sdk-choice' } } });
+  assert.deepEqual(requests[1].audio.deviceId, { exact: 'sdk-choice' });
+  assert.equal(attempt.microphoneConstraints, null); assert.equal(attempt.microphoneName, null);
+  lifecycle.cancel();
+});
+
+test('cancelled selected permission cannot publish a late microphone name or replace a new attempt', async () => {
+  const pending = deferred<unknown>(); const late = streamFixture();
+  const lifecycle = createCallLifecycle({ requestMedia: () => pending.promise });
+  const old = lifecycle.begin(); const preparing = lifecycle.prepareMicrophone(old, { audio: { deviceId: { exact: 'fixture-headset' } } });
+  await new Promise(resolve => setImmediate(resolve)); lifecycle.cancel(old);
+  await assert.rejects(preparing, { code: 'CALL_CANCELLED' });
+  const current = lifecycle.begin();
+  pending.resolve({ ...late.stream, getAudioTracks: () => [{ label: 'Retired microphone' }] });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(late.stopped(), 1); assert.equal(old.microphoneName, null); assert.equal(current.microphoneName, null);
+  lifecycle.cancel();
+});
+
 test('page reports actual capture settings and clears them after hangup', async () => {
   const stream = { ...streamFixture().stream, getAudioTracks: () => [{ getSettings: () => ({ echoCancellation: true, noiseSuppression: false }) }] };
   const f = await pageFixture(async () => stream);
@@ -177,6 +317,57 @@ test('page reports actual capture settings and clears them after hangup', async 
   assert.match(f.element('microphone-processing').textContent, /回声消除已开启.*降噪未开启.*自动音量浏览器未报告/);
   await f.element('end-call').events.click();
   assert.match(f.element('microphone-processing').textContent, /拨号或接听后显示/);
+});
+
+test('page selection and refresh do not capture and both call directions use the selected microphone exactly once', async t => {
+  for (const direction of ['outbound', 'inbound']) await t.test(direction, async () => {
+    const constraints: any[] = [];
+    const stream = { ...streamFixture().stream, getAudioTracks: () => [{ label: 'Actual headset microphone', getSettings: () => ({}) }] };
+    const f = await pageFixture(async value => { constraints.push(value); return stream; });
+    await f.element('refresh-microphones').events.click();
+    assert.ok(f.element('microphone-input').children.some((item: any) => item.textContent === 'Meeting N earphone'));
+    assert.ok(f.element('microphone-input').children.some((item: any) => item.textContent === '4K USB Camera-Audio'));
+    f.element('microphone-input').value = 'fixture-headset'; f.element('microphone-input').events.change();
+    assert.equal(constraints.length, 0);
+    if (direction === 'outbound') await f.element('start-call').events.click();
+    else { const call = f.incoming(); await f.element('accept-call').events.click(); assert.equal(call.accepted, 1); }
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(constraints.length, 1); assert.deepEqual(constraints[0].audio.deviceId, { exact: 'fixture-headset' });
+    assert.equal(f.media(), stream);
+    assert.equal(f.element('microphone-input').disabled, true); assert.equal(f.element('refresh-microphones').disabled, true);
+    assert.match(f.element('microphone-actual').textContent, /Actual headset microphone/);
+    assert.doesNotMatch(f.sdkLogs.join(' '), /fixture-headset|Actual headset microphone/);
+    await f.element('end-call').events.click();
+    assert.doesNotMatch(f.element('microphone-actual').textContent, /Actual headset microphone/);
+    assert.equal(f.element('microphone-input').value, 'fixture-headset');
+  });
+});
+
+test('a removed selected microphone fails before dialing or accepting without falling back', async t => {
+  for (const direction of ['outbound', 'inbound']) await t.test(direction, async () => {
+    let captures = 0;
+    const f = await pageFixture(async () => { captures++; return streamFixture().stream; });
+    f.element('microphone-input').value = 'fixture-headset'; f.element('microphone-input').events.change();
+    // Even without devicechange notification, the fresh pre-call inventory detects removal.
+    f.removeInput('fixture-headset');
+    if (direction === 'outbound') await f.element('start-call').events.click();
+    else { const call = f.incoming(); await f.element('accept-call').events.click(); assert.equal(call.accepted, 0); }
+    assert.equal(captures, 0); assert.equal(f.requests.includes('POST /api/calls'), false); assert.equal(f.sdkConnects(), 0);
+    assert.match(f.element('app-error').textContent, /选定的麦克风已不可用/);
+    assert.equal(f.element('microphone-input').value, 'fixture-headset');
+    const removed = f.element('microphone-input').children.find((item: any) => item.value === 'fixture-headset');
+    assert.equal(removed.disabled, true); assert.match(removed.textContent, /已不可用/);
+  });
+});
+
+test('default selection still displays the actual track label while missing names remain unknown', async t => {
+  for (const label of ['4K USB Camera-Audio', '']) await t.test(label || 'unknown', async () => {
+    const stream = { ...streamFixture().stream, getAudioTracks: () => [{ label, getSettings: () => ({}) }] };
+    const f = await pageFixture(async () => stream); await f.element('start-call').events.click();
+    assert.equal(f.element('microphone-input').value, '');
+    assert.ok(f.element('microphone-actual').textContent.includes(label || '浏览器未提供设备名称'));
+    await f.element('end-call').events.click();
+  });
 });
 
 test('canceling preparation stops a stream which has not yet been handed to the SDK', async () => {
@@ -286,13 +477,27 @@ async function pageFixture(requestMedia: (constraints: unknown) => Promise<unkno
   let sdkConnects = 0;
   let device: any;
   let outgoingCall: any;
+  let inputDevices = [
+    { kind: 'audioinput', deviceId: 'default', label: 'Default microphone' },
+    { kind: 'audioinput', deviceId: 'fixture-headset', label: 'Meeting N earphone' },
+    { kind: 'audioinput', deviceId: 'fixture-camera', label: '4K USB Camera-Audio' },
+    { kind: 'audiooutput', deviceId: 'headset', label: 'Headphones' },
+  ];
+  const mediaDevices = Object.assign(new EventEmitter(), {
+    getUserMedia: requestMedia,
+    enumerateDevices: async () => inputDevices,
+    addEventListener(name: string, listener: (...args: any[]) => void) { this.on(name, listener); },
+    removeEventListener(name: string, listener: (...args: any[]) => void) { this.off(name, listener); },
+  });
   class FakeCall extends EventEmitter {
     state: string;
     rejected = 0;
+    accepted = 0;
     constructor(state = 'connecting') { super(); this.state = state; }
     status() { return this.state; }
     disconnect() { if (this.state !== 'pending') this.emit('disconnect'); }
     reject() { this.rejected += 1; this.emit('reject'); }
+    accept() { this.accepted++; this.state = 'open'; device.options.getUserMedia({ audio: true }).then((stream: unknown) => { mediaHandedToSdk = stream; }); this.emit('accept'); }
   }
   class FakeDevice extends EventEmitter {
     options: any;
@@ -321,10 +526,11 @@ async function pageFixture(requestMedia: (constraints: unknown) => Promise<unkno
   }
   const context = vm.createContext({
     audioOutputModule: await import('../public/audio-output.js'),
+    microphoneInputModule: await import('../public/microphone-input.js'),
     lifecycleModule: { createCallLifecycle, createDeviceMediaOwner, microphoneMessages: (await import('../public/call-lifecycle.js')).microphoneMessages },
     document: { getElementById: element, querySelector: element, querySelectorAll: () => [], createElement: node, createElementNS: node, body: node() },
     window: { Twilio: { Device: FakeDevice }, history: { replaceState() {} }, addEventListener() {}, scrollTo() {} },
-    navigator: { mediaDevices: { getUserMedia: requestMedia } },
+    navigator: { mediaDevices },
     location: { hash: '#token=offline-test-access-only', pathname: '/', search: '' },
     sessionStorage: { getItem: () => null, setItem() {} }, localStorage: { getItem: (key: string) => localValues.get(key) ?? null, setItem: (key: string, value: string) => localValues.set(key, value) },
     URLSearchParams, AbortController, structuredClone, EventSource: FakeEvents, Blob,
@@ -348,7 +554,7 @@ async function pageFixture(requestMedia: (constraints: unknown) => Promise<unkno
   const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
   const importLine = "await import('./call-lifecycle.js')";
   assert.ok(source.includes(importLine));
-  await vm.runInContext(source.replace(importLine, 'lifecycleModule').replace("await import('./audio-output.js')", 'audioOutputModule'), context);
+  await vm.runInContext(source.replace(importLine, 'lifecycleModule').replace("await import('./audio-output.js')", 'audioOutputModule').replace("await import('./microphone-input.js')", 'microphoneInputModule'), context);
   await new Promise(resolve => setImmediate(resolve));
   sources[0].onopen();
   await new Promise(resolve => setImmediate(resolve));
@@ -356,6 +562,8 @@ async function pageFixture(requestMedia: (constraints: unknown) => Promise<unkno
   element('phone-number').value = '+12125551234';
   return {
     element, requests, device, sdkLogs, exports, outgoingCall: () => outgoingCall, sdkConnects: () => sdkConnects, media: () => mediaHandedToSdk,
+    removeInput(id: string) { inputDevices = inputDevices.filter(item => item.deviceId !== id); },
+    inputChanged() { mediaDevices.emit('devicechange'); },
     transcriptEvent(value: Record<string, unknown>) {
       sources[0].handlers.get('transcript')({ data: JSON.stringify({ sessionId: activeSession?.id, at: '2026-09-26T01:00:00.000Z', ...value }) });
     },
@@ -364,6 +572,10 @@ async function pageFixture(requestMedia: (constraints: unknown) => Promise<unkno
     },
     audioEvent(value: Record<string, unknown>) {
       sources[0].handlers.get('translation-audio')({ data: JSON.stringify({ sessionId: activeSession?.id, ...value }) });
+    },
+    metricEvent(value: Record<string, unknown>) {
+      sources[0].handlers.get('translation-metric')({ data: JSON.stringify({ sessionId: activeSession?.id,
+        name: 'speech_stop_to_first_audio_ms', scope: 'provider_generation', at: 1000, ...value }) });
     },
     callEvent(patch: Record<string, unknown>) {
       assert.ok(activeSession, 'create a call before delivering its provider event');

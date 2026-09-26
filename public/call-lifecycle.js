@@ -6,6 +6,7 @@ export const microphoneMessages = {
   MICROPHONE_UNSUPPORTED: '当前浏览器无法提供麦克风访问。请从桌面「AI 电话」在 Edge 或 Chrome 中打开。',
   MICROPHONE_TIMEOUT: '等待麦克风超过 30 秒，本次准备已取消。请查看当前标签页地址栏的麦克风或权限图标并允许访问；Codex 内置浏览器也需要在其标签页地址栏处理授权。',
   MICROPHONE_FAILED: '获取麦克风失败。请检查浏览器授权和录音设备后重试。',
+  MICROPHONE_SELECTED_UNAVAILABLE: '选定的麦克风已不可用，请连接设备或重新选择；本次不会改用其他麦克风。',
 };
 
 export function microphoneErrorCode(error) {
@@ -46,6 +47,13 @@ export function microphoneProcessing(stream) {
   return Object.fromEntries(['echoCancellation', 'noiseSuppression', 'autoGainControl'].map(key => [key, typeof settings?.[key] === 'boolean' ? settings[key] : null]));
 }
 
+function microphoneName(stream) {
+  try {
+    const label = stream?.getAudioTracks?.()[0]?.label;
+    return typeof label === 'string' && label.trim() ? label.trim().slice(0, 200) : null;
+  } catch { return null; }
+}
+
 export function createCallLifecycle({ requestMedia, onChange = () => {}, mediaTimeoutMs = 30000 } = {}) {
   let current = null;
   let sequence = 0;
@@ -57,7 +65,7 @@ export function createCallLifecycle({ requestMedia, onChange = () => {}, mediaTi
   const cancel = (attempt = current) => {
     if (!attempt || attempt.cancelled) return;
     attempt.cancelled = true;
-    attempt.microphoneReady = false; attempt.microphoneProcessing = null;
+    attempt.microphoneReady = false; attempt.microphoneProcessing = null; attempt.microphoneName = null; attempt.microphoneConstraints = null;
     for (const abort of [...attempt.pendingMedia]) abort();
     stopStream(attempt.preparedStream); attempt.preparedStream = null;
     // Delivered streams belong to the SDK; disconnect() owns their normal cleanup.
@@ -70,7 +78,7 @@ export function createCallLifecycle({ requestMedia, onChange = () => {}, mediaTi
     cancel,
     begin(sessionId = null) {
       cancel();
-      current = { id: ++sequence, sessionId, phase: 'preparing', microphoneReady: false, microphoneProcessing: null, failureCode: null, cancelled: false, preparedStream: null, pendingMedia: new Set() };
+      current = { id: ++sequence, sessionId, phase: 'preparing', microphoneReady: false, microphoneProcessing: null, microphoneName: null, microphoneConstraints: null, failureCode: null, cancelled: false, preparedStream: null, pendingMedia: new Set() };
       onChange(current); return current;
     },
     async connect(attempt, connect) {
@@ -85,6 +93,11 @@ export function createCallLifecycle({ requestMedia, onChange = () => {}, mediaTi
       }
     },
     async prepareMicrophone(attempt, constraints = { audio: true }) {
+      if (!isCurrent(attempt)) throw failure('CALL_CANCELLED');
+      const exact = constraints?.audio?.deviceId?.exact;
+      // Pin explicit choices across SDK devicechange reacquisition of 'default'.
+      attempt.microphoneConstraints = typeof exact === 'string' && exact
+        ? Object.freeze({ ...constraints, audio: Object.freeze({ ...constraints.audio, deviceId: Object.freeze({ exact }) }) }) : null;
       const stream = await lifecycle.acquireMicrophone(attempt, constraints);
       if (!isCurrent(attempt)) { stopStream(stream); throw failure('CALL_CANCELLED'); }
       attempt.preparedStream = stream;
@@ -99,7 +112,7 @@ export function createCallLifecycle({ requestMedia, onChange = () => {}, mediaTi
     },
     acquireMicrophone(attempt, constraints) {
       if (!isCurrent(attempt)) return Promise.reject(failure('CALL_CANCELLED'));
-      update(attempt, { phase: 'microphone', microphoneReady: false, microphoneProcessing: null, failureCode: null });
+      update(attempt, { phase: 'microphone', microphoneReady: false, microphoneProcessing: null, microphoneName: null, failureCode: null });
       return new Promise((resolve, reject) => {
         let settled = false;
         const cleanup = () => { clearTimeout(timer); attempt.pendingMedia.delete(abort); };
@@ -116,11 +129,15 @@ export function createCallLifecycle({ requestMedia, onChange = () => {}, mediaTi
         Promise.resolve().then(() => {
           if (!isCurrent(attempt)) throw failure('CALL_CANCELLED');
           if (!requestMedia) throw failure('MICROPHONE_UNSUPPORTED', 'NotSupportedError');
-          return requestMedia(voiceConstraints(constraints));
+          const pinned = attempt.microphoneConstraints;
+          const requested = pinned ? { ...constraints, ...pinned, audio: {
+            ...(typeof constraints?.audio === 'object' ? constraints.audio : {}), ...pinned.audio,
+          } } : constraints;
+          return requestMedia(voiceConstraints(requested));
         }).then(stream => {
           if (settled || !isCurrent(attempt)) { stopStream(stream); if (!settled) abort(); return; }
           settled = true; cleanup();
-          update(attempt, { phase: 'signaling', microphoneReady: true, microphoneProcessing: microphoneProcessing(stream) });
+          update(attempt, { phase: 'signaling', microphoneReady: true, microphoneProcessing: microphoneProcessing(stream), microphoneName: microphoneName(stream) });
           resolve(stream);
         }, error => {
           if (!isCurrent(attempt)) abort();
