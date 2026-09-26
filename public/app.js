@@ -77,6 +77,8 @@
     ['OPENAI_TRANSCRIPTION_MODEL', '语音转写模型', false, 'whisper-1', '当前默认 whisper-1；也可填写 gpt-4o-transcribe 或 gpt-4o-mini-transcribe。改变后请重新验证 API 并实测准确度。']
   ];
   let accessToken = '';
+  let localAccessRejected = false;
+  let displayedErrorSource = null;
   let state = null;
   let activeSession = null;
   let device = null;
@@ -162,8 +164,11 @@
     if (Number.isInteger(session.providerHttpStatus) && session.providerHttpStatus >= 400 && session.providerHttpStatus <= 599) diagnostics.push(`HTTP ${session.providerHttpStatus}`);
     return diagnostics.length ? `${message}（${diagnostics.join('，')}）` : message;
   }
-  function showError(message) { $('app-error').textContent = cleanMessage(message); $('app-error').hidden = false; }
-  function clearError() { $('app-error').hidden = true; $('app-error').textContent = ''; }
+  function showError(error) {
+    displayedErrorSource = error?.recoverableLocalConnection === true ? 'local-connection' : 'operation';
+    $('app-error').textContent = cleanMessage(typeof error === 'string' ? error : error?.message); $('app-error').hidden = false;
+  }
+  function clearError() { displayedErrorSource = null; $('app-error').hidden = true; $('app-error').textContent = ''; }
   function clearCleanupError() {
     if ([errorMessages.CALL_CLEANUP_FAILED, errorMessages.CALL_CLEANUP_UNCONFIRMED].includes($('app-error').textContent)) clearError();
   }
@@ -208,6 +213,7 @@
       let payload = {}; try { payload = await response.json(); } catch { /* A non-JSON error has a useful HTTP status. */ }
       if (!response.ok) {
         if (response.status === 401 || payload.error === 'UNAUTHORIZED') {
+          localAccessRejected = true;
           state = null; eventSource?.close(); eventsOnline = false;
           throw new Error('本机访问凭据已失效，请关闭此窗口，再从桌面「AI 电话」打开。');
         }
@@ -215,8 +221,11 @@
       }
       return payload;
     } catch (error) {
-      if (error.name === 'AbortError') throw new Error('本机服务响应超时，请检查服务状态后重试。');
-      if (error instanceof TypeError) throw new Error('无法连接本机服务，请从桌面「AI 电话」重新打开。');
+      if (error.name === 'AbortError' || error instanceof TypeError) {
+        const message = error.name === 'AbortError' ? '本机服务响应超时，请检查服务状态后重试。' : '无法连接本机服务，请从桌面「AI 电话」重新打开。';
+        // A successful status read only resolves this read failure, not an uncertain call or hangup.
+        throw Object.assign(new Error(message), { recoverableLocalConnection: path === '/api/status' });
+      }
       throw error;
     } finally { clearTimeout(timeout); }
   }
@@ -367,19 +376,24 @@
   async function refreshStatus() {
     if (refreshPending) return refreshPending;
     refreshPending = (async () => {
-      try { const next = await api('/api/status'); state = next; applySession(next.activeSession || null); renderChecks(); renderStatus(); return next; }
+      try {
+        const next = await api('/api/status');
+        if (disposed || localAccessRejected) return next;
+        state = next; if (displayedErrorSource === 'local-connection') clearError();
+        applySession(next.activeSession || null); renderChecks(); renderStatus(); connectEvents(); return next;
+      }
       catch (error) { state = null; renderStatus(); throw error; }
       finally { refreshPending = null; }
     })();
     return refreshPending;
   }
   function connectEvents() {
-    if (!accessToken || eventSource || disposed) return;
+    if (!accessToken || eventSource || disposed || localAccessRejected) return;
     eventSource = new EventSource(`/api/events?token=${encodeURIComponent(accessToken)}`);
-    eventSource.onopen = () => { eventsOnline = true; renderStatus(); refreshStatus().catch(error => showError(error.message)); };
+    eventSource.onopen = () => { if (disposed || localAccessRejected) return; eventsOnline = true; renderStatus(); refreshStatus().catch(error => showError(error)); };
     const receive = (name, handler) => eventSource.addEventListener(name, event => {
       if (!event.data) return;
-      try { handler(JSON.parse(event.data)); } catch { showError('收到的状态数据无法读取，正在重新检查。'); refreshStatus().catch(error => showError(error.message)); }
+      try { handler(JSON.parse(event.data)); } catch { showError('收到的状态数据无法读取，正在重新检查。'); refreshStatus().catch(error => showError(error)); }
     });
     receive('snapshot', value => applySession(value.activeSession || null));
     receive('call', applySession);
@@ -522,7 +536,7 @@
       next.on('error', error => { if (device !== next) return; logSdkEvent('device-error', error); showError(sdkFailureMessage(error)); });
       next.on('incoming', receiveIncoming);
       await next.register();
-    } catch (error) { showError(error.message); await destroyDevice(); }
+    } catch (error) { showError(error); await destroyDevice(); }
     finally { enabling = false; renderStatus(); }
   }
   function bindCall(call, attempt) {
@@ -583,7 +597,7 @@
       diagnostics.lastLoggedAt = Date.now(); diagnostics.inputPeak = null; diagnostics.outputPeak = null;
       if (Object.keys(entry).length) console.info('[AI Phone RTC]', JSON.stringify(entry));
     });
-    call.on('accept', () => { if (sdkCall !== call || !callLifecycle.isCurrent(attempt)) return; logSdkEvent('call-accepted'); incomingCall = null; callLifecycle.update(attempt, { phase: 'connected' }); renderStatus(); refreshStatus().catch(error => showError(error.message)); });
+    call.on('accept', () => { if (sdkCall !== call || !callLifecycle.isCurrent(attempt)) return; logSdkEvent('call-accepted'); incomingCall = null; callLifecycle.update(attempt, { phase: 'connected' }); renderStatus(); refreshStatus().catch(error => showError(error)); });
     call.on('reconnecting', error => { if (sdkCall === call) { logSdkEvent('call-reconnecting', error); callLifecycle.update(attempt, { phase: 'reconnecting' }); } });
     call.on('reconnected', () => { if (sdkCall === call) { logSdkEvent('call-reconnected'); callLifecycle.update(attempt, { phase: 'connected' }); } });
     call.on('warning', warning => {
@@ -618,7 +632,7 @@
     Object.assign(attempt, { direction: 'inbound', device, mediaOwner: deviceMediaOwner });
     incomingCall = call; bindCall(call, attempt);
     $('incoming-number').textContent = call.customParameters?.get('from') || call.parameters?.From || activeSession?.from || '收到来电';
-    navigate('workspace'); renderStatus(); refreshStatus().catch(error => showError(error.message));
+    navigate('workspace'); renderStatus(); refreshStatus().catch(error => showError(error));
   }
   async function startCall() {
     if (busy() || !registered || !eventsOnline || audioOutput.snapshot.status !== 'idle') return;
@@ -780,7 +794,7 @@
   $('phone-number').addEventListener('input', () => { $('phone-error').textContent = ''; $('phone-number').removeAttribute('aria-invalid'); });
   $('phone-number').addEventListener('keydown', event => { if (event.key === 'Enter') startCall(); });
   $('export-current').addEventListener('click', () => exportRecord(record));
-  $('refresh-status').addEventListener('click', () => refreshStatus().then(() => toast('已重新检查本机配置。')).catch(error => showError(error.message)));
+  $('refresh-status').addEventListener('click', () => refreshStatus().then(() => toast('已重新检查本机配置。')).catch(error => showError(error)));
   $('settings-form').addEventListener('submit', saveSettings); $('verify-connections').addEventListener('click', verifyConnections);
   $('help-button').addEventListener('click', () => $('help-dialog').showModal()); $('close-help').addEventListener('click', () => $('help-dialog').close()); $('help-start').addEventListener('click', () => { $('help-dialog').close(); navigate('workspace'); });
   $('clear-history').addEventListener('click', () => $('clear-dialog').showModal()); $('cancel-clear').addEventListener('click', () => $('clear-dialog').close());
@@ -799,9 +813,9 @@
   renderSettingsForm(); applyPreferences(); renderHistory(); renderStatus(); renderAudioDelivery();
   setInterval(() => { $('call-timer').textContent = timeText(duration()); }, 1000);
   microphoneInput.refresh();
-  setInterval(() => { if (state && !disposed) refreshStatus().catch(error => showError(error.message)); }, 10000);
+  setInterval(() => { if (accessToken && !localAccessRejected && !disposed) refreshStatus().catch(error => showError(error)); }, 10000);
   if (!accessToken) { showError('请通过桌面「AI 电话」打开此页面，以取得本机访问权限。'); navigate('settings'); }
-  else refreshStatus().then(next => { connectEvents(); if (!next.configured) navigate('settings'); }).catch(error => { showError(error.message); navigate('settings'); });
+  else refreshStatus().then(next => { if (!next.configured) navigate('settings'); }).catch(error => { showError(error); navigate('settings'); });
 })().catch(() => {
   const banner = document.getElementById('app-error');
   if (banner) { banner.textContent = '电话组件加载失败。请从桌面「AI 电话」重新打开；仍未恢复时请重启本机服务。'; banner.hidden = false; }

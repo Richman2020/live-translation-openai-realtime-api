@@ -445,7 +445,8 @@ test('a browser without mediaDevices reports unsupported without claiming microp
 });
 
 // Run the shipped page handlers offline, with inert DOM, media and provider fixtures.
-async function pageFixture(requestMedia: (constraints: unknown) => Promise<unknown>, now: () => number = () => Date.now()) {
+async function pageFixture(requestMedia: (constraints: unknown) => Promise<unknown>, now: () => number = () => Date.now(),
+  options: { initialStatusFailure?: 'network' | 'timeout' | { status: number; error: string } } = {}) {
   const nodes = new Map<string, any>();
   function node(): any {
     return {
@@ -468,6 +469,10 @@ async function pageFixture(requestMedia: (constraints: unknown) => Promise<unkno
   }
   const element = (id: string) => { if (!nodes.has(id)) nodes.set(id, node()); return nodes.get(id); };
   const requests: string[] = [];
+  const apiFailures = new Map<string, 'network' | 'timeout' | { status: number; error: string }>();
+  if (options.initialStatusFailure) apiFailures.set('/api/status', options.initialStatusFailure);
+  const intervals = new Map<number, { callback: () => void; delay: number }>();
+  const windowEvents = new Map<string, () => void>();
   const sdkLogs: string[] = [];
   const exports: Blob[] = [];
   const localValues = new Map();
@@ -529,17 +534,23 @@ async function pageFixture(requestMedia: (constraints: unknown) => Promise<unkno
     microphoneInputModule: await import('../public/microphone-input.js'),
     lifecycleModule: { createCallLifecycle, createDeviceMediaOwner, microphoneMessages: (await import('../public/call-lifecycle.js')).microphoneMessages },
     document: { getElementById: element, querySelector: element, querySelectorAll: () => [], createElement: node, createElementNS: node, body: node() },
-    window: { Twilio: { Device: FakeDevice }, history: { replaceState() {} }, addEventListener() {}, scrollTo() {} },
+    window: { Twilio: { Device: FakeDevice }, history: { replaceState() {} }, addEventListener(name: string, callback: () => void) { windowEvents.set(name, callback); }, scrollTo() {} },
     navigator: { mediaDevices },
     location: { hash: '#token=offline-test-access-only', pathname: '/', search: '' },
     sessionStorage: { getItem: () => null, setItem() {} }, localStorage: { getItem: (key: string) => localValues.get(key) ?? null, setItem: (key: string, value: string) => localValues.set(key, value) },
-    URLSearchParams, AbortController, structuredClone, EventSource: FakeEvents, Blob,
+    URLSearchParams, AbortController, structuredClone, EventSource: FakeEvents, Blob, TypeError,
     URL: { createObjectURL: (blob: Blob) => { exports.push(blob); return 'blob:offline-export'; }, revokeObjectURL() {} },
     Date: class extends Date { static now() { return now(); } },
     console: { info: (...values: string[]) => sdkLogs.push(values.join(' ')) },
-    setTimeout: (...args: Parameters<typeof setTimeout>) => { const timer = setTimeout(...args); timer.unref(); return timer; }, clearTimeout, setInterval: () => 1, clearInterval() {},
+    setTimeout: (...args: Parameters<typeof setTimeout>) => { const timer = setTimeout(...args); timer.unref(); return timer; }, clearTimeout,
+    setInterval: (callback: () => void, delay: number) => { const id = intervals.size + 1; intervals.set(id, { callback, delay }); return id; },
+    clearInterval: (id: number) => intervals.delete(id),
     fetch: async (path: string, options: any = {}) => {
       requests.push(`${options.method || 'GET'} ${path}`);
+      const failure = apiFailures.get(path);
+      if (failure === 'network') throw new TypeError('private fetch transport details');
+      if (failure === 'timeout') throw Object.assign(new Error('private timeout details'), { name: 'AbortError' });
+      if (failure) return { ok: false, status: failure.status, json: async () => ({ error: failure.error }) };
       let payload: any = { ok: true };
       if (path === '/api/status') payload = { configured: true, activeSession, checks: [] };
       if (path === '/api/token') payload = { token: 'offline-sdk-token' };
@@ -556,12 +567,25 @@ async function pageFixture(requestMedia: (constraints: unknown) => Promise<unkno
   assert.ok(source.includes(importLine));
   await vm.runInContext(source.replace(importLine, 'lifecycleModule').replace("await import('./audio-output.js')", 'audioOutputModule').replace("await import('./microphone-input.js')", 'microphoneInputModule'), context);
   await new Promise(resolve => setImmediate(resolve));
-  sources[0].onopen();
-  await new Promise(resolve => setImmediate(resolve));
-  await element('enable-device').events.click();
+  if (!options.initialStatusFailure) {
+    sources[0].onopen();
+    await new Promise(resolve => setImmediate(resolve));
+    await element('enable-device').events.click();
+  }
   element('phone-number').value = '+12125551234';
   return {
     element, requests, device, sdkLogs, exports, outgoingCall: () => outgoingCall, sdkConnects: () => sdkConnects, media: () => mediaHandedToSdk,
+    failApi(path: string, failure: 'network' | 'timeout' | { status: number; error: string }) { apiFailures.set(path, failure); },
+    restoreApi(path: string) { apiFailures.delete(path); },
+    eventSourceCount: () => sources.length,
+    async openEvents() { assert.ok(sources.length); sources[sources.length - 1].onopen(); await new Promise(resolve => setImmediate(resolve)); },
+    pagehide() { windowEvents.get('pagehide')?.(); },
+    async pollStatus() {
+      const matching = [...intervals.values()].filter(timer => timer.delay === 10000);
+      assert.equal(matching.length, 1, 'status polling must reuse its single existing interval');
+      matching[0].callback();
+      await new Promise(resolve => setImmediate(resolve));
+    },
     removeInput(id: string) { inputDevices = inputDevices.filter(item => item.deviceId !== id); },
     inputChanged() { mediaDevices.emit('devicechange'); },
     transcriptEvent(value: Record<string, unknown>) {
@@ -813,6 +837,137 @@ test('confirmed cleanup clears its stale banner while preserving unrelated SDK a
   f.callEvent({ status: 'failed', cleanupUnconfirmed: false, error: 'TWILIO_CALL_FAILED', providerErrorCode: 21216, providerHttpStatus: 400 });
   assert.equal(f.element('app-error').hidden, false);
   assert.match(f.element('app-error').textContent, /21216/);
+});
+
+test('existing status polling continues through a local outage and clears only its recovered connection warning', async t => {
+  for (const failure of ['network', 'timeout'] as const) await t.test(failure, async () => {
+    const f = await pageFixture(async () => streamFixture().stream);
+    const before = f.requests.length;
+    f.failApi('/api/status', failure);
+    await f.pollStatus();
+    assert.equal(f.element('local-state').textContent, '本机服务未连接');
+    assert.equal(f.element('start-call').disabled, true);
+    assert.equal(f.element('app-error').hidden, false);
+    assert.match(f.element('app-error').textContent, failure === 'network' ? /无法连接本机服务/ : /本机服务响应超时/);
+    await f.pollStatus();
+    assert.equal(f.element('app-error').hidden, false, 'another failed read must retain the warning');
+    f.restoreApi('/api/status');
+    await f.pollStatus();
+    assert.equal(f.element('local-state').textContent, '本机服务已连接');
+    assert.equal(f.element('start-call').disabled, false);
+    assert.equal(f.element('app-error').hidden, true);
+    assert.equal(f.element('app-error').textContent, '');
+    assert.deepEqual(f.requests.slice(before), ['GET /api/status', 'GET /api/status', 'GET /api/status']);
+    assert.equal(f.sdkConnects(), 0, 'recovery must never initiate a call');
+  });
+});
+
+test('initial local outage recovers via polling, establishes exactly one event stream and allows user registration without dialing', async () => {
+  let captures = 0;
+  const f = await pageFixture(async () => { captures++; return streamFixture().stream; }, undefined, { initialStatusFailure: 'network' });
+  assert.equal(f.eventSourceCount(), 0);
+  assert.equal(f.element('enable-device').disabled, true);
+  assert.match(f.element('app-error').textContent, /无法连接本机服务/);
+  f.restoreApi('/api/status');
+  await f.pollStatus();
+  assert.equal(f.eventSourceCount(), 1, 'successful recovery creates the SSE missing after the initial failure');
+  assert.equal(f.element('app-error').hidden, true);
+  assert.equal(f.element('enable-device').disabled, false);
+  assert.equal(f.element('start-call').disabled, true, 'status success alone does not establish event connectivity or register a phone');
+  assert.equal(f.requests.includes('GET /api/token'), false, 'polling does not register a phone automatically');
+  await f.pollStatus();
+  assert.equal(f.eventSourceCount(), 1, 'repeated status reads must not duplicate the source');
+  await f.openEvents();
+  await f.element('enable-device').events.click();
+  assert.equal(f.element('start-call').disabled, false);
+  assert.match(f.element('device-state').textContent, /已注册/);
+  assert.equal(f.eventSourceCount(), 1);
+  assert.equal(captures, 0);
+  assert.equal(f.sdkConnects(), 0);
+  assert.equal(f.requests.includes('POST /api/calls'), false);
+  assert.equal(f.requests.some(request => request.includes('/api/verify')), false);
+});
+
+test('successful late status reads do not create SSE after page disposal or explicit authentication rejection', async () => {
+  const disposed = await pageFixture(async () => streamFixture().stream, undefined, { initialStatusFailure: 'network' });
+  disposed.restoreApi('/api/status');
+  const reading = disposed.element('refresh-status').events.click();
+  disposed.pagehide();
+  await reading;
+  assert.equal(disposed.eventSourceCount(), 0);
+  assert.equal(disposed.element('enable-device').disabled, true);
+  const afterDispose = disposed.requests.length;
+  await disposed.pollStatus();
+  assert.equal(disposed.requests.length, afterDispose);
+
+  const rejected = await pageFixture(async () => streamFixture().stream, undefined, { initialStatusFailure: { status: 401, error: 'UNAUTHORIZED' } });
+  rejected.restoreApi('/api/status');
+  await rejected.element('refresh-status').events.click();
+  assert.equal(rejected.eventSourceCount(), 0);
+  assert.equal(rejected.element('enable-device').disabled, true);
+  assert.match(rejected.element('app-error').textContent, /本机访问凭据已失效/);
+  const afterRejection = rejected.requests.length;
+  await rejected.pollStatus();
+  assert.equal(rejected.requests.length, afterRejection);
+});
+
+test('a successful status read preserves uncertain dial and hangup failures', async () => {
+  const dialing = await pageFixture(async () => streamFixture().stream);
+  dialing.failApi('/api/calls', 'network');
+  await dialing.element('start-call').events.click();
+  assert.match(dialing.element('app-error').textContent, /无法连接本机服务/);
+  await dialing.pollStatus();
+  assert.equal(dialing.element('app-error').hidden, false, 'successful status cannot establish whether a failed POST placed a call');
+  assert.match(dialing.element('app-error').textContent, /无法连接本机服务/);
+  assert.equal(dialing.sdkConnects(), 0);
+
+  const ending = await pageFixture(async () => streamFixture().stream);
+  await ending.element('start-call').events.click();
+  ending.failApi('/api/calls/session-1/hangup', 'network');
+  await ending.element('end-call').events.click();
+  assert.match(ending.element('app-error').textContent, /结束通话尚未确认：无法连接本机服务/);
+  await ending.pollStatus();
+  assert.equal(ending.element('app-error').hidden, false);
+  assert.match(ending.element('app-error').textContent, /结束通话尚未确认/);
+});
+
+test('connection recovery reinstates pending cleanup and preserves newer provider or SDK errors', async () => {
+  const f = await pageFixture(async () => streamFixture().stream);
+  await f.element('start-call').events.click();
+  f.callEvent({ status: 'ending', cleanupUnconfirmed: true, error: 'CALL_CLEANUP_UNCONFIRMED' });
+  f.failApi('/api/status', 'network');
+  await f.pollStatus();
+  assert.match(f.element('app-error').textContent, /无法连接本机服务/);
+  f.restoreApi('/api/status');
+  await f.pollStatus();
+  assert.equal(f.element('app-error').hidden, false);
+  assert.match(f.element('app-error').textContent, /线路关闭待确认/);
+  assert.equal(f.element('start-call').disabled, true);
+  f.callEvent({ status: 'failed', cleanupUnconfirmed: false, error: 'TWILIO_CALL_FAILED', providerErrorCode: 21216 });
+  await f.pollStatus();
+  assert.equal(f.element('app-error').hidden, false);
+  assert.match(f.element('app-error').textContent, /21216/);
+  f.failApi('/api/status', 'network');
+  await f.pollStatus();
+  f.device.emit('error', { code: 31005 });
+  f.restoreApi('/api/status');
+  await f.pollStatus();
+  assert.equal(f.element('app-error').hidden, false);
+  assert.match(f.element('app-error').textContent, /31005/);
+});
+
+test('authentication failures are not cleared by successful status reads or retried by outage polling', async () => {
+  const f = await pageFixture(async () => streamFixture().stream);
+  f.failApi('/api/status', { status: 401, error: 'UNAUTHORIZED' });
+  await f.pollStatus();
+  assert.match(f.element('app-error').textContent, /本机访问凭据已失效/);
+  const before = f.requests.length;
+  await f.pollStatus();
+  assert.equal(f.requests.length, before, 'known rejected local credentials require reopening, not repeated polling');
+  f.restoreApi('/api/status');
+  await f.element('refresh-status').events.click();
+  assert.equal(f.element('app-error').hidden, false);
+  assert.match(f.element('app-error').textContent, /本机访问凭据已失效/);
 });
 
 test('transcripts pair by role, item and content index despite reversed arrival, consistently in history and export', async () => {

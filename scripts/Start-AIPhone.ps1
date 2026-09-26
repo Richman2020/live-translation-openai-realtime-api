@@ -80,8 +80,10 @@ try {
     # The hidden worker inherits no credentials through command arguments.
     if ($Serve) {
         Set-Location -LiteralPath $projectRoot
-        & $nodePath $npmCliPath run start:solo
-        exit $LASTEXITCODE
+        # Own the log handles here: the WMI-created worker outlives its caller.
+        $serverProcess = Start-Process -FilePath $nodePath -ArgumentList @(('"' + $npmCliPath + '"'), 'run', 'start:solo') -WorkingDirectory $projectRoot -WindowStyle Hidden -RedirectStandardOutput (Join-Path $runtimePath 'solo.stdout.log') -RedirectStandardError (Join-Path $runtimePath 'solo.stderr.log') -PassThru
+        $serverProcess.WaitForExit()
+        exit $serverProcess.ExitCode
     }
 
     $mutex = New-Object System.Threading.Mutex($false, 'Local\AIPhoneSoloLauncher_5050')
@@ -106,9 +108,15 @@ try {
     if (-not (Test-ServiceHealth $health)) {
         if (Test-PortInUse $portNumber) { throw "本机端口 $portNumber 已被其他程序占用，AI 电话未启动。" }
         New-Item -ItemType Directory -Path $runtimePath -Force | Out-Null
-        $workerArguments = @('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $launcherPath + '"'), '-Serve')
         if (-not (Test-Path -LiteralPath $windowsPowerShellPath -PathType Leaf)) { throw '未找到 Windows PowerShell，无法启动后台服务。' }
-        $worker = Start-Process -FilePath $windowsPowerShellPath -ArgumentList $workerArguments -WorkingDirectory $projectRoot -WindowStyle Hidden -RedirectStandardOutput (Join-Path $runtimePath 'solo.stdout.log') -RedirectStandardError (Join-Path $runtimePath 'solo.stderr.log') -PassThru
+        # Start through the local Windows process provider, not as a child of the
+        # invoking terminal/job. Some tool hosts kill their entire job on exit.
+        # No scheduled task, service installation, elevated account or secret args.
+        $startup = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ ShowWindow = [uint16]0 }
+        $workerCommand = '"' + $windowsPowerShellPath + '" -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $launcherPath + '" -Serve'
+        $created = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $workerCommand; CurrentDirectory = $projectRoot; ProcessStartupInformation = $startup }
+        if ($created.ReturnValue -ne 0 -or -not $created.ProcessId) { throw ('Windows 无法独立启动电话后台（代码 ' + $created.ReturnValue + '），未改用临时后台。') }
+        $worker = Get-Process -Id ([int]$created.ProcessId) -ErrorAction Stop
         $workerStart = $worker.StartTime.ToUniversalTime().ToString('o')
         $processRecord = @{ launcherPid = $worker.Id; launcherStartedAt = $workerStart; launcherPath = $launcherPath; projectRoot = $projectRoot; port = $portNumber; appId = 'ai-phone-solo' }
         $processRecord | ConvertTo-Json | Set-Content -LiteralPath $recordPath -Encoding UTF8
@@ -117,7 +125,7 @@ try {
             $health = Get-ServiceHealth $baseUrl
             if (Test-ServiceHealth $health) { break }
             $worker.Refresh()
-            if ($worker.HasExited) { throw '本机电话服务启动失败，请查看项目 .runtime 目录中的 solo.stderr.log。' }
+            if ($worker.HasExited) { throw '本机电话服务启动失败，请查看项目 .runtime 目录中的 solo.stderr.log 和 solo.worker.stderr.log。' }
             Start-Sleep -Milliseconds 200
         } while ($timer.ElapsedMilliseconds -lt 20000)
         if (-not (Test-ServiceHealth $health)) { throw '电话服务未能及时启动，请查看项目 .runtime 目录中的日志。' }
@@ -146,6 +154,16 @@ try {
 } catch {
     $errorText = $_.Exception.Message
     if ($localToken) { $errorText = $errorText.Replace($localToken, '[redacted]') }
+    if ($Serve) {
+        # WMI does not redirect the worker's own errors. Keep those separate from
+        # the live Node stderr handle; no environment or credentials are logged.
+        try {
+            New-Item -ItemType Directory -Path $runtimePath -Force | Out-Null
+            $workerFailure = @{ at = [DateTime]::UtcNow.ToString('o'); code = 'WORKER_START_FAILED'; message = $errorText }
+            $workerFailure | ConvertTo-Json -Compress | Add-Content -LiteralPath (Join-Path $runtimePath 'solo.worker.stderr.log') -Encoding UTF8
+        } catch { # Preserve the original failure if logging itself is unavailable.
+        }
+    }
     if (-not $NoOpen -and -not $Serve) {
         Add-Type -AssemblyName System.Windows.Forms
         [System.Windows.Forms.MessageBox]::Show($errorText, 'AI 电话启动失败', 'OK', 'Error') | Out-Null

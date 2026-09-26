@@ -12,7 +12,7 @@ $launchLock = $null
 $lockAcquired = $false
 
 function Read-SharedLog([string]$path) {
-  # Start-Process keeps redirected stderr open; allow its writer to remain open.
+  # cloudflared owns its log handle; allow its writer to remain open.
   $stream = [IO.File]::Open($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
   try {
     $reader = New-Object IO.StreamReader($stream)
@@ -138,7 +138,35 @@ try {
   }
   if ($null -eq $tunnelProcess) {
     if ($null -ne $status.activeSession) { throw 'End the active call and confirm cleanup before starting a new tunnel.' }
-    $createdProcess = Start-Process -FilePath $binaryPath -ArgumentList @('tunnel', '--url', "http://127.0.0.1:$port", '--no-autoupdate', '--protocol', 'http2') -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $runtimeDir 'tunnel.stdout.log') -RedirectStandardError $logPath
+    # --logfile may append. Preserve the previous evidence and give this launch
+    # a fresh log so its URL discovery cannot reuse an old tunnel address.
+    if (Test-Path -LiteralPath $logPath) {
+      $oldLog = Get-Item -LiteralPath $logPath -Force
+      if ($oldLog.PSIsContainer -or ($oldLog.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw 'The tunnel log is not a regular file; startup was refused.'
+      }
+      $archivePath = Join-Path $runtimeDir ('tunnel-before-' + [DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss') + '-' + [Guid]::NewGuid().ToString('N') + '.log')
+      $runtimePrefix = [IO.Path]::GetFullPath($runtimeDir).TrimEnd('\') + '\'
+      foreach ($logTarget in @($logPath, $archivePath)) {
+        if (-not [IO.Path]::GetFullPath($logTarget).StartsWith($runtimePrefix, [StringComparison]::OrdinalIgnoreCase)) {
+          throw 'The tunnel log path escaped its runtime directory; startup was refused.'
+        }
+      }
+      Move-Item -LiteralPath $logPath -Destination $archivePath -ErrorAction Stop
+    }
+    # The local Windows process provider creates a process outside the invoking
+    # tool/terminal job. cloudflared writes its own log, with no caller-owned pipe.
+    $startup = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ ShowWindow = [uint16]0 }
+    $commandLine = '"' + $binaryPath + '" tunnel --url http://127.0.0.1:' + $port + ' --no-autoupdate --protocol http2 --logfile "' + $logPath + '"'
+    $launchBeganAt = [DateTime]::UtcNow
+    $created = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $commandLine; CurrentDirectory = $repoRoot; ProcessStartupInformation = $startup }
+    if ($created.ReturnValue -ne 0 -or -not $created.ProcessId) {
+      throw ('Windows could not independently start the tunnel (code ' + $created.ReturnValue + '); no fallback was started.')
+    }
+    $createdProcess = Get-Process -Id ([int]$created.ProcessId) -ErrorAction Stop
+    if ($createdProcess.Path -ne $binaryPath -or $createdProcess.StartTime.ToUniversalTime() -lt $launchBeganAt.AddSeconds(-1)) {
+      throw 'The new tunnel process identity could not be verified; no unverified process was stopped.'
+    }
     $createdRecord = [PSCustomObject]@{ processId = $createdProcess.Id; startedAt = $createdProcess.StartTime.ToUniversalTime().ToString('o'); url = ''; binary = $binaryPath }
     # Register the process before polling logs or making any further HTTP requests.
     Write-TunnelRecord $createdRecord $false
