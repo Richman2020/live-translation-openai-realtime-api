@@ -18,6 +18,35 @@ function streamFixture() {
   return { stream, stopped: () => stopped };
 }
 
+test('audio diagnostics distinguish generated, sent and playback, isolate old sessions and reset for a new call', async () => {
+  const f = await pageFixture(async () => streamFixture().stream);
+  await f.element('start-call').events.click();
+  const entry = { role: 'local', recipientRole: 'remote', generatedBytes: 8000, sentBytes: 8000 };
+  f.audioEvent({ ...entry, stage: 'generated' });
+  f.audioEvent({ ...entry, stage: 'sent' });
+  assert.match(f.element('audio-delivery-local').textContent, /生成 1 段 · 已送出 1 段 · 线路确认播放 0 段/);
+  f.audioEvent({ ...entry, stage: 'playback_confirmed', sessionId: 'retired' });
+  f.audioEvent({ ...entry, stage: 'playback_confirmed', recipientRole: 'local' });
+  assert.match(f.element('audio-delivery-local').textContent, /线路确认播放 0 段/);
+  f.audioEvent({ ...entry, stage: 'playback_confirmed' });
+  assert.match(f.element('audio-delivery-local').textContent, /线路确认播放 1 段/);
+  assert.match(f.element('audio-delivery-remote').textContent, /尚无译音记录/);
+  f.audioEvent({ role: 'remote', recipientRole: 'local', generatedBytes: 0, sentBytes: 0, stage: 'generated' });
+  assert.match(f.element('audio-delivery-remote').textContent, /1 段未生成声音/);
+  await f.element('end-call').events.click();
+  await f.element('start-call').events.click();
+  assert.match(f.element('audio-delivery-local').textContent, /尚无译音记录/);
+});
+
+test('31603 preserves cleanup while avoiding a claim that the destination phone declined', async () => {
+  const f = await pageFixture(async () => streamFixture().stream);
+  await f.element('start-call').events.click();
+  f.outgoingCall().emit('error', { code: 31603 });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(f.element('app-error').textContent, /31603.*公网语音入口中断/);
+  assert.ok(f.requests.some(path => path.includes('/hangup')));
+});
+
 test('a timed-out attempt cannot clear a newer call when its SDK connection rejects late', async () => {
   const lifecycle = createCallLifecycle();
   const old = lifecycle.begin('old');
@@ -260,6 +289,9 @@ async function pageFixture(requestMedia: (constraints: unknown) => Promise<unkno
     },
     translationEvent(value: Record<string, unknown>) {
       sources[0].handlers.get('translation-connection')({ data: JSON.stringify(value) });
+    },
+    audioEvent(value: Record<string, unknown>) {
+      sources[0].handlers.get('translation-audio')({ data: JSON.stringify({ sessionId: activeSession?.id, ...value }) });
     },
     callEvent(patch: Record<string, unknown>) {
       assert.ok(activeSession, 'create a call before delivering its provider event');

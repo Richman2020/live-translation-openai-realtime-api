@@ -16,12 +16,14 @@ import {
 } from './security';
 import { SessionError, SessionManager, type Role } from './session-manager';
 import { verifyProviders } from './provider-checks';
+import { checkPublicReadiness } from './public-readiness';
 
 export async function buildSoloServer(
   options: {
     configStore?: ConfigStore;
     sessionManager?: SessionManager;
     publicDir?: string;
+    publicReadinessChecker?: typeof checkPublicReadiness;
   } = {},
 ) {
   const configStore = options.configStore || new ConfigStore();
@@ -41,6 +43,7 @@ export async function buildSoloServer(
   let lastVerification: Awaited<ReturnType<typeof verifyProviders>> | null =
     null;
   let verifying = false;
+  let checkingOutbound = false;
   let lastVerifyAttempt = 0;
   const broadcast = (event: { event: string; data: unknown }) => {
     for (const subscriber of subscribers) subscriber(event);
@@ -107,7 +110,7 @@ export async function buildSoloServer(
   }));
   app.get('/api/status', async () => status());
   app.post<{ Body: Record<string, unknown> }>('/api/settings', async (req) => {
-    if (manager.activeSession || verifying)
+    if (manager.activeSession || verifying || checkingOutbound)
       throw new SessionError('CALL_OR_VERIFICATION_IN_PROGRESS', 409);
     if (!req.body || Array.isArray(req.body) || typeof req.body !== 'object')
       throw new SessionError('INVALID_SETTINGS');
@@ -126,7 +129,7 @@ export async function buildSoloServer(
     return { ok: true, ...status() };
   });
   app.post('/api/verify', async () => {
-    if (manager.activeSession || verifying)
+    if (manager.activeSession || verifying || checkingOutbound)
       throw new SessionError('CALL_OR_VERIFICATION_IN_PROGRESS', 409);
     if (Date.now() - lastVerifyAttempt < 30000)
       throw new SessionError('VERIFICATION_COOLDOWN', 429);
@@ -173,11 +176,25 @@ export async function buildSoloServer(
     return { ok: true, available: manager.available };
   });
   app.post<{ Body: { to: string } }>('/api/calls', async (req) => {
-    if (verifying) throw new SessionError('VERIFICATION_IN_PROGRESS', 409);
+    if (verifying || checkingOutbound)
+      throw new SessionError('VERIFICATION_IN_PROGRESS', 409);
     requireConfigured();
     if (typeof req.body?.to !== 'string')
       throw new SessionError('INVALID_DESTINATION');
-    return manager.createOutbound(configStore.value, req.body.to.trim());
+    if (manager.activeSession) throw new SessionError('BUSY', 409);
+    checkingOutbound = true;
+    try {
+      // A registered browser cannot establish a phone call when its public
+      // TwiML/media entry is offline. Check before creating even a local session.
+      const readiness = await (
+        options.publicReadinessChecker || checkPublicReadiness
+      )(configStore.value);
+      if (readiness.status !== 'ready')
+        throw new SessionError(readiness.code, 503);
+      return manager.createOutbound(configStore.value, req.body.to.trim());
+    } finally {
+      checkingOutbound = false;
+    }
   });
   app.post<{ Params: { id: string } }>('/api/calls/:id/hangup', async (req) => {
     await manager.end(req.params.id);

@@ -28,6 +28,9 @@
     CALL_CLEANUP_FAILED: '线路关闭待确认。请点击「重试挂断」；确认关闭前不能拨出下一通电话。',
     CALL_CLEANUP_UNCONFIRMED: '线路关闭待确认。请点击「重试挂断」；若仍未成功，请到 Twilio 控制台检查当前通话。',
     CALL_SETUP_TIMEOUT: '通话连接超时，请检查号码与公网隧道后重试。',
+    PUBLIC_CALLBACK_UNREACHABLE: '公网电话入口暂时不可达，本次尚未拨出。请恢复公网隧道后再试。',
+    PUBLIC_CALLBACK_WRONG_SERVICE: '公网地址没有连接到此电话服务，本次尚未拨出。请核对隧道地址和电话回调。',
+    PUBLIC_CALLBACK_URL_INVALID: '公网电话地址无效，本次尚未拨出。请在连接设置中填写正确的 HTTPS 地址。',
     CALL_DURATION_LIMIT: '已达到单次通话时长上限，电话已请求结束。',
     CALL_BUSY: '对方正在通话，请稍后再拨。',
     CALL_NO_ANSWER: '对方未接听，请稍后再拨。',
@@ -94,11 +97,12 @@
   let disposed = false;
   const recoveringTranslationRoles = new Set();
   let translationRecoveryHint = false;
+  const audioDelivery = new Map();
   const callLifecycle = createCallLifecycle({
     requestMedia: navigator.mediaDevices?.getUserMedia ? constraints => navigator.mediaDevices.getUserMedia(constraints) : null,
     onChange: () => renderStatus(),
   });
-  const callPhases = { preparing: '正在准备电话线路', microphone: '等待麦克风授权，请查看地址栏的麦克风或权限图标', signaling: '麦克风已就绪，正在连接电话线路', connected: '浏览器线路已连接，等待电话音频', reconnecting: '电话音频连接中断，正在恢复' };
+  const callPhases = { preparing: '正在准备电话线路', checking: '正在检查公网电话入口', microphone: '等待麦克风授权，请查看地址栏的麦克风或权限图标', signaling: '麦克风已就绪，正在连接电话线路', connected: '浏览器线路已连接，等待电话音频', reconnecting: '电话音频连接中断，正在恢复' };
   const safeRead = (key, fallback) => { try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; } };
   let preferences = { saveHistory: false, showOriginal: true, ...safeRead(preferencesKey, {}) };
   preferences = { saveHistory: preferences.saveHistory === true, showOriginal: preferences.showOriginal !== false };
@@ -125,6 +129,10 @@
   function cleanMessage(value, fallback = '操作未完成，请检查连接后重试。') {
     if (typeof value !== 'string' || !value.trim()) return fallback;
     if (errorMessages[value]) return errorMessages[value];
+    const translationWait = /^(openai_transcription_timeout|translation_queue_timeout):(local|remote)$/.exec(value);
+    if (translationWait) return translationWait[1] === 'openai_transcription_timeout'
+      ? `等待${translationWait[2] === 'local' ? '你的中文' : '对方的英文'}识别超时，通话已请求结束。请检查网络后重试。`
+      : '翻译等待时间过长，通话已请求结束。请检查网络后重试。';
     if (/^HTTP_\d{3}$/.test(value)) {
       const code = Number(value.slice(5));
       return code === 401 || code === 403 ? '账户认证或资源权限不足，请检查密钥和所属账户。' : code === 404 ? '未找到对应号码或电话应用，请检查资源标识。' : code === 429 ? '服务请求限额已达到，请稍后重试并检查额度。' : `服务连接未通过（HTTP ${code}），请检查账户和网络。`;
@@ -150,6 +158,10 @@
   function clearError() { $('app-error').hidden = true; $('app-error').textContent = ''; }
   function clearCleanupError() {
     if ([errorMessages.CALL_CLEANUP_FAILED, errorMessages.CALL_CLEANUP_UNCONFIRMED].includes($('app-error').textContent)) clearError();
+  }
+  function sdkFailureMessage(error) {
+    if (error?.code === 31603) return '电话线路拒绝连接（31603）。公网语音入口中断也可能导致此错误；请先确认公网隧道在线，再重新拨号。';
+    return `电话线路连接失败${Number.isInteger(error?.code) ? `（${error.code}）` : ''}。请检查网络与电话配置后重试。`;
   }
   const sdkWarnings = new Set([
     'constant-audio-input-level', 'constant-audio-output-level', 'low-bytes-sent', 'low-bytes-received',
@@ -289,7 +301,7 @@
       clearCleanupError();
       if (session.error) showError(callFailureMessage(session));
     } else if (session) {
-      if (!record || record.id !== session.id) { if (record && !record.endedAt) finishRecord('completed'); record = makeRecord(session); $('transcript').replaceChildren(); $('empty-conversation').hidden = false; }
+      if (!record || record.id !== session.id) { if (record && !record.endedAt) finishRecord('completed'); audioDelivery.clear(); renderAudioDelivery(); record = makeRecord(session); $('transcript').replaceChildren(); $('empty-conversation').hidden = false; }
       activeSession = session; record.status = session.status;
       if (session.status === 'active' && !record.connectedAt) record.connectedAt = Date.now();
       $('transcript-subtitle').textContent = `${session.direction === 'inbound' ? '来电' : '拨出'} · ${record.number} · ${statusNames[session.status] || session.status}`;
@@ -322,6 +334,7 @@
     receive('call', applySession);
     receive('transcript', appendTranscript);
     receive('translation-connection', applyTranslationConnection);
+    receive('translation-audio', applyAudioDelivery);
     receive('error', value => showError(cleanMessage(value.message || value.error, '通话服务报告错误，请检查连接状态。')));
     eventSource.onerror = () => { eventsOnline = false; renderStatus(); };
   }
@@ -338,6 +351,25 @@
       recoveringTranslationRoles.add(value.role); translationRecoveryHint = false;
     }
     renderStatus();
+  }
+  function renderAudioDelivery() {
+    for (const role of ['local', 'remote']) {
+      const counts = audioDelivery.get(role);
+      const target = role === 'local' ? '英语 → 手机' : '中文 → 电脑';
+      $(`audio-delivery-${role}`).textContent = !counts ? `${target}：尚无译音记录` :
+        `${target}：生成 ${counts.generated} 段 · 已送出 ${counts.sent} 段 · 线路确认播放 ${counts.playback_confirmed} 段${counts.unconfirmed ? ` · 未确认 ${counts.unconfirmed} 段` : ''}${counts.silent ? ` · ${counts.silent} 段未生成声音` : ''}`;
+    }
+  }
+  function applyAudioDelivery(value) {
+    if (!value || !record || value.sessionId !== record.id || !['local', 'remote'].includes(value.role)) return;
+    if (value.recipientRole !== (value.role === 'local' ? 'remote' : 'local')) return;
+    if (!['generated', 'sent', 'playback_confirmed', 'unconfirmed'].includes(value.stage)) return;
+    if (![value.generatedBytes, value.sentBytes].every(size => Number.isSafeInteger(size) && size >= 0)) return;
+    const counts = audioDelivery.get(value.role) || { generated: 0, sent: 0, playback_confirmed: 0, unconfirmed: 0, silent: 0 };
+    if (value.stage === 'generated' && value.generatedBytes === 0) counts.silent += 1;
+    else counts[value.stage] += 1;
+    audioDelivery.set(value.role, counts);
+    renderAudioDelivery();
   }
   function renderLine(line) {
     const article = element('article', `utterance ${line.role === 'remote' ? 'their' : 'mine'} ${line.kind === 'original' ? 'original-entry' : ''}`);
@@ -417,7 +449,7 @@
       });
       next.on('unregistered', () => { if (device !== next) return; logSdkEvent('device-unregistered'); registered = false; clearInterval(heartbeat); presence(false).catch(() => {}); renderStatus(); });
       next.on('tokenWillExpire', async () => { try { const fresh = await api('/api/token'); if (device === next) next.updateToken(fresh.token); } catch (error) { showError(error.message); if (!busy()) await destroyDevice(); } });
-      next.on('error', error => { if (device !== next) return; logSdkEvent('device-error', error); showError(`电话线路连接失败${Number.isInteger(error.code) ? `（${error.code}）` : ''}，请检查 Twilio 配置与网络。`); });
+      next.on('error', error => { if (device !== next) return; logSdkEvent('device-error', error); showError(sdkFailureMessage(error)); });
       next.on('incoming', receiveIncoming);
       await next.register();
     } catch (error) { showError(error.message); await destroyDevice(); }
@@ -479,7 +511,7 @@
     call.on('error', error => {
       if (sdkCall !== call && incomingCall !== call) return;
       logSdkEvent('call-error', error);
-      showError(microphoneMessages[attempt?.failureCode] || `电话线路连接失败${Number.isInteger(error.code) ? `（${error.code}）` : ''}。请检查网络与电话配置后重试。`);
+      showError(microphoneMessages[attempt?.failureCode] || sdkFailureMessage(error));
       endCall(attempt).catch(error => showError(error.message));
     });
   }
@@ -504,6 +536,7 @@
       // Permission and device acquisition finish before creating any server-side call.
       await callLifecycle.prepareMicrophone(attempt);
       if (!callLifecycle.isCurrent(attempt)) return;
+      callLifecycle.update(attempt, { phase: 'checking' });
       const created = await post('/api/calls', { to }); createdId = created.id;
       if (!createdId || !created.connectionParams) throw new Error('电话服务未返回有效连接信息。');
       if (!callLifecycle.isCurrent(attempt)) { await post(`/api/calls/${encodeURIComponent(createdId)}/hangup`).catch(() => {}); return; }
@@ -654,7 +687,7 @@
     if (accessToken) fetch('/api/presence', { method: 'POST', keepalive: true, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` }, body: JSON.stringify({ available: false }) }).catch(() => {});
     try { device?.destroy(); } catch { /* Navigation continues. */ }
   });
-  renderSettingsForm(); applyPreferences(); renderHistory(); renderStatus();
+  renderSettingsForm(); applyPreferences(); renderHistory(); renderStatus(); renderAudioDelivery();
   setInterval(() => { $('call-timer').textContent = timeText(duration()); }, 1000);
   setInterval(() => { if (state && !disposed) refreshStatus().catch(error => showError(error.message)); }, 10000);
   if (!accessToken) { showError('请通过桌面「AI 电话」打开此页面，以取得本机访问权限。'); navigate('settings'); }

@@ -6,6 +6,7 @@ import createHttpsProxyAgent from 'https-proxy-agent';
 import WebSocket from 'ws';
 import {
   TranslationBridge,
+  type TranslationAudioDiagnostic,
   type TranslationBridgeOptions,
   type TranslationMetric,
   type TranslationRole,
@@ -21,6 +22,7 @@ class FakeSocket extends EventEmitter {
   sent: Record<string, any>[] = [];
   sendFailure?: 'throw' | 'callback';
   pendingWrite?: (error?: Error) => void;
+  pendingWrites: ((error?: Error) => void)[] = [];
   deferWrite = false;
 
   open() {
@@ -41,6 +43,7 @@ class FakeSocket extends EventEmitter {
     this.sent.push(JSON.parse(raw));
     if (this.deferWrite) {
       this.pendingWrite = callback;
+      if (callback) this.pendingWrites.push(callback);
       return;
     }
     callback?.();
@@ -65,6 +68,7 @@ function fixture(options: Partial<TranslationBridgeOptions> = {}) {
   const failures: string[] = [];
   const transcripts: TranscriptEvent[] = [];
   const metrics: TranslationMetric[] = [];
+  const audioDiagnostics: TranslationAudioDiagnostic[] = [];
   const phones = { local: new FakeSocket(), remote: new FakeSocket() };
   let now = 1000;
   const bridge = new TranslationBridge({
@@ -73,6 +77,7 @@ function fixture(options: Partial<TranslationBridgeOptions> = {}) {
     onFailure: (reason) => failures.push(reason),
     onTranscript: (event) => transcripts.push(event),
     onMetric: (metric) => metrics.push(metric),
+    onAudioDiagnostic: (event) => audioDiagnostics.push(event),
     now: () => now,
     createWebSocket(url, socketOptions) {
       connections.push({ url, options: socketOptions });
@@ -118,12 +123,24 @@ function fixture(options: Partial<TranslationBridgeOptions> = {}) {
       item_id: itemId,
     });
   };
+  const transcribe = (
+    role: TranslationRole,
+    itemId = `item_${role}`,
+    text = role === 'local' ? '你好' : 'We need help.',
+  ) =>
+    provider(role).receive({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: itemId,
+      content_index: 0,
+      transcript: text,
+    });
   const responding = (
     role: TranslationRole,
     responseId = `resp_${role}`,
     itemId = `item_${role}`,
   ) => {
     commit(role, itemId);
+    transcribe(role, itemId);
     provider(role).receive({
       type: 'response.created',
       response: { id: responseId },
@@ -145,6 +162,17 @@ function fixture(options: Partial<TranslationBridgeOptions> = {}) {
       assert.equal(socket.closeCount, 1);
     }
   };
+  const done = (role: TranslationRole, responseId = `resp_${role}`) =>
+    provider(role).receive({
+      type: 'response.done',
+      response: { id: responseId, status: 'completed' },
+    });
+  const mark = (role: TranslationRole, name: string) =>
+    phones[role].receive({
+      event: 'mark',
+      streamSid: `MZ_${role}`,
+      mark: { name },
+    });
   return {
     bridge,
     phones,
@@ -154,13 +182,17 @@ function fixture(options: Partial<TranslationBridgeOptions> = {}) {
     failures,
     transcripts,
     metrics,
+    audioDiagnostics,
     attach,
     ready,
     pair,
     media,
     commit,
+    transcribe,
     responding,
     audio,
+    done,
+    mark,
     assertClosed,
     setNow: (value: number) => {
       now = value;
@@ -299,19 +331,235 @@ test('both speech directions translate to the opposite leg with no original-audi
   f.bridge.close();
 });
 
+test('per-response audio diagnostics distinguish generation, socket writes and matching opposite-leg playback marks', () => {
+  const f = fixture();
+  f.pair();
+  for (const role of ['local', 'remote'] as const) {
+    const recipientRole = role === 'local' ? 'remote' : 'local';
+    f.responding(role);
+    f.audio(role, 'AQID');
+    f.audio(role, 'BAUG');
+    assert.equal(f.audioDiagnostics.length, role === 'local' ? 0 : 3);
+    f.done(role);
+    const outgoing = f.phones[recipientRole].sent;
+    assert.deepEqual(
+      outgoing.map((event) => event.event),
+      ['media', 'media', 'mark'],
+    );
+    assert.equal(outgoing[2].streamSid, `MZ_${recipientRole}`);
+    f.mark(role, outgoing[2].mark.name); // The source leg cannot confirm it.
+    f.mark(recipientRole, 'unknown-mark');
+    assert.equal(f.audioDiagnostics.at(-1).stage, 'sent');
+    f.mark(recipientRole, outgoing[2].mark.name);
+    f.mark(recipientRole, outgoing[2].mark.name); // Duplicate ack is ignored.
+    assert.deepEqual(f.audioDiagnostics.slice(-3), [
+      {
+        role,
+        recipientRole,
+        stage: 'generated',
+        generatedBytes: 6,
+        sentBytes: 6,
+      },
+      { role, recipientRole, stage: 'sent', generatedBytes: 6, sentBytes: 6 },
+      {
+        role,
+        recipientRole,
+        stage: 'playback_confirmed',
+        generatedBytes: 6,
+        sentBytes: 6,
+      },
+    ]);
+  }
+  assert.ok(f.phones.local.sent.every((event) => event.event !== 'clear'));
+  assert.ok(f.phones.remote.sent.every((event) => event.event !== 'clear'));
+  f.bridge.close();
+  assert.equal(f.audioDiagnostics.length, 6);
+});
+
+test('an early mark cannot claim sent or playback until all media write callbacks succeed', () => {
+  const f = fixture();
+  f.pair();
+  f.responding('local');
+  f.phones.remote.deferWrite = true;
+  f.audio('local', 'AQID');
+  f.audio('local', 'BAUG');
+  f.done('local');
+  const marker = f.phones.remote.sent.at(-1);
+  f.mark('remote', marker.mark.name);
+  assert.deepEqual(f.audioDiagnostics, [
+    {
+      role: 'local',
+      recipientRole: 'remote',
+      stage: 'generated',
+      generatedBytes: 6,
+      sentBytes: 0,
+    },
+  ]);
+  f.phones.remote.pendingWrites[0]();
+  assert.equal(f.audioDiagnostics.length, 1);
+  f.phones.remote.pendingWrites[1]();
+  assert.deepEqual(
+    f.audioDiagnostics.slice(-2).map((event) => event.stage),
+    ['sent', 'playback_confirmed'],
+  );
+  assert.equal(f.audioDiagnostics.at(-1).sentBytes, 6);
+  f.phones.remote.pendingWrites[2]();
+  assert.equal(f.audioDiagnostics.length, 3);
+  f.bridge.close();
+});
+
+test('failed media writes remain unconfirmed even after an early matching mark', () => {
+  const f = fixture();
+  f.pair();
+  f.responding('local');
+  f.phones.remote.deferWrite = true;
+  f.audio('local', 'AQID');
+  f.audio('local', 'BAUG');
+  f.done('local');
+  f.mark('remote', f.phones.remote.sent.at(-1).mark.name);
+  f.phones.remote.pendingWrites[0]();
+  f.phones.remote.pendingWrites[1](new Error('private transport details'));
+  assert.deepEqual(
+    f.audioDiagnostics.map((event) => event.stage),
+    ['generated', 'unconfirmed'],
+  );
+  assert.equal(f.audioDiagnostics.at(-1).sentBytes, 3);
+  assert.deepEqual(f.failures, ['phone_send_failed:remote']);
+  f.assertClosed();
+  f.phones.remote.pendingWrites[2]();
+  assert.equal(f.audioDiagnostics.length, 2);
+});
+
+test('responses without audio expose zero generated bytes and do not manufacture playback confirmation', () => {
+  const f = fixture();
+  f.pair();
+  f.responding('local');
+  f.done('local');
+  assert.deepEqual(f.audioDiagnostics, [
+    {
+      role: 'local',
+      recipientRole: 'remote',
+      stage: 'generated',
+      generatedBytes: 0,
+      sentBytes: 0,
+    },
+  ]);
+  assert.deepEqual(f.phones.remote.sent, []);
+  f.bridge.close();
+  assert.equal(f.audioDiagnostics.length, 1);
+});
+
+test('unacknowledged playback is bounded and eviction and shutdown remain unconfirmed', () => {
+  const f = fixture();
+  f.pair();
+  for (let index = 0; index < 129; index += 1) {
+    f.responding('local', `response_${index}`, `input_${index}`);
+    f.audio('local', 'AQID', `response_${index}`);
+    f.done('local', `response_${index}`);
+  }
+  const marks = f.phones.remote.sent.filter((event) => event.event === 'mark');
+  assert.equal(
+    f.audioDiagnostics.filter((event) => event.stage === 'unconfirmed').length,
+    1,
+  );
+  f.mark('remote', marks[0].mark.name);
+  assert.equal(
+    f.audioDiagnostics.filter((event) => event.stage === 'playback_confirmed')
+      .length,
+    0,
+  );
+  f.mark('remote', marks.at(-1).mark.name);
+  assert.equal(
+    f.audioDiagnostics.filter((event) => event.stage === 'playback_confirmed')
+      .length,
+    1,
+  );
+  f.bridge.close();
+  assert.equal(
+    f.audioDiagnostics.filter((event) => event.stage === 'unconfirmed').length,
+    128,
+  );
+  for (const event of f.audioDiagnostics)
+    assert.deepEqual(Object.keys(event).sort(), [
+      'generatedBytes',
+      'recipientRole',
+      'role',
+      'sentBytes',
+      'stage',
+    ]);
+});
+
+test('an unfinished response becomes unconfirmed on provider recovery and stale callbacks cannot confirm it', () => {
+  const f = fixture();
+  f.pair();
+  f.responding('local');
+  f.phones.remote.deferWrite = true;
+  f.audio('local', 'AQID');
+  f.provider('local').close(1006);
+  assert.deepEqual(f.audioDiagnostics, [
+    {
+      role: 'local',
+      recipientRole: 'remote',
+      stage: 'unconfirmed',
+      generatedBytes: 3,
+      sentBytes: 0,
+    },
+  ]);
+  f.phones.remote.pendingWrites[0]();
+  assert.equal(f.audioDiagnostics.length, 1);
+  assert.deepEqual(f.failures, []);
+  assert.equal(f.providers.length, 3);
+  f.bridge.close();
+});
+
+test('wrong-stream mark cannot confirm playback and optional diagnostic callback errors never disrupt calls', () => {
+  const f = fixture();
+  f.pair();
+  f.responding('local');
+  f.audio('local', 'AQID');
+  f.done('local');
+  f.phones.remote.receive({
+    event: 'mark',
+    streamSid: 'MZ_intruder',
+    mark: f.phones.remote.sent.at(-1).mark,
+  });
+  assert.deepEqual(f.failures, ['phone_stream_mismatch:remote']);
+  assert.deepEqual(
+    f.audioDiagnostics.map((event) => event.stage),
+    ['generated', 'sent', 'unconfirmed'],
+  );
+  const g = fixture({
+    onAudioDiagnostic: () => {
+      throw new Error('private');
+    },
+  });
+  g.pair();
+  g.responding('remote');
+  g.audio('remote', 'AQID');
+  g.done('remote');
+  g.mark('local', g.phones.local.sent.at(-1).mark.name);
+  assert.deepEqual(g.failures, []);
+  g.bridge.close();
+});
+
 test('new speech turns queue while a translation runs, avoiding cancellation, loss, and duplicate generation', () => {
   const f = fixture();
   f.pair();
   f.responding('local', 'response_1', 'input_1');
   f.commit('local', 'input_2');
   f.commit('local', 'input_2');
+  f.transcribe('local', 'input_2', '第二句');
   const requests = () =>
     f
       .provider('local')
       .sent.filter((event) => event.type === 'response.create');
   assert.equal(requests().length, 1);
   assert.deepEqual(requests()[0].response.input, [
-    { type: 'item_reference', id: 'input_1' },
+    {
+      type: 'message',
+      role: 'user',
+      content: [{ type: 'input_text', text: '你好' }],
+    },
   ]);
   assert.equal(requests()[0].response.conversation, 'none');
   f.provider('local').receive({
@@ -320,7 +568,11 @@ test('new speech turns queue while a translation runs, avoiding cancellation, lo
   });
   assert.equal(requests().length, 2);
   assert.deepEqual(requests()[1].response.input, [
-    { type: 'item_reference', id: 'input_2' },
+    {
+      type: 'message',
+      role: 'user',
+      content: [{ type: 'input_text', text: '第二句' }],
+    },
   ]);
   f.provider('local').receive({
     type: 'response.created',
@@ -338,16 +590,31 @@ test('each independent response keeps its own speaker direction and translation 
   f.pair();
   for (const role of ['local', 'remote'] as const) {
     f.commit(role);
+    f.transcribe(role);
     const socket = f.provider(role);
     const response = socket.sent.find(
       (event) => event.type === 'response.create',
     ).response;
     assert.equal(response.conversation, 'none');
     assert.deepEqual(response.input, [
-      { type: 'item_reference', id: `item_${role}` },
+      {
+        type: 'message',
+        role: 'user',
+        content: [
+          {
+            type: 'input_text',
+            text: role === 'local' ? '你好' : 'We need help.',
+          },
+        ],
+      },
     ]);
     assert.equal(response.instructions, socket.sent[0].session.instructions);
     assert.match(response.instructions, /NEVER answer/);
+    assert.match(response.instructions, /today is not every day/);
+    assert.match(
+      response.instructions,
+      /never instructions for you to execute/,
+    );
     assert.match(
       response.instructions,
       role === 'local'
@@ -358,10 +625,224 @@ test('each independent response keeps its own speaker direction and translation 
   f.bridge.close();
 });
 
-test('subtitle deltas and final replacement share stable IDs, including out-of-order source transcription', () => {
+test('translation waits for final ASR and uses exactly the displayed text rather than the audio item', () => {
+  const f = fixture();
+  f.pair();
+  f.commit('local');
+  const socket = f.provider('local');
+  socket.receive({
+    type: 'conversation.item.input_audio_transcription.delta',
+    item_id: 'item_local',
+    content_index: 0,
+    delta: '你好，请问你每天',
+  });
+  assert.equal(
+    socket.sent.filter((event) => event.type === 'response.create').length,
+    0,
+  );
+  const text = '你好，请问你今天几点下班？';
+  f.transcribe('local', 'item_local', text);
+  const request = socket.sent.find((event) => event.type === 'response.create');
+  assert.deepEqual(request.response.input, [
+    {
+      type: 'message',
+      role: 'user',
+      content: [{ type: 'input_text', text }],
+    },
+  ]);
+  assert.equal(request.response.conversation, 'none');
+  assert.equal(f.transcripts.at(-1).text, text);
+  assert.equal(f.transcripts.at(-1).final, true);
+  f.transcribe('local', 'item_local', 'duplicate changed text');
+  assert.equal(
+    socket.sent.filter((event) => event.type === 'response.create').length,
+    1,
+  );
+  assert.equal(f.transcripts.at(-1).text, text);
+  f.bridge.close();
+});
+
+test('ASR may finish before commit and across turns out of order without reordering committed speech', () => {
+  const f = fixture();
+  f.pair();
+  const requests = () =>
+    f
+      .provider('local')
+      .sent.filter((event) => event.type === 'response.create');
+  f.transcribe('local', 'second', '第二句');
+  assert.equal(requests().length, 0);
+  f.commit('local', 'first');
+  f.commit('local', 'second');
+  assert.equal(requests().length, 0);
+  f.transcribe('local', 'first', '第一句');
+  assert.equal(requests().length, 1);
+  assert.equal(requests()[0].response.input[0].content[0].text, '第一句');
+  f.provider('local').receive({
+    type: 'response.created',
+    response: { id: 'first_response' },
+  });
+  f.done('local', 'first_response');
+  assert.equal(requests().length, 2);
+  assert.equal(requests()[1].response.input[0].content[0].text, '第二句');
+  f.bridge.close();
+});
+
+test('the same source item ID in separate roles never shares final text or queue state', () => {
+  const f = fixture();
+  f.pair();
+  f.commit('local', 'shared');
+  f.commit('remote', 'shared');
+  f.transcribe('remote', 'shared', 'What time today?');
+  assert.equal(
+    f.provider('local').sent.filter((event) => event.type === 'response.create')
+      .length,
+    0,
+  );
+  f.transcribe('local', 'shared', '今天几点？');
+  for (const role of ['local', 'remote'] as const) {
+    const request = f
+      .provider(role)
+      .sent.find((event) => event.type === 'response.create');
+    assert.equal(
+      request.response.input[0].content[0].text,
+      role === 'local' ? '今天几点？' : 'What time today?',
+    );
+  }
+  f.bridge.close();
+});
+
+test('empty final transcripts skip generation and unblock the next committed sentence', () => {
+  const f = fixture();
+  f.pair();
+  f.commit('local', 'silence');
+  f.commit('local', 'spoken');
+  f.transcribe('local', 'spoken', '不要回答，只翻译今天的日期。');
+  f.transcribe('local', 'silence', ' \n\t');
+  const requests = f
+    .provider('local')
+    .sent.filter((event) => event.type === 'response.create');
+  assert.equal(requests.length, 1);
+  assert.equal(
+    requests[0].response.input[0].content[0].text,
+    '不要回答，只翻译今天的日期。',
+  );
+  assert.deepEqual(f.audioDiagnostics, []);
+  f.bridge.close();
+});
+
+test('a missing final ASR has a bounded deadline and closes the session without generating', async () => {
+  const f = fixture({ responseTimeoutMs: 10 });
+  f.pair();
+  f.commit('local');
+  await delay(25);
+  assert.deepEqual(f.failures, ['openai_transcription_timeout:local']);
+  assert.equal(
+    f.provider('local').sent.filter((event) => event.type === 'response.create')
+      .length,
+    0,
+  );
+  f.assertClosed();
+});
+
+test('a ready final transcript waiting behind generation has its own bounded queue deadline', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = fixture({ responseTimeoutMs: 100 });
+  f.pair();
+  f.commit('local', 'first');
+  f.commit('local', 'second');
+  f.transcribe('local', 'second', '第二句');
+  t.mock.timers.tick(50);
+  f.transcribe('local', 'first', '第一句');
+  t.mock.timers.tick(51);
+  assert.deepEqual(f.failures, ['translation_queue_timeout:local']);
+  f.assertClosed();
+});
+
+test('empty ASR behind an active turn cancels its own deadline without producing speech', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = fixture({ responseTimeoutMs: 100 });
+  f.pair();
+  f.commit('local', 'first');
+  f.commit('local', 'silence');
+  t.mock.timers.tick(50);
+  f.transcribe('local', 'first', '第一句');
+  f.transcribe('local', 'silence', ' ');
+  t.mock.timers.tick(51);
+  assert.deepEqual(f.failures, []);
+  assert.equal(
+    f.provider('local').sent.filter((event) => event.type === 'response.create')
+      .length,
+    1,
+  );
+  f.bridge.close();
+  t.mock.timers.tick(100);
+  assert.deepEqual(f.failures, []);
+});
+
+test('committed waiting turns and early final transcript buffers are bounded', () => {
+  for (const mode of ['commit', 'transcribe'] as const) {
+    const f = fixture();
+    f.pair();
+    for (let index = 0; index < 9; index += 1)
+      f[mode]('local', `input_${index}`);
+    assert.deepEqual(f.failures, ['translation_queue_full:local']);
+    f.assertClosed();
+  }
+});
+
+test('recovery clears waiting deadlines and final text without replaying old utterances', async () => {
+  const f = fixture({ responseTimeoutMs: 10 });
+  f.pair();
+  f.commit('local', 'waiting_old');
+  f.transcribe('local', 'early_old', '旧句子');
+  const old = f.provider('local');
+  old.close(1006);
+  const replacement = f.providers[2];
+  replacement.open();
+  replacement.receive({
+    type: 'session.updated',
+    session: replacement.sent[0].session,
+  });
+  old.receive({
+    type: 'conversation.item.input_audio_transcription.completed',
+    item_id: 'waiting_old',
+    content_index: 0,
+    transcript: '旧句子',
+  });
+  await delay(25);
+  assert.deepEqual(f.failures, []);
+  assert.equal(
+    replacement.sent.filter((event) => event.type === 'response.create').length,
+    0,
+  );
+  replacement.receive({
+    type: 'input_audio_buffer.committed',
+    item_id: 'early_old',
+  });
+  assert.equal(
+    replacement.sent.filter((event) => event.type === 'response.create').length,
+    0,
+  );
+  replacement.receive({
+    type: 'conversation.item.input_audio_transcription.completed',
+    item_id: 'early_old',
+    content_index: 0,
+    transcript: '新句子',
+  });
+  const request = replacement.sent.find(
+    (event) => event.type === 'response.create',
+  );
+  assert.equal(request.response.input[0].content[0].text, '新句子');
+  f.bridge.close();
+  await delay(25);
+  assert.deepEqual(f.failures, []);
+});
+
+test('subtitle deltas and final replacement share stable IDs while duplicate source finals are ignored', () => {
   const f = fixture();
   f.pair();
   f.responding('local');
+  f.transcripts.length = 0;
   const socket = f.provider('local');
   socket.receive({
     type: 'response.output_audio_transcript.delta',
@@ -428,9 +909,8 @@ test('subtitle deltas and final replacement share stable IDs, including out-of-o
     content_index: 0,
     transcript: '你好',
   });
-  assert.equal(f.transcripts.length, 5);
+  assert.equal(f.transcripts.length, 4);
   assert.equal(f.transcripts[3].id, 'local:original:input_2:0');
-  assert.equal(f.transcripts[4].id, 'local:original:item_local:0');
   f.bridge.close();
 });
 
@@ -450,7 +930,7 @@ test('session ack timeout closes both phone legs and both providers exactly once
 test('a stalled response fails the session instead of leaving a connected silent call', async () => {
   const f = fixture({ responseTimeoutMs: 10 });
   f.pair();
-  f.commit('remote');
+  f.responding('remote');
   await delay(25);
   assert.deepEqual(f.failures, ['openai_response_timeout:remote']);
   f.assertClosed();
@@ -582,6 +1062,12 @@ test('one transport closure recovers only that translation leg without replaying
   replacement.receive({
     type: 'input_audio_buffer.committed',
     item_id: 'new_input',
+  });
+  replacement.receive({
+    type: 'conversation.item.input_audio_transcription.completed',
+    item_id: 'new_input',
+    content_index: 0,
+    transcript: 'We need help.',
   });
   replacement.receive({
     type: 'response.created',

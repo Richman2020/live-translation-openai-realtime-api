@@ -22,3 +22,4 @@ dialog{border:1px solid #e3e9f1;border-radius:16px;width:430px;max-width:calc(10
 @media(max-width:760px){.page-heading{flex-wrap:wrap}.page-heading>.secondary-button{font-size:11px}.incoming-banner{align-items:flex-start;flex-direction:column}.incoming-actions{width:100%;justify-content:flex-end}.settings-fields{grid-template-columns:1fr}.control-hint{font-size:9px}.transcript-text{font-size:13px}}
 
 .global-error{max-width:1390px;margin:20px auto 0}
+.audio-delivery{padding:14px 18px;font-size:12px;line-height:1.7;color:#66758a}.audio-delivery summary{cursor:pointer;font-weight:600;color:#334155}.audio-delivery p{margin:8px 0}.audio-delivery small{display:block;color:#748297}

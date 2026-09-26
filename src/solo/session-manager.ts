@@ -450,6 +450,13 @@ export class SessionManager extends EventEmitter {
                 data: { ...connection, sessionId: session.view.id },
               });
           },
+          onAudioDiagnostic: (audio) => {
+            // Keep final unconfirmed playback reports when a call is closing.
+            this.emit('event', {
+              event: 'translation-audio',
+              data: { ...audio, sessionId: session.view.id },
+            });
+          },
         });
       }
       session.bridge.attach(role, socket, start.streamSid);
