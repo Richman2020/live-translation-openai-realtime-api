@@ -2,7 +2,12 @@ import WebSocket from 'ws';
 import twilio from 'twilio';
 import RequestClient from 'twilio/lib/base/RequestClient';
 
-import { checkConfig, type SoloConfig, type SettingName } from './config';
+import {
+  checkConfig,
+  validTranscriptionModel,
+  type SoloConfig,
+  type SettingName,
+} from './config';
 import { createOpenAIWebSocket } from './openai-websocket';
 
 type Check = {
@@ -23,6 +28,12 @@ export function checkRealtime(
     new WebSocket(url, options),
   timeoutMs = 15000,
 ): Promise<Check> {
+  if (!validTranscriptionModel(config.OPENAI_TRANSCRIPTION_MODEL))
+    return Promise.resolve({
+      name: 'openaiRealtime',
+      status: 'failed',
+      code: 'INVALID_OPENAI_TRANSCRIPTION_MODEL',
+    });
   return new Promise((resolve) => {
     let finished = false;
     let socket: WebSocket;
@@ -64,10 +75,11 @@ export function checkRealtime(
               audio: {
                 input: {
                   format: { type: 'audio/pcmu' },
-                  transcription: { model: 'whisper-1' },
+                  transcription: { model: config.OPENAI_TRANSCRIPTION_MODEL },
                   turn_detection: {
                     type: 'server_vad',
                     create_response: false,
+                    interrupt_response: false,
                   },
                 },
                 output: { format: { type: 'audio/pcmu' } },
@@ -79,8 +91,21 @@ export function checkRealtime(
       socket.on('message', (raw) => {
         try {
           const event = JSON.parse(raw.toString());
-          if (event.type === 'session.updated')
-            finish('passed', 'SESSION_UPDATED');
+          if (event.type === 'session.updated') {
+            const input = event.session?.audio?.input;
+            const matches =
+              event.session?.type === 'realtime' &&
+              input?.format?.type === 'audio/pcmu' &&
+              event.session?.audio?.output?.format?.type === 'audio/pcmu' &&
+              input?.transcription?.model ===
+                config.OPENAI_TRANSCRIPTION_MODEL &&
+              input?.turn_detection?.create_response === false &&
+              input?.turn_detection?.interrupt_response === false;
+            finish(
+              matches ? 'passed' : 'failed',
+              matches ? 'SESSION_UPDATED' : 'SESSION_MISMATCH',
+            );
+          }
           if (event.type === 'error') finish('failed', 'SESSION_REJECTED');
         } catch {
           finish('failed', 'INVALID_RESPONSE');
@@ -199,7 +224,7 @@ export async function verifyProviders(
     );
   }
   checks.push(
-    has('OPENAI_API_KEY', 'OPENAI_REALTIME_MODEL')
+    has('OPENAI_API_KEY', 'OPENAI_REALTIME_MODEL', 'OPENAI_TRANSCRIPTION_MODEL')
       ? await checkRealtime(config)
       : {
           name: 'openaiRealtime',

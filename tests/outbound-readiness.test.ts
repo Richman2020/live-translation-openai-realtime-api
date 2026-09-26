@@ -26,6 +26,7 @@ const config: SoloConfig = {
   TWILIO_CALLER_NUMBER: '+12125550123',
   OPENAI_API_KEY: `sk-test-${'f'.repeat(32)}`,
   OPENAI_REALTIME_MODEL: 'gpt-realtime-1.5',
+  OPENAI_TRANSCRIPTION_MODEL: 'gpt-4o-transcribe',
   OPENAI_PROXY_URL: '',
   LOCAL_ACCESS_TOKEN: 't'.repeat(64),
 };

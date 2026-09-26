@@ -22,6 +22,7 @@ const config: SoloConfig = {
   TWILIO_CALLER_NUMBER: '+12125550123',
   OPENAI_API_KEY: `sk-test-${'f'.repeat(32)}`,
   OPENAI_REALTIME_MODEL: 'gpt-realtime-1.5',
+  OPENAI_TRANSCRIPTION_MODEL: 'gpt-4o-transcribe',
   OPENAI_PROXY_URL: '',
   LOCAL_ACCESS_TOKEN: 't'.repeat(64),
 };
@@ -139,6 +140,71 @@ test('status and settings never echo secrets; blank secrets preserve existing co
     payload: { NODE_OPTIONS: '--require=evil' },
   });
   assert.equal(bad.statusCode, 400);
+});
+
+test('transcription defaults to Whisper and only supported explicit settings persist', async (t) => {
+  const { app, store, dir } = await fixture(t, {
+    OPENAI_TRANSCRIPTION_MODEL: '',
+  });
+  assert.equal(store.value.OPENAI_TRANSCRIPTION_MODEL, 'whisper-1');
+  assert.equal(store.configured(), true);
+  const saved = await app.inject({
+    method: 'POST',
+    url: '/api/settings',
+    remoteAddress: '127.0.0.1',
+    headers,
+    payload: { OPENAI_TRANSCRIPTION_MODEL: 'gpt-4o-mini-transcribe' },
+  });
+  assert.equal(saved.statusCode, 200);
+  assert.equal(
+    store.value.OPENAI_TRANSCRIPTION_MODEL,
+    'gpt-4o-mini-transcribe',
+  );
+  const reloaded = new ConfigStore({
+    envPath: join(dir, '.env'),
+    generateToken: false,
+  });
+  assert.equal(
+    reloaded.value.OPENAI_TRANSCRIPTION_MODEL,
+    'gpt-4o-mini-transcribe',
+  );
+  for (const value of ['', 'unsupported-model']) {
+    assert.throws(
+      () => store.save({ OPENAI_TRANSCRIPTION_MODEL: value }),
+      /INVALID_OPENAI_TRANSCRIPTION_MODEL/,
+    );
+    const rejected = await app.inject({
+      method: 'POST',
+      url: '/api/settings',
+      remoteAddress: '127.0.0.1',
+      headers,
+      payload: { OPENAI_TRANSCRIPTION_MODEL: value },
+    });
+    assert.equal(rejected.statusCode, 400);
+    assert.equal(rejected.json().error, 'INVALID_SETTINGS');
+    assert.equal(
+      store.value.OPENAI_TRANSCRIPTION_MODEL,
+      'gpt-4o-mini-transcribe',
+    );
+  }
+  for (const value of [
+    'gpt-4o-transcribe',
+    'gpt-4o-mini-transcribe',
+    'whisper-1',
+  ])
+    assert.equal(
+      checkConfig({ ...config, OPENAI_TRANSCRIPTION_MODEL: value }).find(
+        (check) => check.name === 'OPENAI_TRANSCRIPTION_MODEL',
+      )?.status,
+      'ready',
+    );
+  assert.equal(
+    checkConfig({
+      ...config,
+      OPENAI_TRANSCRIPTION_MODEL: 'unsupported-model',
+    }).find((check) => check.name === 'OPENAI_TRANSCRIPTION_MODEL')?.status,
+    'invalid',
+  );
 });
 
 test('optional OpenAI proxy persists privately, rejects invalid values and can be cleared without clearing secrets', async (t) => {

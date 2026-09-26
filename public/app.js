@@ -55,6 +55,8 @@
     RESOURCE_MISMATCH: '账户、号码或电话应用配置不匹配，请检查资源和回调地址。',
     SESSION_TIMEOUT: '实时翻译会话连接超时。',
     SESSION_REJECTED: '实时翻译会话被拒绝，请检查模型权限与配置。',
+    SESSION_MISMATCH: '服务返回的音频或转写模型设置与请求不一致，请检查配置后重新验证。',
+    INVALID_OPENAI_TRANSCRIPTION_MODEL: '语音转写模型无效，请选择 whisper-1、gpt-4o-transcribe 或 gpt-4o-mini-transcribe。',
     CLOSED_BEFORE_READY: '实时翻译连接在就绪前关闭。',
     INVALID_RESPONSE: '服务返回了无法识别的数据。',
     SESSION_UPDATED: '实时翻译会话已确认配置。',
@@ -69,7 +71,8 @@
     ['TWILIO_TWIML_APP_SID', 'Twilio TwiML App SID', false, 'AP…', '应用的语音回调需指向此服务。'],
     ['TWILIO_CALLER_NUMBER', '我的 Twilio 电话号码', false, '+1…', '该账户拥有的美国号码，包含国家区号。'],
     ['OPENAI_API_KEY', 'OpenAI API Key', true, '留空保留现有密钥', '使用具有 Realtime 模型访问权限的密钥。'],
-    ['OPENAI_REALTIME_MODEL', '实时翻译模型', false, 'gpt-realtime-1.5', '可用性以你的 OpenAI 账户验证结果为准。']
+    ['OPENAI_REALTIME_MODEL', '实时翻译模型', false, 'gpt-realtime-1.5', '可用性以你的 OpenAI 账户验证结果为准。'],
+    ['OPENAI_TRANSCRIPTION_MODEL', '语音转写模型', false, 'whisper-1', '当前默认 whisper-1；也可填写 gpt-4o-transcribe 或 gpt-4o-mini-transcribe。改变后请重新验证 API 并实测准确度。']
   ];
   let accessToken = '';
   let state = null;
@@ -235,6 +238,11 @@
     $('mute-button').disabled = !sdkCall || sdkCall === incomingCall || ending;
     $('mute-button').setAttribute('aria-pressed', String(muted)); $('mute-button').querySelector('span').textContent = muted ? '取消静音' : '静音';
     $('call-hint').textContent = callLifecycle.current?.microphoneReady ? (muted ? '你的麦克风已静音' : '麦克风已就绪') : callLifecycle.current?.phase === 'microphone' ? '正在等待麦克风' : '麦克风未启用';
+    const processing = callLifecycle.current?.microphoneProcessing;
+    const processingState = value => value === true ? '已开启' : value === false ? '未开启' : '浏览器未报告';
+    $('microphone-processing').textContent = processing
+      ? `本次采音：回声消除${processingState(processing.echoCancellation)} · 降噪${processingState(processing.noiseSuppression)} · 自动音量${processingState(processing.autoGainControl)}`
+      : '麦克风处理状态将在拨号或接听后显示。';
     if (sdkCall && callLifecycle.current?.microphoneReady && !muted && callDiagnostics?.volumeSeen) {
       $('call-hint').textContent = callDiagnostics.inputDetected ? '本次已检测到麦克风声音' : '尚未检测到麦克风声音（安静时正常）';
     }

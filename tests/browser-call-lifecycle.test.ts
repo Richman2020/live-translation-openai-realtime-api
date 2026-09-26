@@ -108,7 +108,11 @@ test('a retired SDK media override cannot consume a newer attempt microphone aft
 test('microphone preparation requests once and hands the same live stream to the SDK', async () => {
   const f = streamFixture();
   let requests = 0;
-  const lifecycle = createCallLifecycle({ requestMedia: async constraints => { requests += 1; assert.deepEqual(constraints, { audio: true }); return f.stream; } });
+  const lifecycle = createCallLifecycle({ requestMedia: async constraints => {
+    requests += 1;
+    for (const key of ['echoCancellation', 'noiseSuppression', 'autoGainControl']) assert.deepEqual(constraints.audio[key], { ideal: true });
+    return f.stream;
+  } });
   const attempt = lifecycle.begin();
   await lifecycle.prepareMicrophone(attempt);
   assert.equal(attempt.microphoneReady, true);
@@ -118,6 +122,61 @@ test('microphone preparation requests once and hands the same live stream to the
   assert.equal(attempt.phase, 'signaling');
   lifecycle.cancel(attempt);
   assert.equal(f.stopped(), 0, 'the SDK owns tracks once handed over; lifecycle must not cut normal audio');
+});
+
+test('capture reads actual processing booleans without copying device identifiers and clears them on cancel', async () => {
+  const stream = { getAudioTracks: () => [{ getSettings: () => ({ echoCancellation: true, noiseSuppression: false, autoGainControl: 'unknown', deviceId: 'private-device', groupId: 'private-group' }) }] };
+  const lifecycle = createCallLifecycle({ requestMedia: async () => stream });
+  const attempt = lifecycle.begin();
+  assert.equal(attempt.microphoneProcessing, null);
+  await lifecycle.prepareMicrophone(attempt);
+  assert.deepEqual(attempt.microphoneProcessing, { echoCancellation: true, noiseSuppression: false, autoGainControl: null });
+  await lifecycle.useMicrophone(attempt, { audio: true });
+  assert.equal(attempt.microphoneProcessing.echoCancellation, true);
+  lifecycle.cancel(attempt);
+  assert.equal(attempt.microphoneProcessing, null);
+  assert.equal(lifecycle.begin().microphoneProcessing, null);
+});
+
+test('missing or throwing microphone settings never prevent handing capture to the SDK', async t => {
+  for (const [name, stream] of Object.entries({
+    missingTracks: {},
+    missingSettings: { getAudioTracks: () => [{}] },
+    emptySettings: { getAudioTracks: () => [{ getSettings: () => undefined }] },
+    throwingSettings: { getAudioTracks: () => [{ getSettings: () => { throw new Error('device detail'); } }] },
+  })) {
+    await t.test(name, async () => {
+      const lifecycle = createCallLifecycle({ requestMedia: async () => stream });
+      const attempt = lifecycle.begin();
+      await lifecycle.prepareMicrophone(attempt);
+      assert.deepEqual(attempt.microphoneProcessing, { echoCancellation: null, noiseSuppression: null, autoGainControl: null });
+      assert.equal(await lifecycle.useMicrophone(attempt, { audio: true }), stream);
+      lifecycle.cancel();
+    });
+  }
+});
+
+test('SDK capture without a prepared stream preserves explicit device and processing choices', async () => {
+  const requests: unknown[] = [];
+  const lifecycle = createCallLifecycle({ requestMedia: async constraints => { requests.push(constraints); return streamFixture().stream; } });
+  const constraints = { audio: { deviceId: { exact: 'selected' }, echoCancellation: false }, video: false };
+  const original = structuredClone(constraints);
+  const attempt = lifecycle.begin();
+  await lifecycle.useMicrophone(attempt, constraints);
+  assert.deepEqual(constraints, original, 'caller constraints are not mutated');
+  assert.deepEqual(requests[0], { audio: { ...constraints.audio, noiseSuppression: { ideal: true }, autoGainControl: { ideal: true } }, video: false });
+  await lifecycle.useMicrophone(attempt, { audio: false });
+  assert.deepEqual(requests[1], { audio: false });
+  lifecycle.cancel();
+});
+
+test('page reports actual capture settings and clears them after hangup', async () => {
+  const stream = { ...streamFixture().stream, getAudioTracks: () => [{ getSettings: () => ({ echoCancellation: true, noiseSuppression: false }) }] };
+  const f = await pageFixture(async () => stream);
+  await f.element('start-call').events.click();
+  assert.match(f.element('microphone-processing').textContent, /回声消除已开启.*降噪未开启.*自动音量浏览器未报告/);
+  await f.element('end-call').events.click();
+  assert.match(f.element('microphone-processing').textContent, /拨号或接听后显示/);
 });
 
 test('canceling preparation stops a stream which has not yet been handed to the SDK', async () => {
@@ -147,6 +206,8 @@ test('canceling an unanswered permission prompt rejects promptly and stops a lat
   assert.equal(f.stopped(), 1);
   assert.equal(lifecycle.current, current);
   assert.equal(current.microphoneReady, false);
+  assert.equal(current.microphoneProcessing, null);
+  assert.equal(old.microphoneProcessing, null);
 });
 
 test('unanswered microphone permission is bounded and a later grant cannot revive it', async () => {
@@ -161,6 +222,7 @@ test('unanswered microphone permission is bounded and a later grant cannot reviv
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(f.stopped(), 1);
   assert.equal(attempt.microphoneReady, false);
+  assert.equal(attempt.microphoneProcessing, null);
 });
 
 test('microphone errors distinguish permissions, absent devices and unavailable hardware', async t => {

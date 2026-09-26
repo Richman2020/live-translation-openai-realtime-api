@@ -18,6 +18,7 @@ const config = {
   TWILIO_CALLER_NUMBER: '+12125550123',
   OPENAI_API_KEY: 'fake-no-api',
   OPENAI_REALTIME_MODEL: 'gpt-realtime-1.5',
+  OPENAI_TRANSCRIPTION_MODEL: 'gpt-4o-mini-transcribe',
 } as SoloConfig;
 const localSid = `CA${'1'.repeat(32)}`;
 const remoteSid = `CA${'2'.repeat(32)}`;
@@ -138,6 +139,10 @@ test('outbound pays for no PSTN call until authenticated local stream; then pair
     localSid,
   );
   assert.equal(local.accepted, true);
+  assert.equal(
+    f.bridge().transcriptionModel,
+    config.OPENAI_TRANSCRIPTION_MODEL,
+  );
   await tick();
   assert.equal(f.created.length, 1);
   assert.equal(f.created[0].to, '+14155550123');

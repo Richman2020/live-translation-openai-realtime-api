@@ -26,6 +26,26 @@ function stopStream(stream) {
   }
 }
 
+function voiceConstraints(constraints = { audio: true }) {
+  if (constraints.audio === false) return constraints;
+  return {
+    ...constraints,
+    audio: {
+      echoCancellation: { ideal: true },
+      noiseSuppression: { ideal: true },
+      autoGainControl: { ideal: true },
+      ...(typeof constraints.audio === 'object' ? constraints.audio : {}),
+    },
+  };
+}
+
+// Only report processing booleans; device and group identifiers stay private.
+export function microphoneProcessing(stream) {
+  let settings;
+  try { settings = stream?.getAudioTracks?.()[0]?.getSettings?.(); } catch { /* Some browsers cannot report settings. */ }
+  return Object.fromEntries(['echoCancellation', 'noiseSuppression', 'autoGainControl'].map(key => [key, typeof settings?.[key] === 'boolean' ? settings[key] : null]));
+}
+
 export function createCallLifecycle({ requestMedia, onChange = () => {}, mediaTimeoutMs = 30000 } = {}) {
   let current = null;
   let sequence = 0;
@@ -37,6 +57,7 @@ export function createCallLifecycle({ requestMedia, onChange = () => {}, mediaTi
   const cancel = (attempt = current) => {
     if (!attempt || attempt.cancelled) return;
     attempt.cancelled = true;
+    attempt.microphoneReady = false; attempt.microphoneProcessing = null;
     for (const abort of [...attempt.pendingMedia]) abort();
     stopStream(attempt.preparedStream); attempt.preparedStream = null;
     // Delivered streams belong to the SDK; disconnect() owns their normal cleanup.
@@ -49,7 +70,7 @@ export function createCallLifecycle({ requestMedia, onChange = () => {}, mediaTi
     cancel,
     begin(sessionId = null) {
       cancel();
-      current = { id: ++sequence, sessionId, phase: 'preparing', microphoneReady: false, failureCode: null, cancelled: false, preparedStream: null, pendingMedia: new Set() };
+      current = { id: ++sequence, sessionId, phase: 'preparing', microphoneReady: false, microphoneProcessing: null, failureCode: null, cancelled: false, preparedStream: null, pendingMedia: new Set() };
       onChange(current); return current;
     },
     async connect(attempt, connect) {
@@ -78,7 +99,7 @@ export function createCallLifecycle({ requestMedia, onChange = () => {}, mediaTi
     },
     acquireMicrophone(attempt, constraints) {
       if (!isCurrent(attempt)) return Promise.reject(failure('CALL_CANCELLED'));
-      update(attempt, { phase: 'microphone', microphoneReady: false, failureCode: null });
+      update(attempt, { phase: 'microphone', microphoneReady: false, microphoneProcessing: null, failureCode: null });
       return new Promise((resolve, reject) => {
         let settled = false;
         const cleanup = () => { clearTimeout(timer); attempt.pendingMedia.delete(abort); };
@@ -95,11 +116,11 @@ export function createCallLifecycle({ requestMedia, onChange = () => {}, mediaTi
         Promise.resolve().then(() => {
           if (!isCurrent(attempt)) throw failure('CALL_CANCELLED');
           if (!requestMedia) throw failure('MICROPHONE_UNSUPPORTED', 'NotSupportedError');
-          return requestMedia(constraints);
+          return requestMedia(voiceConstraints(constraints));
         }).then(stream => {
           if (settled || !isCurrent(attempt)) { stopStream(stream); if (!settled) abort(); return; }
           settled = true; cleanup();
-          update(attempt, { phase: 'signaling', microphoneReady: true });
+          update(attempt, { phase: 'signaling', microphoneReady: true, microphoneProcessing: microphoneProcessing(stream) });
           resolve(stream);
         }, error => {
           if (!isCurrent(attempt)) abort();

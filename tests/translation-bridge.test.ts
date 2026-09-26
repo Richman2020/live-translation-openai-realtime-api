@@ -216,6 +216,10 @@ test('providers start only after both authenticated legs attach and identical at
     assert.equal(update.session.audio.input.format.type, 'audio/pcmu');
     assert.equal(update.session.audio.output.format.type, 'audio/pcmu');
     assert.equal(
+      update.session.audio.input.transcription.model,
+      'whisper-1',
+    );
+    assert.equal(
       update.session.audio.input.transcription.language,
       role === 'local' ? 'zh' : 'en',
     );
@@ -264,6 +268,44 @@ test('both translation directions use the configured explicit OpenAI proxy', () 
     assert.deepEqual(f.failures, []);
   } finally {
     f.bridge.close();
+  }
+});
+
+test('bridge uses the configured transcription model for both directions and rejects invalid selections', () => {
+  for (const transcriptionModel of [
+    'gpt-4o-transcribe',
+    'gpt-4o-mini-transcribe',
+    'whisper-1',
+  ]) {
+    const f = fixture({ transcriptionModel });
+    f.pair();
+    for (const role of ['local', 'remote'] as const)
+      assert.equal(
+        f.provider(role).sent[0].session.audio.input.transcription.model,
+        transcriptionModel,
+      );
+    assert.deepEqual(f.failures, []);
+    f.bridge.close();
+  }
+  for (const transcriptionModel of ['', 'unsupported-model'])
+    assert.throws(
+      () => fixture({ transcriptionModel }),
+      /INVALID_OPENAI_TRANSCRIPTION_MODEL/,
+    );
+});
+
+test('bridge does not accept an acknowledgement with missing or different transcription model', () => {
+  for (const model of [undefined, 'gpt-4o-transcribe']) {
+    const f = fixture();
+    f.attach('local');
+    f.attach('remote');
+    const provider = f.provider('local');
+    provider.open();
+    const session = structuredClone(provider.sent[0].session);
+    session.audio.input.transcription.model = model;
+    provider.receive({ type: 'session.updated', session });
+    assert.deepEqual(f.failures, ['openai_session_mismatch:local']);
+    f.assertClosed();
   }
 });
 

@@ -1,6 +1,7 @@
 import WebSocket from 'ws';
 
 import { createOpenAIWebSocket } from './openai-websocket';
+import { DEFAULT_TRANSCRIPTION_MODEL, validTranscriptionModel } from './config';
 
 export type TranslationRole = 'local' | 'remote';
 
@@ -38,6 +39,7 @@ export type TranslationAudioDiagnostic = {
 export type TranslationBridgeOptions = {
   apiKey: string;
   model: string;
+  transcriptionModel?: string;
   proxyUrl?: string;
   onTranscript: (event: TranscriptEvent) => void;
   onFailure: (reason: string) => void;
@@ -191,7 +193,11 @@ export class TranslationBridge {
   private closed = false;
 
   constructor(options: TranslationBridgeOptions) {
-    this.options = options;
+    const transcriptionModel =
+      options.transcriptionModel ?? DEFAULT_TRANSCRIPTION_MODEL;
+    if (!validTranscriptionModel(transcriptionModel))
+      throw new Error('INVALID_OPENAI_TRANSCRIPTION_MODEL');
+    this.options = { ...options, transcriptionModel };
   }
 
   public attach(
@@ -454,7 +460,7 @@ export class TranslationBridge {
             input: {
               format: { type: 'audio/pcmu' },
               transcription: {
-                model: 'whisper-1',
+                model: this.options.transcriptionModel,
                 language: role === 'local' ? 'zh' : 'en',
               },
               // Explicitly queue committed turns. Automatic replies can cancel or lose
@@ -540,6 +546,8 @@ export class TranslationBridge {
         event.session?.type !== 'realtime' ||
         event.session?.audio?.input?.format?.type !== 'audio/pcmu' ||
         event.session?.audio?.output?.format?.type !== 'audio/pcmu' ||
+        event.session?.audio?.input?.transcription?.model !==
+          this.options.transcriptionModel ||
         event.session?.audio?.input?.turn_detection?.create_response !==
           false ||
         event.session?.audio?.input?.turn_detection?.interrupt_response !==

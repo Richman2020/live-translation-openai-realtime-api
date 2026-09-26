@@ -13,6 +13,18 @@ import { parse } from 'dotenv';
 
 import { validOpenAIProxyUrl } from './openai-websocket';
 
+export const TRANSCRIPTION_MODELS = [
+  'gpt-4o-transcribe',
+  'gpt-4o-mini-transcribe',
+  'whisper-1',
+] as const;
+export const DEFAULT_TRANSCRIPTION_MODEL = 'whisper-1';
+export function validTranscriptionModel(value: unknown): boolean {
+  return TRANSCRIPTION_MODELS.includes(
+    value as (typeof TRANSCRIPTION_MODELS)[number],
+  );
+}
+
 export const SETTING_NAMES = [
   'API_PORT',
   'API_HOST',
@@ -25,6 +37,7 @@ export const SETTING_NAMES = [
   'TWILIO_CALLER_NUMBER',
   'OPENAI_API_KEY',
   'OPENAI_REALTIME_MODEL',
+  'OPENAI_TRANSCRIPTION_MODEL',
   'OPENAI_PROXY_URL',
   'LOCAL_ACCESS_TOKEN',
 ] as const;
@@ -44,6 +57,7 @@ const required: SettingName[] = [
   'TWILIO_CALLER_NUMBER',
   'OPENAI_API_KEY',
   'OPENAI_REALTIME_MODEL',
+  'OPENAI_TRANSCRIPTION_MODEL',
   'LOCAL_ACCESS_TOKEN',
 ];
 const placeholder =
@@ -137,6 +151,8 @@ export function checkConfig(config: SoloConfig): ConfigCheck[] {
     if (name === 'TWILIO_API_KEY_SECRET') valid = value.length >= 20;
     if (name === 'OPENAI_API_KEY')
       valid = value.startsWith('sk-') && value.length >= 20;
+    if (name === 'OPENAI_TRANSCRIPTION_MODEL')
+      valid = validTranscriptionModel(value);
     if (name === 'LOCAL_ACCESS_TOKEN') valid = value.length >= 32;
     return { name, status: valid ? 'ready' : 'invalid' };
   });
@@ -177,6 +193,7 @@ export class ConfigStore {
     this.current.API_PORT ||= '5050';
     this.current.API_HOST ||= '127.0.0.1';
     this.current.OPENAI_REALTIME_MODEL ||= 'gpt-realtime-1.5';
+    this.current.OPENAI_TRANSCRIPTION_MODEL ||= DEFAULT_TRANSCRIPTION_MODEL;
     this.current.PUBLIC_BASE_URL = this.current.PUBLIC_BASE_URL.replace(
       /\/$/,
       '',
@@ -208,6 +225,11 @@ export class ConfigStore {
       if (typeof raw !== 'string' || raw.length > 4096 || /[\r\n\0]/.test(raw))
         throw new Error('Invalid configuration value');
       const value = raw.trim();
+      if (
+        name === 'OPENAI_TRANSCRIPTION_MODEL' &&
+        !validTranscriptionModel(value)
+      )
+        throw new Error('INVALID_OPENAI_TRANSCRIPTION_MODEL');
       // Blank secrets stay unchanged; an explicitly blank proxy restores direct access.
       // eslint-disable-next-line no-continue
       if (!value && name !== 'OPENAI_PROXY_URL') continue;
