@@ -296,6 +296,15 @@ async function pageFixture(requestMedia: (constraints: unknown) => Promise<unkno
   }
   class FakeDevice extends EventEmitter {
     options: any;
+    audio = Object.assign(new EventEmitter(), {
+      isOutputSelectionSupported: true,
+      availableOutputDevices: new Map([['default', { deviceId: 'default', label: 'Default speaker' }], ['headset', { deviceId: 'headset', label: 'Headphones' }]]),
+      speakerDevices: {
+        active: 'default',
+        get() { return new Set([{ deviceId: this.active }]); },
+        async set(id: string) { this.active = id; },
+      },
+    });
     constructor(_token: string, options: unknown) { super(); this.options = options; device = this; }
     async register() { this.emit('registered'); }
     async unregister() { this.emit('unregistered'); }
@@ -311,6 +320,7 @@ async function pageFixture(requestMedia: (constraints: unknown) => Promise<unkno
     close() {}
   }
   const context = vm.createContext({
+    audioOutputModule: await import('../public/audio-output.js'),
     lifecycleModule: { createCallLifecycle, createDeviceMediaOwner, microphoneMessages: (await import('../public/call-lifecycle.js')).microphoneMessages },
     document: { getElementById: element, querySelector: element, querySelectorAll: () => [], createElement: node, createElementNS: node, body: node() },
     window: { Twilio: { Device: FakeDevice }, history: { replaceState() {} }, addEventListener() {}, scrollTo() {} },
@@ -338,7 +348,7 @@ async function pageFixture(requestMedia: (constraints: unknown) => Promise<unkno
   const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
   const importLine = "await import('./call-lifecycle.js')";
   assert.ok(source.includes(importLine));
-  await vm.runInContext(source.replace(importLine, 'lifecycleModule'), context);
+  await vm.runInContext(source.replace(importLine, 'lifecycleModule').replace("await import('./audio-output.js')", 'audioOutputModule'), context);
   await new Promise(resolve => setImmediate(resolve));
   sources[0].onopen();
   await new Promise(resolve => setImmediate(resolve));
@@ -615,6 +625,63 @@ test('transcripts pair by role, item and content index despite reversed arrival,
   assert.deepEqual(lines, ['[你 · 原文] Local original zero', '[你 · 译文] Local translation zero', '[对方 · 原文] Remote original zero', '[对方 · 译文] Remote translation zero', '[你 · 原文] Local original one', '[你 · 译文] Local translation one']);
   f.callEvent({ status: 'completed' });
   assert.deepEqual(ids('history-detail'), expected);
+});
+
+test('output selection controls bind the SDK and cannot reroute during a call', async () => {
+  const f = await pageFixture(async () => streamFixture().stream);
+  assert.equal(f.element('audio-output').value, 'default');
+  f.element('audio-output').value = 'headset';
+  await f.element('audio-output').events.change();
+  assert.equal(f.device.audio.speakerDevices.active, 'headset');
+  assert.equal(f.requests.some(path => path === 'POST /api/calls'), false);
+  await f.element('start-call').events.click();
+  assert.equal(f.element('audio-output').disabled, true);
+  assert.equal(f.element('test-audio-output').disabled, true);
+  f.element('audio-output').value = 'default';
+  await f.element('audio-output').events.change();
+  assert.equal(f.device.audio.speakerDevices.active, 'headset');
+  await f.element('end-call').events.click();
+  assert.equal(f.element('audio-output').disabled, false);
+});
+
+test('playback diagnostics track active players, ignore a retired temporary player and clear old listeners', async () => {
+  const f = await pageFixture(async () => streamFixture().stream);
+  await f.element('start-call').events.click();
+  const player = () => Object.assign(new EventEmitter(), {
+    paused: false, muted: false, volume: 1, error: null,
+    addEventListener: EventEmitter.prototype.on,
+    removeEventListener: EventEmitter.prototype.removeListener,
+  });
+  const master = player(); const temporary = player();
+  f.outgoingCall().emit('audio', master);
+  f.outgoingCall().emit('audio', temporary);
+  temporary.paused = true; temporary.emit('pause');
+  assert.match(f.element('browser-playback').textContent, /播放器处于播放状态/);
+  assert.match(f.element('browser-playback').textContent, /仍需确认耳机听感/);
+  f.outgoingCall().emit('volume', 0, 0.2);
+  assert.match(f.element('browser-playback').textContent, /本次已检测到接收声音/);
+  master.muted = true; master.emit('volumechange');
+  assert.match(f.element('browser-playback').textContent, /播放器已静音/);
+  await f.element('end-call').events.click();
+  assert.equal(master.listenerCount('playing'), 0);
+  assert.equal(temporary.listenerCount('pause'), 0);
+  master.emit('playing');
+  assert.match(f.element('browser-playback').textContent, /将在通话时显示/);
+});
+
+test('a pending output switch blocks outgoing and incoming media until actual SDK settlement', async () => {
+  const f = await pageFixture(async () => streamFixture().stream);
+  const pending = deferred<void>();
+  f.device.audio.speakerDevices.set = async () => { await pending.promise; f.device.audio.speakerDevices.active = 'headset'; };
+  f.element('audio-output').value = 'headset';
+  const selection = f.element('audio-output').events.change();
+  assert.equal(f.element('start-call').disabled, true);
+  await f.element('start-call').events.click();
+  assert.equal(f.sdkConnects(), 0);
+  const incoming = f.incoming();
+  assert.equal(incoming.rejected, 1);
+  pending.resolve(); await selection;
+  assert.equal(f.element('start-call').disabled, false);
 });
 
 test('partial transcript updates replace only their own paired row and keep final text in exports', async () => {

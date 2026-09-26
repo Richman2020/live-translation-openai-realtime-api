@@ -2,6 +2,7 @@
 
 (async () => {
   const { createCallLifecycle, createDeviceMediaOwner, microphoneMessages } = await import('./call-lifecycle.js');
+  const { createAudioOutput } = await import('./audio-output.js');
   const $ = id => document.getElementById(id);
   const tokenKey = 'ai-phone-local-token';
   const historyKey = 'ai-phone-calls-v1';
@@ -101,6 +102,7 @@
   const recoveringTranslationRoles = new Set();
   let translationRecoveryHint = false;
   const audioDelivery = new Map();
+  const audioOutput = createAudioOutput({ onChange: () => renderStatus() });
   const callLifecycle = createCallLifecycle({
     requestMedia: navigator.mediaDevices?.getUserMedia ? constraints => navigator.mediaDevices.getUserMedia(constraints) : null,
     onChange: () => renderStatus(),
@@ -229,7 +231,7 @@
     $('device-dot').classList.toggle('ready', registered && eventsOnline);
     $('enable-device').textContent = enabling ? '正在开启…' : registered ? '关闭通话' : '开启通话';
     $('enable-device').disabled = !state || !configured || enabling || busy() || saving || verifying;
-    $('start-call').disabled = !configured || !registered || !eventsOnline || busy() || saving || verifying;
+    $('start-call').disabled = !configured || !registered || !eventsOnline || busy() || saving || verifying || audioOutput.snapshot.status !== 'idle';
     $('start-call').querySelector('span').textContent = dialing ? '正在拨号…' : busy() ? '通话进行中' : '拨打电话';
     $('phone-number').disabled = busy(); $('erase-number').disabled = busy();
     document.querySelectorAll('.dial-key').forEach(button => { button.disabled = busy(); });
@@ -262,6 +264,23 @@
     document.body.classList.toggle('is-active', currentState === 'active');
     $('bridge-caption').textContent = phase === 'reconnecting' ? callPhases[phase] : translationRecovering ? '翻译短暂中断，正在恢复；请稍后重说刚才未完成的一句。' : currentState === 'active' && translationRecoveryHint ? '翻译连接已恢复，请重说刚才未完成的一句。' : currentState === 'active' ? '中文与英文，正在传递' : phase === 'microphone' ? callPhases[phase] : currentState === 'ringing' ? '正在呼叫对方，等待接听' : callPhases[phase] || '连接后，听见彼此的语言';
     $('call-timer').textContent = timeText(duration());
+    renderAudioOutput();
+    $('browser-playback').textContent = !callDiagnostics ? '浏览器接收与播放器状态将在通话时显示。' :
+      `${callDiagnostics.outputDetected ? '本次已检测到接收声音' : '尚未检测到接收声音'} · ${callDiagnostics.playerState || '等待播放器状态'}`;
+  }
+  function renderAudioOutput(snapshot = audioOutput.snapshot) {
+    const select = $('audio-output');
+    const devices = snapshot.devices.length ? snapshot.devices : [{ deviceId: 'default', label: '系统默认输出' }];
+    // Avoid rebuilding options on every call-volume update.
+    const signature = JSON.stringify(devices);
+    if (select.dataset.devices !== signature) {
+      select.replaceChildren(...devices.map(item => { const option = element('option', '', item.label); option.value = item.deviceId; return option; }));
+      select.dataset.devices = signature;
+    }
+    select.value = snapshot.selectedId || (snapshot.supported ? '' : 'default');
+    select.disabled = !registered || busy() || enabling || !snapshot.supported || snapshot.status !== 'idle';
+    $('test-audio-output').disabled = !registered || busy() || enabling || snapshot.status !== 'idle';
+    $('audio-output-status').textContent = !registered ? '开启通话后，可选择耳机并试听；试听不会拨号。' : snapshot.message;
   }
   function renderChecks() {
     $('configuration-checks').replaceChildren();
@@ -284,6 +303,7 @@
     renderHistory();
   }
   function clearSdkCall() {
+    callDiagnostics?.disposePlayers?.();
     const attempt = callLifecycle.current;
     const wasIncoming = Boolean(incomingCall);
     const oldCall = sdkCall || incomingCall; sdkCall = null; callDiagnostics = null; incomingCall = null; acceptingAttempt = null; muted = false;
@@ -292,6 +312,7 @@
     if (attempt?.mediaOwner?.retireIfPending(attempt) && device === attempt.device) {
       // Destroy only this old Device. A later registration gets a fresh AudioHelper.
       const oldDevice = device; device = null; deviceMediaOwner = null; registered = false;
+      audioOutput.bind(null);
       clearInterval(heartbeat); heartbeat = null;
       try { oldDevice.destroy(); } catch { /* The stale owner remains retired. */ }
       presence(false).catch(() => {});
@@ -422,6 +443,7 @@
   async function destroyDevice() {
     clearInterval(heartbeat); heartbeat = null; registered = false;
     const oldDevice = device; device = null; deviceMediaOwner = null;
+    audioOutput.bind(null);
     try { await oldDevice?.unregister(); } catch { /* Still destroy locally. */ }
     try { oldDevice?.destroy(); } catch { /* Already destroyed. */ }
     await presence(false).catch(() => {}); renderStatus();
@@ -449,9 +471,10 @@
         getUserMedia: constraints => mediaOwner.getUserMedia(constraints),
       });
       device = next; deviceMediaOwner = mediaOwner;
+      audioOutput.bind(next.audio || null);
       next.on('registered', () => {
         if (device !== next) return; registered = true; clearInterval(heartbeat);
-        logSdkEvent('device-registered');
+        logSdkEvent('device-registered'); audioOutput.refresh();
         presence(true).catch(error => showError(error.message));
         heartbeat = setInterval(() => presence(true).catch(error => showError(error.message)), 15000); renderStatus();
       });
@@ -464,19 +487,45 @@
     finally { enabling = false; renderStatus(); }
   }
   function bindCall(call, attempt) {
+    audioOutput.cancelTest();
     sdkCall = call;
-    const diagnostics = { volumeSeen: false, inputDetected: false, inputPeak: null, outputPeak: null, lastLoggedAt: Date.now(), qualityWarnings: new Set() };
+    const diagnostics = { volumeSeen: false, inputDetected: false, outputDetected: false, playerState: '', inputPeak: null, outputPeak: null, lastLoggedAt: Date.now(), qualityWarnings: new Set() };
     callDiagnostics = diagnostics;
+    // Public SDK audio event; do not restart SDK-managed or retired audio elements.
+    // https://www.twilio.com/docs/voice/sdks/javascript/twiliocall#audio-event
+    const players = new Map();
+    diagnostics.disposePlayers = () => {
+      for (const [player, update] of players) for (const name of ['playing', 'pause', 'volumechange', 'error', 'ended']) player.removeEventListener(name, update);
+      players.clear();
+    };
+    call.on('audio', player => {
+      if (sdkCall !== call || !callLifecycle.isCurrent(attempt) || players.has(player)) return;
+      const update = () => {
+        if (sdkCall !== call || !callLifecycle.isCurrent(attempt)) return;
+        // SDK may retire a temporary player after moving its master to the selected sink.
+        const all = [...players.keys()];
+        diagnostics.playerState = all.some(item => !item.error && !item.paused && !item.muted && item.volume > 0)
+          ? '播放器处于播放状态（仍需确认耳机听感）' : all.some(item => !item.error && !item.paused)
+            ? '播放器已静音' : all.some(item => !item.error) ? '播放器暂停，尚未播放' : '播放器发生错误';
+        renderStatus();
+      };
+      players.set(player, update);
+      for (const name of ['playing', 'pause', 'volumechange', 'error', 'ended']) player.addEventListener(name, update);
+      update();
+    });
     // SDK volume is 0..1; the threshold only reports observed sound, not speech or working delivery.
     call.on('volume', (input, output) => {
       if (sdkCall !== call || !callLifecycle.isCurrent(attempt)) return;
-      const wasSeen = diagnostics.volumeSeen; const wasDetected = diagnostics.inputDetected;
+      const wasSeen = diagnostics.volumeSeen; const wasDetected = diagnostics.inputDetected; const outputWasDetected = diagnostics.outputDetected;
       if (Number.isFinite(input) && input >= 0 && input <= 1) {
         diagnostics.volumeSeen = true; diagnostics.inputPeak = Math.max(diagnostics.inputPeak ?? 0, input);
         if (!muted && input > 0.01) diagnostics.inputDetected = true;
       }
-      if (Number.isFinite(output) && output >= 0 && output <= 1) diagnostics.outputPeak = Math.max(diagnostics.outputPeak ?? 0, output);
-      if (wasSeen !== diagnostics.volumeSeen || wasDetected !== diagnostics.inputDetected) renderStatus();
+      if (Number.isFinite(output) && output >= 0 && output <= 1) {
+        diagnostics.outputPeak = Math.max(diagnostics.outputPeak ?? 0, output);
+        if (output > 0.01) diagnostics.outputDetected = true;
+      }
+      if (wasSeen !== diagnostics.volumeSeen || wasDetected !== diagnostics.inputDetected || outputWasDetected !== diagnostics.outputDetected) renderStatus();
     });
     call.on('sample', sample => {
       if (sdkCall !== call || !callLifecycle.isCurrent(attempt) || !sample || Date.now() - diagnostics.lastLoggedAt < 5000) return;
@@ -512,6 +561,7 @@
     for (const event of ['disconnect', 'cancel', 'reject']) call.on(event, () => {
       if (sdkCall !== call && incomingCall !== call) return;
       logSdkEvent(`call-${event}`);
+      diagnostics.disposePlayers();
       sdkCall = null; incomingCall = null; muted = false;
       callLifecycle.cancel(attempt);
       endCall(attempt).catch(error => showError(error.message)); renderStatus();
@@ -524,7 +574,7 @@
     });
   }
   function receiveIncoming(call) {
-    if (sdkCall || incomingCall || dialing || ending) { call.reject(); return; }
+    if (sdkCall || incomingCall || dialing || ending || audioOutput.snapshot.status === 'selecting') { call.reject(); return; }
     const attempt = callLifecycle.begin(activeSession?.id || null);
     Object.assign(attempt, { direction: 'inbound', device, mediaOwner: deviceMediaOwner });
     incomingCall = call; bindCall(call, attempt);
@@ -532,7 +582,7 @@
     navigate('workspace'); renderStatus(); refreshStatus().catch(error => showError(error.message));
   }
   async function startCall() {
-    if (busy() || !registered || !eventsOnline) return;
+    if (busy() || !registered || !eventsOnline || audioOutput.snapshot.status !== 'idle') return;
     const to = $('phone-number').value.replace(/[\s()-]/g, '');
     if (!/^\+[1-9]\d{6,14}$/.test(to)) { $('phone-error').textContent = '请输入含国家区号的号码，例如 +1 加十位美国号码。'; $('phone-number').setAttribute('aria-invalid', 'true'); $('phone-number').focus(); return; }
     dialing = true; clearError(); renderStatus();
@@ -544,6 +594,7 @@
       // Permission and device acquisition finish before creating any server-side call.
       await callLifecycle.prepareMicrophone(attempt);
       if (!callLifecycle.isCurrent(attempt)) return;
+      audioOutput.refresh();
       callLifecycle.update(attempt, { phase: 'checking' });
       const created = await post('/api/calls', { to }); createdId = created.id;
       if (!createdId || !created.connectionParams) throw new Error('电话服务未返回有效连接信息。');
@@ -590,6 +641,7 @@
     try {
       await callLifecycle.prepareMicrophone(attempt);
       if (incomingCall !== call || !callLifecycle.isCurrent(attempt)) { callLifecycle.cancel(attempt); return; }
+      audioOutput.refresh();
       await refreshStatus();
       if (incomingCall !== call || !activeSession || !callLifecycle.isCurrent(attempt)) { callLifecycle.cancel(attempt); return; }
       callLifecycle.update(attempt, { sessionId: activeSession.id });
@@ -676,6 +728,8 @@
   document.querySelector('.brand').addEventListener('click', event => { event.preventDefault(); navigate('workspace'); });
   $('enable-device').addEventListener('click', enableDevice); $('start-call').addEventListener('click', startCall); $('end-call').addEventListener('click', () => endCall());
   $('accept-call').addEventListener('click', acceptCall); $('reject-call').addEventListener('click', rejectCall);
+  $('audio-output').addEventListener('change', async () => { if (!registered || busy()) return; const pending = audioOutput.select($('audio-output').value); renderStatus(); await pending; renderStatus(); });
+  $('test-audio-output').addEventListener('click', async () => { if (!registered || busy()) return; const pending = audioOutput.test(); renderStatus(); await pending; renderStatus(); });
   $('mute-button').addEventListener('click', () => { if (!sdkCall || sdkCall === incomingCall) return; try { const nextMuted = !muted; sdkCall.mute(nextMuted); muted = nextMuted; renderStatus(); } catch { showError('未能切换麦克风状态，请检查通话连接。'); } });
   $('erase-number').addEventListener('click', () => { if (!busy()) { $('phone-number').value = $('phone-number').value.slice(0, -1); $('phone-number').focus(); } });
   $('phone-number').addEventListener('input', () => { $('phone-error').textContent = ''; $('phone-number').removeAttribute('aria-invalid'); });
@@ -690,6 +744,7 @@
   window.addEventListener('beforeunload', event => { if (busy()) { event.preventDefault(); event.returnValue = ''; } });
   window.addEventListener('pagehide', () => {
     disposed = true; clearInterval(heartbeat); eventSource?.close();
+    audioOutput.bind(null);
     callLifecycle.cancel();
     // Best effort only; server-side presence expiry and call lifecycle are authoritative.
     if (accessToken) fetch('/api/presence', { method: 'POST', keepalive: true, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` }, body: JSON.stringify({ available: false }) }).catch(() => {});

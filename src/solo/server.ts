@@ -335,6 +335,7 @@ export async function buildSoloServer(
       '.svg': 'image/svg+xml',
       '.png': 'image/png',
       '.ico': 'image/x-icon',
+      '.wav': 'audio/wav',
     };
     if (!types[extname(file)]) return reply.code(404).send();
     reply.header(

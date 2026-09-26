@@ -47,6 +47,7 @@
           <div class="language-settings fixed-languages"><div class="language-field"><span>我的语言</span><strong>普通话</strong></div><span class="swap-button" aria-hidden="true"><svg class="icon"><use href="#i-swap"/></svg></span><div class="language-field"><span>对方语言</span><strong>English</strong></div></div>
           <button class="primary-button" id="start-call" disabled><svg class="icon"><use href="#i-phone"/></svg><span>拨打电话</span><svg class="icon small"><use href="#i-arrow"/></svg></button>
           <p class="dial-footnote">会拨出真实电话，并产生线路和翻译费用。</p>
+          <div class="audio-output-panel"><label for="audio-output">电脑声音输出</label><div class="audio-output-controls"><select id="audio-output" aria-describedby="audio-output-status" disabled><option value="default">系统默认输出</option></select><button class="secondary-button" id="test-audio-output" disabled>试听中文</button></div><p id="audio-output-status" role="status">开启通话后，可选择耳机并试听；试听不会拨号。</p><p id="browser-playback">浏览器接收与播放器状态将在通话时显示。</p></div>
           <div class="microphone-note"><svg class="icon"><use href="#i-mic"/></svg><p>拨号或接听时允许麦克风。请佩戴耳机；同房测试时，手机用听筒并关闭其他外放，避免译音再次被收进去。</p></div>
           <div class="availability"><span class="status-dot" id="device-dot"></span><span id="device-state">通话尚未开启</span></div>
         </section>
