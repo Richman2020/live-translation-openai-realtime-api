@@ -7,9 +7,36 @@
 - [AGENTS.md](AGENTS.md)：共享协作、提交与推送规则，以及运行边界。
 - [PROJECT_BRIEF.md](PROJECT_BRIEF.md)：用户目标、当前范围与后续功能。
 - [PROGRESS.md](PROGRESS.md)：已完成工作、验证结果、尚未验证的内容与下一步。
+- [READINESS_REVIEW.md](READINESS_REVIEW.md)：2026-09-23 接入验证、历史代码复核、实现限制与真实验收清单。
 - [LOCAL_SETUP.md](LOCAL_SETUP.md)：本机安装、私密配置和真实通话测试步骤。
 
-当前代码基于 Twilio Flex 通话翻译示例；独立桌面界面、主动拨号和 WhatsApp 接入的实际状态请以进度记录和代码为准。下面保留上游项目说明。
+## 本机单人通话版（solo）
+
+仓库现已新增独立的中文通话工作台，使用电脑浏览器、Twilio Voice JavaScript SDK、Twilio 电话线路和 OpenAI Realtime。默认方向为：**我说普通话，对方听英语；对方说英语，我听中文**。本模式不需要开通 Flex，也不需要 Studio 或 TaskRouter；原版 Flex 代码保留在仓库中。
+
+已实现桌面入口、主动拨号、来电接听/拒接、挂断、静音、实际字幕事件、可选本机历史记录、私密配置及手动 API 验证。默认模型为 `gpt-realtime-1.5`，实际账户可用性与翻译效果须联网实测。实现依据是 `src/solo/`、`public/` 与 `scripts/`；界面不会生成假对话或把“配置已填写”当作“通话已接通”。
+
+**2026-09-23：7 项供应商设置、正式 API 验证 4/4、号码改绑、浏览器注册和麦克风预检已通过。** 两次真实拨号到达 Twilio 浏览器线路，目标手机通话均未创建；第二次明确返回 Twilio `21216` / HTTP 400，清理已确认。目前需核对供应商的外呼限制，手机接通、来电、双向翻译音频与延迟仍未验收。新增安全错误诊断与页面指引，最终 80/80 项测试、构建和定向检查通过；详见 [PROGRESS.md](PROGRESS.md)。
+
+2026-09-24 复测：用户说明账户为美国账户；已实时确认继续使用原有 Twilio 号码，归属、语音能力及回调均正确。再次拨号仍被 21216/HTTP 400 拒绝，目标手机腿未创建；具体拦截原因待供应商核实，无需重新购买或更换主叫号码。
+
+在仓库目录安装并创建桌面入口：
+
+```powershell
+npm ci
+npm run setup:local
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Install-DesktopShortcut.ps1
+```
+
+点击桌面「AI 电话」打开；首次供应商配置缺失时会进入设置页。也可运行 `scripts/Start-AIPhone.ps1`；停止用 `scripts/Stop-AIPhone.ps1`，关闭浏览器窗口不等于停止本机服务。已有的「AI 电话（预览）」快捷方式保留为旧预览。
+
+新环境接通顺序是：**启动本机服务 → 在设置页保存私密凭据 → 启动 Cloudflare 临时隧道 → `npm run configure:twilio -- --prepare` → 验证 API 连接 → `npm run configure:twilio -- --apply` → 真实双向电话验收**。当前本机已到真实拨号阶段，接下来排查 Twilio 21216，不重复创建资源。`--prepare` 准备 API Key/TwiML App，`--apply` 在再次验证成功后才改绑用户已授权复用的号码。完整命令和每步影响见 [LOCAL_SETUP.md](LOCAL_SETUP.md)。
+
+Twilio/OpenAI 仍需联网。本机界面/API 不对公网开放；隧道提供语音回调和媒体流入口。临时域名变化后必须重新配置。点击「开启通话」注册接听设备，拨号/接听前先准备麦克风；Codex 内置浏览器的权限提示在标签页地址栏外层，任务 Full access 不能替代网站授权。若授权后旧请求仍等待，先确认无活动电话，再刷新页面并重新注册。准备超时或取消不会继续外呼，建议戴耳机。WhatsApp、其他翻译供应商与云端部署尚未实现。
+
+## 上游 Flex 示例（独立保留）
+
+以下英文说明仅适用于原版 Flex/Studio/TaskRouter 模式，使用 `npm run dev` 或 `npm start` 和 `npm run check:config`。其两号码、Flex 和 ngrok 配置不要套到上面的 solo 模式。
 
 This application demonstrates how to use Twilio and OpenAI's Realtime API for bidirectional
 voice language translation between a caller and a contact center agent.
