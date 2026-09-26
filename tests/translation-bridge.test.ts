@@ -20,6 +20,8 @@ class FakeSocket extends EventEmitter {
   closeCount = 0;
   sent: Record<string, any>[] = [];
   sendFailure?: 'throw' | 'callback';
+  pendingWrite?: (error?: Error) => void;
+  deferWrite = false;
 
   open() {
     this.readyState = WebSocket.OPEN;
@@ -37,13 +39,17 @@ class FakeSocket extends EventEmitter {
       return;
     }
     this.sent.push(JSON.parse(raw));
+    if (this.deferWrite) {
+      this.pendingWrite = callback;
+      return;
+    }
     callback?.();
   }
-  close() {
+  close(code?: number) {
     if (this.readyState === WebSocket.CLOSED) return;
     this.closeCount += 1;
     this.readyState = WebSocket.CLOSED;
-    this.emit('close');
+    this.emit('close', code);
   }
   terminate() {
     this.close();
@@ -327,6 +333,31 @@ test('new speech turns queue while a translation runs, avoiding cancellation, lo
   f.bridge.close();
 });
 
+test('each independent response keeps its own speaker direction and translation instructions', () => {
+  const f = fixture();
+  f.pair();
+  for (const role of ['local', 'remote'] as const) {
+    f.commit(role);
+    const socket = f.provider(role);
+    const response = socket.sent.find(
+      (event) => event.type === 'response.create',
+    ).response;
+    assert.equal(response.conversation, 'none');
+    assert.deepEqual(response.input, [
+      { type: 'item_reference', id: `item_${role}` },
+    ]);
+    assert.equal(response.instructions, socket.sent[0].session.instructions);
+    assert.match(response.instructions, /NEVER answer/);
+    assert.match(
+      response.instructions,
+      role === 'local'
+        ? /Mandarin Chinese into English/
+        : /English into Mandarin Chinese/,
+    );
+  }
+  f.bridge.close();
+});
+
 test('subtitle deltas and final replacement share stable IDs, including out-of-order source transcription', () => {
   const f = fixture();
   f.pair();
@@ -430,12 +461,10 @@ test('provider errors, malformed events, rejected configuration and abrupt disco
     [
       'API error',
       (f) =>
-        f
-          .provider('local')
-          .receive({
-            type: 'error',
-            error: { message: 'fake-key-not-a-credential private-transcript' },
-          }),
+        f.provider('local').receive({
+          type: 'error',
+          error: { message: 'fake-key-not-a-credential private-transcript' },
+        }),
       'openai_event_error:local',
     ],
     [
@@ -461,12 +490,10 @@ test('provider errors, malformed events, rejected configuration and abrupt disco
     [
       'transcription error',
       (f) =>
-        f
-          .provider('local')
-          .receive({
-            type: 'conversation.item.input_audio_transcription.failed',
-            error: { message: 'private' },
-          }),
+        f.provider('local').receive({
+          type: 'conversation.item.input_audio_transcription.failed',
+          error: { message: 'private' },
+        }),
       'openai_event_error:local',
     ],
   ];
@@ -501,6 +528,110 @@ test('unexpected Twilio transport close cleans every connection without relying 
   f.phones.local.close();
   assert.deepEqual(f.failures, ['phone_stream_closed:local']);
   f.assertClosed();
+});
+
+test('one transport closure recovers only that translation leg without replaying old turns', () => {
+  const connections: object[] = [];
+  const f = fixture({ onConnection: (event) => connections.push(event) });
+  f.pair();
+  f.responding('remote', 'old_response', 'old_input');
+  const old = f.provider('remote');
+  old.deferWrite = true;
+  f.media('remote', 'AQID');
+  old.readyState = WebSocket.CLOSING;
+  f.media('remote', 'AQID');
+  assert.deepEqual(f.failures, []);
+  old.close(1006);
+  assert.equal(f.providers.length, 3);
+  assert.deepEqual(f.failures, []);
+  assert.equal(f.phones.local.readyState, WebSocket.OPEN);
+  assert.equal(f.phones.remote.readyState, WebSocket.OPEN);
+  assert.equal(f.provider('local').readyState, WebSocket.OPEN);
+  const replacement = f.providers[2];
+  for (let i = 0; i < 150; i += 1)
+    f.media('remote', Buffer.alloc(160, i).toString('base64'));
+  old.receive({
+    type: 'response.output_audio.delta',
+    response_id: 'old_response',
+    delta: 'AQID',
+  });
+  old.emit('error', new Error('private stale provider error'));
+  assert.equal(f.phones.local.sent.length, 0);
+  replacement.open();
+  replacement.receive({
+    type: 'session.updated',
+    session: replacement.sent[0].session,
+  });
+  const buffered = replacement.sent.filter(
+    (event) => event.type === 'input_audio_buffer.append',
+  );
+  old.pendingWrite?.(new Error('private late write failure'));
+  assert.deepEqual(f.failures, []);
+  assert.equal(buffered.length, 100);
+  assert.equal(Buffer.from(buffered[0].audio, 'base64')[0], 50);
+  assert.equal(
+    replacement.sent.filter((event) => event.type === 'response.create').length,
+    0,
+  );
+  assert.deepEqual(connections.slice(-3), [
+    { role: 'remote', state: 'disconnected', closeCode: 1006 },
+    { role: 'remote', state: 'reconnecting', closeCode: 1006 },
+    { role: 'remote', state: 'ready' },
+  ]);
+  // The replacement translates new speech to the original recipient stream.
+  replacement.receive({
+    type: 'input_audio_buffer.committed',
+    item_id: 'new_input',
+  });
+  replacement.receive({
+    type: 'response.created',
+    response: { id: 'new_response' },
+  });
+  replacement.receive({
+    type: 'response.output_audio.delta',
+    response_id: 'new_response',
+    delta: 'AQID',
+  });
+  assert.equal(f.phones.local.sent.length, 1);
+  f.bridge.close();
+  f.assertClosed();
+});
+
+test('a second provider disconnect fails closed rather than repeatedly creating paid sessions', () => {
+  const f = fixture();
+  f.pair();
+  f.provider('remote').close(1011);
+  const replacement = f.providers[2];
+  replacement.open();
+  replacement.receive({
+    type: 'session.updated',
+    session: replacement.sent[0].session,
+  });
+  replacement.close(1006);
+  assert.equal(f.providers.length, 3);
+  assert.deepEqual(f.failures, ['openai_connection_closed:remote']);
+  f.assertClosed();
+});
+
+test('policy and pre-ack closes never retry, and recovery retains the handshake deadline', async () => {
+  const policy = fixture();
+  policy.pair();
+  policy.provider('remote').close(1008);
+  assert.equal(policy.providers.length, 2);
+  assert.deepEqual(policy.failures, ['openai_connection_closed:remote']);
+  policy.assertClosed();
+  const preAck = fixture();
+  preAck.attach('local');
+  preAck.attach('remote');
+  preAck.provider('remote').close(1006);
+  assert.equal(preAck.providers.length, 2);
+  preAck.assertClosed();
+  const timedOut = fixture({ sessionTimeoutMs: 10 });
+  timedOut.pair();
+  timedOut.provider('remote').close(1006);
+  await delay(25);
+  assert.deepEqual(timedOut.failures, ['openai_session_timeout:remote']);
+  timedOut.assertClosed();
 });
 
 test('duplicate replacement streams and wrong stream IDs never take over a call', () => {

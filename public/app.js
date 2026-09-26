@@ -74,6 +74,7 @@
   let device = null;
   let deviceMediaOwner = null;
   let sdkCall = null;
+  let callDiagnostics = null;
   let incomingCall = null;
   let registered = false;
   let enabling = false;
@@ -91,6 +92,8 @@
   let selectedHistory = null;
   let toastTimer = null;
   let disposed = false;
+  const recoveringTranslationRoles = new Set();
+  let translationRecoveryHint = false;
   const callLifecycle = createCallLifecycle({
     requestMedia: navigator.mediaDevices?.getUserMedia ? constraints => navigator.mediaDevices.getUserMedia(constraints) : null,
     onChange: () => renderStatus(),
@@ -145,6 +148,24 @@
   }
   function showError(message) { $('app-error').textContent = cleanMessage(message); $('app-error').hidden = false; }
   function clearError() { $('app-error').hidden = true; $('app-error').textContent = ''; }
+  function clearCleanupError() {
+    if ([errorMessages.CALL_CLEANUP_FAILED, errorMessages.CALL_CLEANUP_UNCONFIRMED].includes($('app-error').textContent)) clearError();
+  }
+  const sdkWarnings = new Set([
+    'constant-audio-input-level', 'constant-audio-output-level', 'low-bytes-sent', 'low-bytes-received',
+    'high-jitter', 'high-rtt', 'high-packet-loss', 'high-packets-lost-fraction', 'low-mos', 'ice-connectivity-lost',
+  ]);
+  const sdkQualityWarnings = new Set([
+    'low-bytes-sent', 'low-bytes-received', 'high-jitter', 'high-rtt',
+    'high-packet-loss', 'high-packets-lost-fraction', 'low-mos', 'ice-connectivity-lost',
+  ]);
+  function logSdkEvent(phase, error, warning) {
+    // Keep raw SDK objects out of logs: they can contain tokens, SDP, call IDs, or message text.
+    const entry = { phase };
+    if (Number.isInteger(error?.code) && error.code > 0 && error.code <= 999999) entry.code = error.code;
+    if (sdkWarnings.has(warning)) entry.warning = warning;
+    console.info('[AI Phone SDK]', JSON.stringify(entry));
+  }
   function saveLocal(key, data) { try { localStorage.setItem(key, JSON.stringify(data)); return true; } catch { toast('浏览器未能保存记录，本次对话仍可导出。'); return false; } }
   function busy() { return dialing || ending || Boolean(activeSession && (!terminal(activeSession.status) || requiresCleanup(activeSession))) || Boolean(sdkCall || incomingCall); }
   function timeText(seconds) { const n = Math.max(0, Math.floor(seconds || 0)); return `${String(Math.floor(n / 60)).padStart(2, '0')}:${String(n % 60).padStart(2, '0')}`; }
@@ -202,6 +223,9 @@
     $('mute-button').disabled = !sdkCall || sdkCall === incomingCall || ending;
     $('mute-button').setAttribute('aria-pressed', String(muted)); $('mute-button').querySelector('span').textContent = muted ? '取消静音' : '静音';
     $('call-hint').textContent = callLifecycle.current?.microphoneReady ? (muted ? '你的麦克风已静音' : '麦克风已就绪') : callLifecycle.current?.phase === 'microphone' ? '正在等待麦克风' : '麦克风未启用';
+    if (sdkCall && callLifecycle.current?.microphoneReady && !muted && callDiagnostics?.volumeSeen) {
+      $('call-hint').textContent = callDiagnostics.inputDetected ? '本次已检测到麦克风声音' : '尚未检测到麦克风声音（安静时正常）';
+    }
     $('accept-call').disabled = !incomingCall || ending || Boolean(acceptingAttempt); $('reject-call').disabled = !incomingCall || ending;
     $('incoming-banner').hidden = !incomingCall;
     $('save-settings').disabled = !state || busy() || saving || verifying;
@@ -211,10 +235,12 @@
     $('export-current').disabled = !record?.lines.length;
     const currentState = activeSession?.status || (record?.endedAt ? record.status : '');
     const phase = callLifecycle.current?.phase;
-    $('connection-text').textContent = cleanupPending ? '线路关闭待确认' : phase === 'reconnecting' ? '正在恢复音频连接' : statusNames[currentState] || '等待开始';
-    $('connection-status').classList.toggle('active', currentState === 'active');
+    const translationRecovering = Boolean(activeSession && !terminal(currentState) && currentState !== 'ending' && !ending && recoveringTranslationRoles.size);
+    const qualityWarning = currentState === 'active' && Boolean(callDiagnostics?.qualityWarnings.size);
+    $('connection-text').textContent = cleanupPending ? '线路关闭待确认' : phase === 'reconnecting' ? '正在恢复音频连接' : translationRecovering ? '正在恢复翻译连接' : qualityWarning ? '通话中 · 连接质量异常' : statusNames[currentState] || '等待开始';
+    $('connection-status').classList.toggle('active', currentState === 'active' && !qualityWarning && !translationRecovering && phase !== 'reconnecting');
     document.body.classList.toggle('is-active', currentState === 'active');
-    $('bridge-caption').textContent = phase === 'reconnecting' ? callPhases[phase] : currentState === 'active' ? '中文与英文，正在传递' : phase === 'microphone' ? callPhases[phase] : currentState === 'ringing' ? '正在呼叫对方，等待接听' : callPhases[phase] || '连接后，听见彼此的语言';
+    $('bridge-caption').textContent = phase === 'reconnecting' ? callPhases[phase] : translationRecovering ? '翻译短暂中断，正在恢复；请稍后重说刚才未完成的一句。' : currentState === 'active' && translationRecoveryHint ? '翻译连接已恢复，请重说刚才未完成的一句。' : currentState === 'active' ? '中文与英文，正在传递' : phase === 'microphone' ? callPhases[phase] : currentState === 'ringing' ? '正在呼叫对方，等待接听' : callPhases[phase] || '连接后，听见彼此的语言';
     $('call-timer').textContent = timeText(duration());
   }
   function renderChecks() {
@@ -240,7 +266,7 @@
   function clearSdkCall() {
     const attempt = callLifecycle.current;
     const wasIncoming = Boolean(incomingCall);
-    const oldCall = sdkCall || incomingCall; sdkCall = null; incomingCall = null; acceptingAttempt = null; muted = false;
+    const oldCall = sdkCall || incomingCall; sdkCall = null; callDiagnostics = null; incomingCall = null; acceptingAttempt = null; muted = false;
     try { if (wasIncoming && (!oldCall?.status || oldCall.status() === 'pending')) oldCall?.reject(); else oldCall?.disconnect(); } catch { /* Backend end state remains authoritative. */ }
     callLifecycle.cancel(attempt);
     if (attempt?.mediaOwner?.retireIfPending(attempt) && device === attempt.device) {
@@ -253,9 +279,14 @@
   }
   function applySession(session) {
     if (session && (typeof session.id !== 'string' || typeof session.status !== 'string')) return;
+    if (!session || !terminal(session.status) && session.id !== activeSession?.id) {
+      recoveringTranslationRoles.clear(); translationRecoveryHint = false;
+    }
     if (session && terminal(session.status) && !requiresCleanup(session)) {
       if (activeSession?.id !== session.id && record?.id !== session.id) return;
+      recoveringTranslationRoles.clear(); translationRecoveryHint = false;
       finishRecord(session.status); activeSession = null; dialing = false; ending = false; clearSdkCall();
+      clearCleanupError();
       if (session.error) showError(callFailureMessage(session));
     } else if (session) {
       if (!record || record.id !== session.id) { if (record && !record.endedAt) finishRecord('completed'); record = makeRecord(session); $('transcript').replaceChildren(); $('empty-conversation').hidden = false; }
@@ -266,6 +297,7 @@
       if (requiresCleanup(session)) showError(errorMessages.CALL_CLEANUP_UNCONFIRMED);
     } else if (activeSession) {
       finishRecord('completed'); activeSession = null; dialing = false; ending = false; clearSdkCall();
+      clearCleanupError();
     }
     renderStatus();
   }
@@ -289,8 +321,23 @@
     receive('snapshot', value => applySession(value.activeSession || null));
     receive('call', applySession);
     receive('transcript', appendTranscript);
+    receive('translation-connection', applyTranslationConnection);
     receive('error', value => showError(cleanMessage(value.message || value.error, '通话服务报告错误，请检查连接状态。')));
     eventSource.onerror = () => { eventsOnline = false; renderStatus(); };
+  }
+  function applyTranslationConnection(value) {
+    if (!value || !activeSession || value.sessionId !== activeSession.id || terminal(activeSession.status) || activeSession.status === 'ending') return;
+    if (!['local', 'remote'].includes(value.role) || !['disconnected', 'reconnecting', 'ready'].includes(value.state)) return;
+    const diagnostic = { role: value.role, state: value.state };
+    if (Number.isInteger(value.closeCode) && value.closeCode >= 1000 && value.closeCode <= 4999) diagnostic.closeCode = value.closeCode;
+    console.info('[AI Phone Translation]', JSON.stringify(diagnostic));
+    if (value.state === 'ready') {
+      const recovered = recoveringTranslationRoles.delete(value.role);
+      if (recovered && !recoveringTranslationRoles.size) translationRecoveryHint = true;
+    } else {
+      recoveringTranslationRoles.add(value.role); translationRecoveryHint = false;
+    }
+    renderStatus();
   }
   function renderLine(line) {
     const article = element('article', `utterance ${line.role === 'remote' ? 'their' : 'mine'} ${line.kind === 'original' ? 'original-entry' : ''}`);
@@ -300,15 +347,33 @@
     const at = new Date(line.at); if (!Number.isNaN(at.getTime())) meta.append(element('time', '', at.toLocaleTimeString('zh-CN', { hour12: false })));
     const bubble = element('div', 'speech-bubble'); bubble.append(element('p', 'transcript-text', line.text)); article.append(meta, bubble); return article;
   }
+  function orderedTranscriptLines(lines) {
+    const groups = new Map();
+    for (const line of lines) {
+      const match = /^(local|remote):(original|translation):([A-Za-z0-9_-]{1,256}):(0|[1-9]\d*)$/.exec(line.id);
+      const key = match && match[1] === line.role && match[2] === line.kind ? `turn:${match[1]}:${match[3]}:${match[4]}` : `unpaired:${line.id}`;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(line);
+    }
+    // Map insertion order retains each turn's first arrival, including translation-before-ASR.
+    return [...groups.values()].flatMap(group => group.sort((a, b) => Number(a.kind !== 'original') - Number(b.kind !== 'original')));
+  }
   function appendTranscript(value) {
     if (!value || typeof value.id !== 'string' || typeof value.text !== 'string' || !['local', 'remote'].includes(value.role) || !['original', 'translation'].includes(value.kind)) return;
     if (!record || (value.sessionId && value.sessionId !== record.id)) return;
+    if (translationRecoveryHint && value.kind === 'translation' && value.final === true) { translationRecoveryHint = false; renderStatus(); }
     const line = { id: value.id, role: value.role, kind: value.kind, text: value.text.slice(0, 20000), final: value.final === true, at: value.at || new Date().toISOString() };
     const index = record.lines.findIndex(old => old.id === line.id);
     if (index >= 0) record.lines[index] = line; else record.lines.push(line);
     const oldNode = [...$('transcript').children].find(node => node.dataset.transcriptId === line.id);
     const scroll = $('transcript-scroll'); const nearBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 100;
-    if (oldNode) oldNode.replaceWith(renderLine(line)); else $('transcript').append(renderLine(line));
+    if (oldNode) oldNode.replaceWith(renderLine(line));
+    else {
+      const ordered = orderedTranscriptLines(record.lines);
+      const next = ordered[ordered.findIndex(item => item.id === line.id) + 1];
+      const nextNode = next && [...$('transcript').children].find(node => node.dataset.transcriptId === next.id);
+      $('transcript').insertBefore(renderLine(line), nextNode || null);
+    }
     $('empty-conversation').hidden = true;
     if (nearBottom) scroll.scrollTop = scroll.scrollHeight;
     $('export-current').disabled = false;
@@ -338,17 +403,21 @@
       const next = new window.Twilio.Device(data.token, {
         logLevel: 'silent', tokenRefreshMs: 60000, closeProtection: true,
         enableImprovedSignalingErrorPrecision: true,
+        // Preserve the original edge during the SDK's supported signaling recovery window.
+        // https://www.twilio.com/docs/voice/sdks/javascript/edges#edge-fallback-and-signaling-reconnection
+        maxCallSignalingTimeoutMs: 30000,
         getUserMedia: constraints => mediaOwner.getUserMedia(constraints),
       });
       device = next; deviceMediaOwner = mediaOwner;
       next.on('registered', () => {
         if (device !== next) return; registered = true; clearInterval(heartbeat);
+        logSdkEvent('device-registered');
         presence(true).catch(error => showError(error.message));
         heartbeat = setInterval(() => presence(true).catch(error => showError(error.message)), 15000); renderStatus();
       });
-      next.on('unregistered', () => { if (device !== next) return; registered = false; clearInterval(heartbeat); presence(false).catch(() => {}); renderStatus(); });
+      next.on('unregistered', () => { if (device !== next) return; logSdkEvent('device-unregistered'); registered = false; clearInterval(heartbeat); presence(false).catch(() => {}); renderStatus(); });
       next.on('tokenWillExpire', async () => { try { const fresh = await api('/api/token'); if (device === next) next.updateToken(fresh.token); } catch (error) { showError(error.message); if (!busy()) await destroyDevice(); } });
-      next.on('error', error => { if (device !== next) return; showError(`电话线路连接失败${Number.isInteger(error.code) ? `（${error.code}）` : ''}，请检查 Twilio 配置与网络。`); });
+      next.on('error', error => { if (device !== next) return; logSdkEvent('device-error', error); showError(`电话线路连接失败${Number.isInteger(error.code) ? `（${error.code}）` : ''}，请检查 Twilio 配置与网络。`); });
       next.on('incoming', receiveIncoming);
       await next.register();
     } catch (error) { showError(error.message); await destroyDevice(); }
@@ -356,18 +425,60 @@
   }
   function bindCall(call, attempt) {
     sdkCall = call;
-    call.on('accept', () => { if (sdkCall !== call || !callLifecycle.isCurrent(attempt)) return; incomingCall = null; callLifecycle.update(attempt, { phase: 'connected' }); renderStatus(); refreshStatus().catch(error => showError(error.message)); });
-    call.on('reconnecting', () => { if (sdkCall === call) callLifecycle.update(attempt, { phase: 'reconnecting' }); });
-    call.on('reconnected', () => { if (sdkCall === call) callLifecycle.update(attempt, { phase: 'connected' }); });
+    const diagnostics = { volumeSeen: false, inputDetected: false, inputPeak: null, outputPeak: null, lastLoggedAt: Date.now(), qualityWarnings: new Set() };
+    callDiagnostics = diagnostics;
+    // SDK volume is 0..1; the threshold only reports observed sound, not speech or working delivery.
+    call.on('volume', (input, output) => {
+      if (sdkCall !== call || !callLifecycle.isCurrent(attempt)) return;
+      const wasSeen = diagnostics.volumeSeen; const wasDetected = diagnostics.inputDetected;
+      if (Number.isFinite(input) && input >= 0 && input <= 1) {
+        diagnostics.volumeSeen = true; diagnostics.inputPeak = Math.max(diagnostics.inputPeak ?? 0, input);
+        if (!muted && input > 0.01) diagnostics.inputDetected = true;
+      }
+      if (Number.isFinite(output) && output >= 0 && output <= 1) diagnostics.outputPeak = Math.max(diagnostics.outputPeak ?? 0, output);
+      if (wasSeen !== diagnostics.volumeSeen || wasDetected !== diagnostics.inputDetected) renderStatus();
+    });
+    call.on('sample', sample => {
+      if (sdkCall !== call || !callLifecycle.isCurrent(attempt) || !sample || Date.now() - diagnostics.lastLoggedAt < 5000) return;
+      // sample byte/packet fields are deltas since the preceding sample (normally one second).
+      // SDK statsMonitor multiplies packetsLostFraction by 100. Audio levels use 0..32767.
+      const entry = {};
+      for (const key of ['bytesSent', 'bytesReceived', 'packetsLost']) {
+        if (Number.isSafeInteger(sample[key]) && sample[key] >= 0) entry[key] = sample[key];
+      }
+      if (Number.isFinite(sample.packetsLostFraction) && sample.packetsLostFraction >= 0 && sample.packetsLostFraction <= 100) entry.packetLossPercent = Math.round(sample.packetsLostFraction * 100) / 100;
+      for (const key of ['audioInputLevel', 'audioOutputLevel']) {
+        if (Number.isFinite(sample[key]) && sample[key] >= 0 && sample[key] <= 32767) entry[key] = Math.round(sample[key]);
+      }
+      if (diagnostics.inputPeak !== null) entry.inputVolumePeak = Math.round(diagnostics.inputPeak * 10000) / 10000;
+      if (diagnostics.outputPeak !== null) entry.outputVolumePeak = Math.round(diagnostics.outputPeak * 10000) / 10000;
+      diagnostics.lastLoggedAt = Date.now(); diagnostics.inputPeak = null; diagnostics.outputPeak = null;
+      if (Object.keys(entry).length) console.info('[AI Phone RTC]', JSON.stringify(entry));
+    });
+    call.on('accept', () => { if (sdkCall !== call || !callLifecycle.isCurrent(attempt)) return; logSdkEvent('call-accepted'); incomingCall = null; callLifecycle.update(attempt, { phase: 'connected' }); renderStatus(); refreshStatus().catch(error => showError(error.message)); });
+    call.on('reconnecting', error => { if (sdkCall === call) { logSdkEvent('call-reconnecting', error); callLifecycle.update(attempt, { phase: 'reconnecting' }); } });
+    call.on('reconnected', () => { if (sdkCall === call) { logSdkEvent('call-reconnected'); callLifecycle.update(attempt, { phase: 'connected' }); } });
+    call.on('warning', warning => {
+      if (sdkCall !== call || !sdkWarnings.has(warning)) return;
+      logSdkEvent('call-warning', null, warning);
+      if (sdkQualityWarnings.has(warning)) { diagnostics.qualityWarnings.add(warning); renderStatus(); }
+    });
+    call.on('warning-cleared', warning => {
+      if (sdkCall !== call || !sdkWarnings.has(warning)) return;
+      logSdkEvent('call-warning-cleared', null, warning);
+      if (diagnostics.qualityWarnings.delete(warning)) renderStatus();
+    });
     call.on('mute', value => { if (sdkCall !== call) return; muted = value === true; renderStatus(); });
     for (const event of ['disconnect', 'cancel', 'reject']) call.on(event, () => {
       if (sdkCall !== call && incomingCall !== call) return;
+      logSdkEvent(`call-${event}`);
       sdkCall = null; incomingCall = null; muted = false;
       callLifecycle.cancel(attempt);
       endCall(attempt).catch(error => showError(error.message)); renderStatus();
     });
     call.on('error', error => {
       if (sdkCall !== call && incomingCall !== call) return;
+      logSdkEvent('call-error', error);
       showError(microphoneMessages[attempt?.failureCode] || `电话线路连接失败${Number.isInteger(error.code) ? `（${error.code}）` : ''}。请检查网络与电话配置后重试。`);
       endCall(attempt).catch(error => showError(error.message));
     });
@@ -455,7 +566,7 @@
   }
   function exportRecord(item) {
     if (!item?.lines.length) return;
-    const text = ['AI 电话 — 通话文字记录', `方向：${item.direction === 'inbound' ? '来电' : '拨出'}`, `号码：${item.number}`, `时间：${dateText(item.startedAt)}`, `页面观察时长：${timeText(duration(item))}`, '字幕由语音服务生成，可能存在识别或翻译错误。', '', ...item.lines.map(line => `[${line.role === 'local' ? '你' : '对方'} · ${line.kind === 'original' ? '原文' : '译文'}${line.final ? '' : ' · 未定稿'}] ${line.text}`)].join('\r\n');
+    const text = ['AI 电话 — 通话文字记录', `方向：${item.direction === 'inbound' ? '来电' : '拨出'}`, `号码：${item.number}`, `时间：${dateText(item.startedAt)}`, `页面观察时长：${timeText(duration(item))}`, '字幕由语音服务生成，可能存在识别或翻译错误。', '', ...orderedTranscriptLines(item.lines).map(line => `[${line.role === 'local' ? '你' : '对方'} · ${line.kind === 'original' ? '原文' : '译文'}${line.final ? '' : ' · 未定稿'}] ${line.text}`)].join('\r\n');
     const url = URL.createObjectURL(new Blob(['\uFEFF', text], { type: 'text/plain;charset=utf-8' }));
     const link = element('a'); link.href = url; link.download = `AI电话-通话记录-${new Date(item.startedAt).toISOString().replace(/[:.]/g, '-')}.txt`; document.body.append(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 5000);
   }
@@ -472,7 +583,7 @@
     if (!item) { const empty = element('div', 'empty-conversation'); empty.append(icon('clock'), element('h3', '', '还没有保存的通话'), element('p', '', '可在连接设置中开启「保存通话文字」。')); $('history-detail').append(empty); return; }
     const heading = element('div', 'detail-heading'); const title = element('div'); title.append(element('h2', '', item.number), element('p', '', `${dateText(item.startedAt)} · 普通话 ↔ English`));
     const download = element('button', 'secondary-button', '导出文字'); download.disabled = !item.lines.length; download.addEventListener('click', () => exportRecord(item)); heading.append(title, download);
-    $('history-detail').append(heading, ...item.lines.map(renderLine));
+    $('history-detail').append(heading, ...orderedTranscriptLines(item.lines).map(renderLine));
   }
   function applyPreferences() {
     document.body.classList.toggle('hide-original', !preferences.showOriginal);

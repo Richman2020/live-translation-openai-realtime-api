@@ -443,6 +443,13 @@ export class SessionManager extends EventEmitter {
           onFailure: (reason) => {
             this.end(session.view.id, reason);
           },
+          onConnection: (connection) => {
+            if (!session.ended)
+              this.emit('event', {
+                event: 'translation-connection',
+                data: { ...connection, sessionId: session.view.id },
+              });
+          },
         });
       }
       session.bridge.attach(role, socket, start.streamSid);

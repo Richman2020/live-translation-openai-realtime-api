@@ -163,26 +163,38 @@ test('a browser without mediaDevices reports unsupported without claiming microp
 });
 
 // Run the shipped page handlers offline, with inert DOM, media and provider fixtures.
-async function pageFixture(requestMedia: (constraints: unknown) => Promise<unknown>) {
+async function pageFixture(requestMedia: (constraints: unknown) => Promise<unknown>, now: () => number = () => Date.now()) {
   const nodes = new Map<string, any>();
   function node(): any {
     return {
       textContent: '', value: '', hidden: false, disabled: false, dataset: {}, children: [], events: {},
       classList: { toggle() {}, add() {} }, style: { setProperty() {} },
       setAttribute() {}, removeAttribute() {}, focus() {},
-      append(...children: unknown[]) { this.children.push(...children); },
-      replaceChildren(...children: unknown[]) { this.children = children; },
+      append(...children: any[]) { for (const child of children) { this.children.push(child); child.parentNode = this; } },
+      replaceChildren(...children: any[]) { this.children = []; this.append(...children); },
+      insertBefore(child: any, next: any) {
+        const index = next ? this.children.indexOf(next) : this.children.length;
+        assert.ok(index >= 0, 'insertBefore requires an existing sibling');
+        this.children.splice(index, 0, child); child.parentNode = this;
+      },
+      replaceWith(child: any) { this.parentNode.insertBefore(child, this); this.remove(); },
+      remove() { if (this.parentNode) this.parentNode.children.splice(this.parentNode.children.indexOf(this), 1); this.parentNode = null; },
+      click() { this.events.click?.(); },
       querySelector() { return this.child || (this.child = node()); }, querySelectorAll() { return []; },
       addEventListener(name: string, handler: unknown) { this.events[name] = handler; },
     };
   }
   const element = (id: string) => { if (!nodes.has(id)) nodes.set(id, node()); return nodes.get(id); };
   const requests: string[] = [];
+  const sdkLogs: string[] = [];
+  const exports: Blob[] = [];
+  const localValues = new Map();
   let activeSession: any = null;
   let sessionCounter = 0;
   let mediaHandedToSdk: unknown;
   let sdkConnects = 0;
   let device: any;
+  let outgoingCall: any;
   class FakeCall extends EventEmitter {
     state: string;
     rejected = 0;
@@ -197,7 +209,7 @@ async function pageFixture(requestMedia: (constraints: unknown) => Promise<unkno
     async register() { this.emit('registered'); }
     async unregister() { this.emit('unregistered'); }
     destroy() {}
-    async connect() { sdkConnects += 1; mediaHandedToSdk = await this.options.getUserMedia({ audio: true }); return new FakeCall(); }
+    async connect() { sdkConnects += 1; mediaHandedToSdk = await this.options.getUserMedia({ audio: true }); outgoingCall = new FakeCall(); return outgoingCall; }
   }
   const sources: any[] = [];
   class FakeEvents {
@@ -213,9 +225,12 @@ async function pageFixture(requestMedia: (constraints: unknown) => Promise<unkno
     window: { Twilio: { Device: FakeDevice }, history: { replaceState() {} }, addEventListener() {}, scrollTo() {} },
     navigator: { mediaDevices: { getUserMedia: requestMedia } },
     location: { hash: '#token=offline-test-access-only', pathname: '/', search: '' },
-    sessionStorage: { getItem: () => null, setItem() {} }, localStorage: { getItem: () => null, setItem() {} },
-    URLSearchParams, AbortController, structuredClone, EventSource: FakeEvents,
-    setTimeout, clearTimeout, setInterval: () => 1, clearInterval() {},
+    sessionStorage: { getItem: () => null, setItem() {} }, localStorage: { getItem: (key: string) => localValues.get(key) ?? null, setItem: (key: string, value: string) => localValues.set(key, value) },
+    URLSearchParams, AbortController, structuredClone, EventSource: FakeEvents, Blob,
+    URL: { createObjectURL: (blob: Blob) => { exports.push(blob); return 'blob:offline-export'; }, revokeObjectURL() {} },
+    Date: class extends Date { static now() { return now(); } },
+    console: { info: (...values: string[]) => sdkLogs.push(values.join(' ')) },
+    setTimeout: (...args: Parameters<typeof setTimeout>) => { const timer = setTimeout(...args); timer.unref(); return timer; }, clearTimeout, setInterval: () => 1, clearInterval() {},
     fetch: async (path: string, options: any = {}) => {
       requests.push(`${options.method || 'GET'} ${path}`);
       let payload: any = { ok: true };
@@ -239,7 +254,13 @@ async function pageFixture(requestMedia: (constraints: unknown) => Promise<unkno
   await element('enable-device').events.click();
   element('phone-number').value = '+12125551234';
   return {
-    element, requests, device, sdkConnects: () => sdkConnects, media: () => mediaHandedToSdk,
+    element, requests, device, sdkLogs, exports, outgoingCall: () => outgoingCall, sdkConnects: () => sdkConnects, media: () => mediaHandedToSdk,
+    transcriptEvent(value: Record<string, unknown>) {
+      sources[0].handlers.get('transcript')({ data: JSON.stringify({ sessionId: activeSession?.id, at: '2026-09-26T01:00:00.000Z', ...value }) });
+    },
+    translationEvent(value: Record<string, unknown>) {
+      sources[0].handlers.get('translation-connection')({ data: JSON.stringify(value) });
+    },
     callEvent(patch: Record<string, unknown>) {
       assert.ok(activeSession, 'create a call before delivering its provider event');
       activeSession = { ...activeSession, ...patch };
@@ -334,4 +355,191 @@ test('incoming cancellation during microphone permission releases late media and
   assert.equal(stream.stopped(), 1);
   assert.ok(f.requests.includes('POST /api/calls/incoming-1/hangup'));
   assert.equal(f.element('incoming-banner').hidden, true);
+});
+
+test('signaling errors allow SDK recovery without ending the call or logging private SDK data', async () => {
+  const stream = streamFixture();
+  const f = await pageFixture(async () => stream.stream);
+  await f.element('start-call').events.click();
+  assert.equal(f.device.options.maxCallSignalingTimeoutMs, 30000);
+  const call = f.outgoingCall();
+  const error = { code: 31005, message: 'private-message', token: 'private-token', CallSid: 'private-call-id', sdp: 'private-sdp' };
+  f.device.emit('error', error);
+  call.emit('reconnecting', { ...error, code: 53001 });
+  assert.match(f.element('bridge-caption').textContent, /正在恢复/);
+  call.emit('warning', 'low-bytes-sent', error);
+  call.emit('warning', 'private-warning');
+  call.emit('warning-cleared', 'low-bytes-sent', error);
+  call.emit('reconnected');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.requests.some(path => path.endsWith('/hangup')), false);
+  assert.equal(stream.stopped(), 0);
+  assert.doesNotMatch(f.element('bridge-caption').textContent, /正在恢复/);
+  const logs = f.sdkLogs.join('\n');
+  assert.match(logs, /device-error.*31005/);
+  assert.match(logs, /call-reconnecting.*53001/);
+  assert.match(logs, /call-reconnected/);
+  assert.match(logs, /call-warning.*low-bytes-sent/);
+  assert.doesNotMatch(logs, /private-|CallSid|sdp|token/i);
+  await f.element('end-call').events.click();
+  assert.ok(f.requests.some(path => path.endsWith('/hangup')));
+});
+
+test('a terminal SDK call error still cleans up the backend session', async () => {
+  const f = await pageFixture(async () => streamFixture().stream);
+  await f.element('start-call').events.click();
+  f.outgoingCall().emit('error', { code: 31005, message: 'private-gateway-hangup' });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(f.requests.some(path => path.endsWith('/hangup')));
+  assert.match(f.sdkLogs.join('\n'), /call-error.*31005/);
+  assert.doesNotMatch(f.sdkLogs.join('\n'), /private-gateway-hangup/);
+});
+
+test('translation recovery tracks both roles independently and ignores stale or private event data', async () => {
+  const f = await pageFixture(async () => streamFixture().stream);
+  await f.element('start-call').events.click();
+  f.callEvent({ status: 'active' });
+  const event = { sessionId: 'session-1', role: 'remote', state: 'reconnecting', closeCode: 1006, text: 'private-text', token: 'private-token' };
+  f.translationEvent({ ...event, sessionId: 'old-session' });
+  assert.doesNotMatch(f.element('bridge-caption').textContent, /翻译短暂中断/);
+  f.translationEvent(event);
+  assert.match(f.element('bridge-caption').textContent, /翻译短暂中断.*重说/);
+  f.translationEvent({ ...event, role: 'local' });
+  f.translationEvent({ ...event, state: 'ready' });
+  assert.equal(f.element('connection-text').textContent, '正在恢复翻译连接');
+  f.translationEvent({ ...event, state: 'ready', role: 'local' });
+  assert.match(f.element('bridge-caption').textContent, /翻译连接已恢复.*重说/);
+  assert.equal(f.requests.some(path => path.endsWith('/hangup')), false);
+  const logs = f.sdkLogs.join('\n');
+  assert.match(logs, /remote.*reconnecting.*1006/);
+  assert.doesNotMatch(logs, /private-|sessionId|old-session/);
+  await f.element('end-call').events.click();
+  await f.element('start-call').events.click();
+  f.callEvent({ status: 'active' });
+  f.translationEvent(event);
+  assert.doesNotMatch(f.element('bridge-caption').textContent, /恢复|重说/);
+  await f.element('end-call').events.click();
+});
+
+test('sound detection and SDK quality warnings remain separate and reset for the next call', async () => {
+  const f = await pageFixture(async () => streamFixture().stream);
+  await f.element('start-call').events.click();
+  f.callEvent({ status: 'active' });
+  const call = f.outgoingCall();
+  call.emit('volume', 0, 0);
+  call.emit('warning', 'constant-audio-input-level');
+  assert.match(f.element('call-hint').textContent, /尚未检测.*安静时正常/);
+  assert.equal(f.element('connection-text').textContent, '通话中');
+  call.emit('volume', 0.08, 0.04);
+  call.emit('volume', 0, 0);
+  assert.equal(f.element('call-hint').textContent, '本次已检测到麦克风声音');
+  call.emit('warning', 'low-bytes-sent');
+  call.emit('warning', 'high-packet-loss');
+  assert.match(f.element('connection-text').textContent, /连接质量异常/);
+  call.emit('warning-cleared', 'low-bytes-sent');
+  assert.match(f.element('connection-text').textContent, /连接质量异常/);
+  call.emit('warning-cleared', 'high-packet-loss');
+  assert.equal(f.element('connection-text').textContent, '通话中');
+  assert.equal(f.requests.some(path => path.endsWith('/hangup')), false);
+  await f.element('end-call').events.click();
+  await f.element('start-call').events.click();
+  f.callEvent({ status: 'active' });
+  call.emit('volume', 0.8, 0.4);
+  call.emit('warning', 'low-bytes-sent');
+  assert.equal(f.element('call-hint').textContent, '麦克风已就绪');
+  assert.equal(f.element('connection-text').textContent, '通话中');
+  await f.element('end-call').events.click();
+});
+
+test('RTC diagnostic logs are rate limited, retain SDK units, and include only allowed finite numeric fields', async () => {
+  let now = 10000;
+  const f = await pageFixture(async () => streamFixture().stream, () => now);
+  await f.element('start-call').events.click();
+  const call = f.outgoingCall();
+  const sample = {
+    bytesSent: 1400, bytesReceived: 1600, packetsLost: 2, packetsLostFraction: 12.5,
+    audioInputLevel: 1000, audioOutputLevel: 1200, callSid: 'private-call', ip: 'private-ip', sdp: 'private-sdp',
+    audio: 'private-audio', token: 'private-token', extra: 123, totals: { bytesSent: 999999 },
+  };
+  call.emit('volume', 0.07, 0.12);
+  call.emit('volume', 0.02, 0.03);
+  now += 4999; call.emit('sample', sample);
+  assert.equal(f.sdkLogs.filter(log => log.startsWith('[AI Phone RTC]')).length, 0);
+  now += 1; call.emit('sample', sample); call.emit('sample', sample);
+  const entries = () => f.sdkLogs.filter(log => log.startsWith('[AI Phone RTC]')).map(log => JSON.parse(log.slice('[AI Phone RTC] '.length)));
+  assert.deepEqual(entries(), [{ bytesSent: 1400, bytesReceived: 1600, packetsLost: 2, packetLossPercent: 12.5, audioInputLevel: 1000, audioOutputLevel: 1200, inputVolumePeak: 0.07, outputVolumePeak: 0.12 }]);
+  call.emit('volume', NaN, Infinity);
+  now += 5000;
+  call.emit('sample', { ...sample, bytesSent: Infinity, bytesReceived: '1600', packetsLost: -1, packetsLostFraction: NaN, audioInputLevel: 32768, audioOutputLevel: null });
+  assert.equal(entries().length, 1, 'invalid numbers are omitted, not represented as successful zero readings');
+  assert.doesNotMatch(f.sdkLogs.join('\n'), /private-|callSid|sdp|token|totals/);
+  await f.element('end-call').events.click();
+  now += 5000; call.emit('sample', sample);
+  assert.equal(entries().length, 1, 'ended calls cannot keep logging RTC samples');
+});
+
+test('confirmed cleanup clears its stale banner while preserving unrelated SDK and provider errors', async () => {
+  const f = await pageFixture(async () => streamFixture().stream);
+  await f.element('start-call').events.click();
+  f.callEvent({ status: 'ending', cleanupUnconfirmed: true, error: 'CALL_CLEANUP_UNCONFIRMED' });
+  assert.match(f.element('app-error').textContent, /线路关闭待确认/);
+  f.callEvent({ status: 'completed', cleanupUnconfirmed: false, error: undefined });
+  assert.equal(f.element('app-error').hidden, true);
+  assert.equal(f.element('end-call').disabled, true);
+  await f.element('start-call').events.click();
+  f.callEvent({ status: 'ending', cleanupUnconfirmed: true, error: 'CALL_CLEANUP_UNCONFIRMED' });
+  f.device.emit('error', { code: 31005 });
+  f.callEvent({ status: 'completed', cleanupUnconfirmed: false, error: undefined });
+  assert.equal(f.element('app-error').hidden, false);
+  assert.match(f.element('app-error').textContent, /31005/);
+  await f.element('start-call').events.click();
+  f.callEvent({ status: 'ending', cleanupUnconfirmed: true, error: 'CALL_CLEANUP_UNCONFIRMED' });
+  f.callEvent({ status: 'failed', cleanupUnconfirmed: false, error: 'TWILIO_CALL_FAILED', providerErrorCode: 21216, providerHttpStatus: 400 });
+  assert.equal(f.element('app-error').hidden, false);
+  assert.match(f.element('app-error').textContent, /21216/);
+});
+
+test('transcripts pair by role, item and content index despite reversed arrival, consistently in history and export', async () => {
+  const f = await pageFixture(async () => streamFixture().stream);
+  f.element('save-history-toggle').events.click();
+  await f.element('start-call').events.click();
+  const emit = (role: string, kind: string, index: number, text: string, at: string) => f.transcriptEvent({ id: `${role}:${kind}:shared:${index}`, role, kind, text, final: true, at });
+  emit('local', 'translation', 0, 'Local translation zero', '2026-09-26T02:00:00.000Z');
+  const firstTranslation = f.element('transcript').children[0];
+  emit('remote', 'original', 0, 'Remote original zero', '2026-09-26T01:00:00.000Z');
+  emit('local', 'translation', 1, 'Local translation one', '2026-09-26T00:00:00.000Z');
+  emit('remote', 'translation', 0, 'Remote translation zero', '2026-09-26T03:00:00.000Z');
+  emit('local', 'original', 1, 'Local original one', '2026-09-26T04:00:00.000Z');
+  emit('local', 'original', 0, 'Local original zero', '2026-09-26T05:00:00.000Z');
+  const expected = ['local:original:shared:0', 'local:translation:shared:0', 'remote:original:shared:0', 'remote:translation:shared:0', 'local:original:shared:1', 'local:translation:shared:1'];
+  const ids = (id: string) => f.element(id).children.map((child: any) => child.dataset.transcriptId).filter(Boolean);
+  assert.deepEqual(ids('transcript'), expected);
+  assert.equal(f.element('transcript').children[1], firstTranslation, 'late original inserts before its existing translation without redrawing it');
+  f.element('export-current').events.click();
+  const text = await f.exports[0].text();
+  const lines = text.split('\r\n').filter(line => line.startsWith('['));
+  assert.deepEqual(lines, ['[你 · 原文] Local original zero', '[你 · 译文] Local translation zero', '[对方 · 原文] Remote original zero', '[对方 · 译文] Remote translation zero', '[你 · 原文] Local original one', '[你 · 译文] Local translation one']);
+  f.callEvent({ status: 'completed' });
+  assert.deepEqual(ids('history-detail'), expected);
+});
+
+test('partial transcript updates replace only their own paired row and keep final text in exports', async () => {
+  const f = await pageFixture(async () => streamFixture().stream);
+  await f.element('start-call').events.click();
+  const original = { id: 'local:original:turn_a:0', role: 'local', kind: 'original' };
+  const translation = { id: 'local:translation:turn_a:0', role: 'local', kind: 'translation' };
+  f.transcriptEvent({ ...translation, text: 'Where', final: false });
+  f.transcriptEvent({ ...original, text: '哪里？', final: true });
+  const originalNode = f.element('transcript').children[0];
+  f.transcriptEvent({ ...translation, text: 'Where is it?', final: true });
+  const children = f.element('transcript').children;
+  assert.equal(children.length, 2);
+  assert.equal(children[0], originalNode);
+  assert.equal(children[1].children[1].children[0].textContent, 'Where is it?');
+  assert.equal(children[1].children[0].children[2].textContent, '');
+  f.element('export-current').events.click();
+  const text = await f.exports[0].text();
+  assert.match(text, /\[你 · 原文\] 哪里？\r\n\[你 · 译文\] Where is it\?/);
+  assert.doesNotMatch(text, /未定稿/);
+  await f.element('end-call').events.click();
 });

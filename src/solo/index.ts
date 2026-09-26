@@ -15,6 +15,20 @@ if (
 )
   throw new Error('Invalid API_PORT');
 const sessionManager = new SessionManager();
+sessionManager.on('event', ({ event, data }) => {
+  if (event !== 'translation-connection') return;
+  // Fixed connection metadata only: no IDs, credentials, audio or transcripts.
+  // eslint-disable-next-line no-console -- Retain the numeric close code for diagnosis.
+  console.log(
+    JSON.stringify({
+      at: new Date().toISOString(),
+      event,
+      role: data.role,
+      state: data.state,
+      closeCode: data.closeCode,
+    }),
+  );
+});
 const server = await buildSoloServer({ configStore, sessionManager });
 server.addHook('onClose', async () => {
   setImmediate(() => process.exit(0));
