@@ -4,6 +4,8 @@
 
 本轮只读取公开官方资料、仓库和现有源码；没有安装候选、调用收费模型、拨号、更改配置或重启服务。以下排序是技术适配判断，不是实测速度排名。
 
+同步时发现并保留远端 `020c8f9` 的 [OpenAI/Palabra 并行研究与接入顺序](STREAMING_TRANSLATION_OPTIONS_2026-09-26.md)。本文补充 Soniox 与更多开源候选，原方案和来源不删除；两份材料均未证明实际胜出供应商。
+
 ## 结论与建议
 
 优先做两个独立对照：**OpenAI 专用实时翻译 + 官方 Twilio 示例**，以及 **Soniox 流式翻译 + 流式 TTS**。Palabra 为下一候选，Qwen/豆包作国内线路及长讲话备选。现有号码、浏览器工作台和电话管理继续复用，先替换独立候选里的翻译桥，不重写整套电话系统。
@@ -42,6 +44,7 @@
 1. **OpenAI Cookbook 电话 demo（首选参考）**：已通过 GitHub Contents 回读真实的 `audio.js`、`realtime-translation.js`、`room.js`、`languages.js` 等文件，语言表含中英；仓库根许可证 MIT。可适配音频转换和连续会话，保留许可声明。demo 的两路来电配对、内存状态不能覆盖本项目浏览器外呼、安全控制和挂断清理。[源码目录](https://github.com/openai/openai-cookbook/tree/main/examples/voice_solutions/realtime_translation_guide/twilio-translation-demo/src)、[许可证](https://github.com/openai/openai-cookbook/blob/main/LICENSE)。
 2. **Soniox 官方 demo**：真实 FastAPI/JS 应用，可借鉴双 WebSocket、TTS 预热、保活和结束排空。已读 `main.py`，有未限制长度的 asyncio 文本队列；当前示例 TTS 模型仍为 v1，文档示例为 v2，不能直接照搬。采用前核对 token 稳定性、去重、模型版本和许可证，不能仅凭有源码宣称已生产可用。[示例目录](https://github.com/soniox/soniox_examples/tree/master/apps/soniox-speech-to-speech-translation-demo)。
 3. **Pipecat**：可借用 Twilio 编解码、流式重采样与队列处理设计；Python 框架，不是翻译模型。**LiveKit** 的实时翻译示例适合房间音轨路由，但迁移电话还涉及 SIP；换框架本身不消除模型整句等待。[Pipecat 适配源码](https://reference-server.pipecat.ai/en/latest/_modules/pipecat/serializers/twilio.html)、[LiveKit 示例](https://github.com/livekit-examples/gemini-live-translate)。
+4. **Palabra 官方 Twilio demo**：远端研究指向该仓库，本轮再次打开核实，确有 FastAPI/Twilio 媒体桥。原示例包含原声混音，不直接照搬；采用前核对当前认证、语言、许可与队列策略。[官方示例](https://github.com/PalabraAI/twilio-demo)。
 
 ## 开源模型筛选
 

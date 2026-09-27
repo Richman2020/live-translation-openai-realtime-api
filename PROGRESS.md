@@ -1,6 +1,6 @@
 # 项目进度与交接
 
-更新日期：2026-09-26。共享仓库：<https://github.com/Richman2020/live-translation-openai-realtime-api>。
+更新日期：2026-09-27。共享仓库：<https://github.com/Richman2020/live-translation-openai-realtime-api>。
 
 需求见 [PROJECT_BRIEF.md](PROJECT_BRIEF.md)，工作规则见 [AGENTS.md](AGENTS.md)，运行步骤见 [LOCAL_SETUP.md](LOCAL_SETUP.md)，后续执行入口见 [LOCAL_CODEX_HANDOFF.md](LOCAL_CODEX_HANDOFF.md)。
 
@@ -11,6 +11,17 @@
 - Palabra 有长讲话处理但需验证积压/丢队列策略；Qwen、Seed 为备选。开源 SimulS2ST-Omni 有中英 S2S，但论文披露计算延迟与双工限制；SeamlessStreaming 有模型非商业许可约束；Hibiki/StreamSpeech 缺现成中英双向。
 - 新测量方案分开记录首音、持续语义落后及末尾播放等待，使用自然长素材，不以删音频或缩短用户讲话改善数字。
 - 本轮只读调研和文档更新：未改源码、运行配置、供应商资源，未安装候选、调用收费模型、重启或拨号。已知电话版本保持；文档差异检查不代表候选已实现或耳听延迟改善。
+
+- 同步时保留并整合远端 `020c8f9` 的 OpenAI/Palabra 接入计划和原研究文件。本轮补充 Soniox、更多开源证据及官方 Node demo，不删除原候选；具体供应商胜出仍须实测。
+
+## 此前优先级与外部方案研究（2026-09-26，远端并行研究）
+
+- 用户要求先解决约 3 秒耳听等待，并覆盖长句和连续发言；此前“2 秒以内”不是最终要求，不靠缩短测试话术交付。准确性、完整性仍是候选门槛。
+- 已对照远端 `e40a8829` 的实际 solo 代码：最终 ASR 是翻译启动门槛，生成音频已经逐块即时转发。已有日志排队中位为零，不能直接归因于队列或网络。
+- 已核查专用 OpenAI 连续翻译、Palabra 官方 Twilio 示例与流式 API，以及 SimulStreaming、SeamlessStreaming、Hibiki 系列。建议保留当前引擎，先验证 OpenAI 专用接口的账户与中英双向能力，再与 Palabra 对照；速度和质量未实测，尚未选定替换供应商。
+- 可执行接入顺序、媒体转换、完整性要求及长句耳听比较方法见 [连续翻译方案研究](STREAMING_TRANSLATION_OPTIONS_2026-09-26.md)。本机运行决定保留，未部署云端。
+- 本轮只改研究与交接文档；未读取或创建密钥、调用新模型、重启或拨号。文档内容检查与远端回读用于验证此次同步；此前 195 项测试不代表新引擎已经通过。
+- 下一步本机 Codex 从本分支读取上述方案，先做默认关闭的独立引擎适配与重复输入对照，通过后再进行双方准备好的真实电话比较。代码仍未合入 `main`。
 
 ## 此前质量分析（2026-09-26 09:58–10:00 UTC 通话）
 
