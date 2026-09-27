@@ -158,6 +158,14 @@ test('outbound pays for no PSTN call until authenticated local stream; then pair
   const remote = attach(f.manager, call.id, 'remote', remoteNonce, remoteSid);
   assert.equal(remote.accepted, true);
   assert.equal(f.manager.activeSession.status, 'active');
+  assert.equal(f.manager.activeSession.translationEngine, 'legacy');
+  assert.equal(f.manager.activeSession.translationReady, false);
+  f.bridge().onConnection?.({ role: 'local', state: 'ready' });
+  assert.equal(f.manager.activeSession.translationReady, false);
+  f.bridge().onConnection?.({ role: 'remote', state: 'ready' });
+  assert.equal(f.manager.activeSession.translationReady, true);
+  f.bridge().onConnection?.({ role: 'remote', state: 'disconnected' });
+  assert.equal(f.manager.activeSession.translationReady, false);
   const metric = {
     role: 'local' as const,
     name: 'speech_stop_to_first_audio_ms' as const,

@@ -1,0 +1,583 @@
+/* eslint-disable max-classes-per-file -- Both transport fakes belong to the same routing fixture. */
+/* eslint-disable no-await-in-loop -- Each scenario must fully finish before starting the next isolated fixture. */
+import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
+import { test } from 'node:test';
+import { setTimeout as delay } from 'node:timers/promises';
+import WebSocket from 'ws';
+
+import {
+  ContinuousTranslationBridge,
+  type ContinuousTranslationBridgeOptions,
+} from '../src/solo/continuous-translation-bridge';
+import type {
+  ContinuousTranslationClient,
+  ContinuousTranslationOptions,
+} from '../src/solo/continuous-translation-client';
+import { Pcm24kToPcmu, PcmuToPcm24k } from '../src/solo/translation-pcm';
+import type {
+  TranscriptEvent,
+  TranslationAudioDiagnostic,
+  TranslationConnection,
+  TranslationMetric,
+  TranslationRole,
+} from '../src/solo/translation-bridge';
+
+// In-memory phone transports and provider clients only. This validates routing
+// and lifetime boundaries, never actual translation or human audible quality.
+class Phone extends EventEmitter {
+  readyState: number = WebSocket.OPEN;
+
+  bufferedAmount = 0;
+
+  sent: Record<string, any>[] = [];
+
+  writes: ((error?: Error) => void)[] = [];
+
+  deferWrites = false;
+
+  failSend?: 'throw' | 'callback';
+
+  closeCount = 0;
+
+  send(payload: string, callback: (error?: Error) => void) {
+    if (this.failSend === 'throw') throw new Error('PRIVATE_ERROR');
+    if (this.failSend === 'callback') {
+      callback(new Error('PRIVATE_ERROR'));
+      return;
+    }
+    this.sent.push(JSON.parse(payload));
+    if (this.deferWrites) this.writes.push(callback);
+    else callback();
+  }
+
+  receive(event: unknown) {
+    this.emit('message', JSON.stringify(event));
+  }
+
+  terminate() {
+    if (this.readyState === WebSocket.CLOSED) return;
+    this.readyState = WebSocket.CLOSED;
+    this.closeCount += 1;
+    this.emit('close');
+  }
+
+  socket() {
+    return this as unknown as WebSocket;
+  }
+}
+
+class Provider implements ContinuousTranslationClient {
+  options: ContinuousTranslationOptions;
+
+  ready: Promise<void>;
+
+  resolve: () => void;
+
+  reject: (error: Error) => void;
+
+  appended: Buffer[] = [];
+
+  aborted = 0;
+
+  finished = 0;
+
+  failAppend = false;
+
+  constructor(options: ContinuousTranslationOptions) {
+    this.options = options;
+    this.ready = new Promise<void>((resolve, reject) => {
+      this.resolve = resolve;
+      this.reject = reject;
+    });
+  }
+
+  append(pcm: Buffer) {
+    if (this.failAppend) throw new Error('PRIVATE_APPEND_ERROR');
+    this.appended.push(Buffer.from(pcm));
+  }
+
+  async finish() {
+    this.finished += 1;
+  }
+
+  abort() {
+    this.aborted += 1;
+  }
+
+  audio(pcm: Buffer) {
+    this.options.onAudio(pcm);
+  }
+}
+
+function fixture(options: Partial<ContinuousTranslationBridgeOptions> = {}) {
+  const providers: Provider[] = [];
+  const phones = { local: new Phone(), remote: new Phone() };
+  const failures: string[] = [];
+  const connections: TranslationConnection[] = [];
+  const audio: TranslationAudioDiagnostic[] = [];
+  const transcripts: TranscriptEvent[] = [];
+  const metrics: TranslationMetric[] = [];
+  const bridge = new ContinuousTranslationBridge({
+    apiKey: 'test-not-a-real-credential',
+    model: 'legacy-model-is-not-used',
+    onFailure: (reason) => failures.push(reason),
+    onConnection: (event) => connections.push(event),
+    onTranscript: (event) => transcripts.push(event),
+    onAudioDiagnostic: (event) => audio.push(event),
+    onMetric: (event) => metrics.push(event),
+    createClient(clientOptions) {
+      const provider = new Provider(clientOptions);
+      providers.push(provider);
+      return provider;
+    },
+    ...options,
+  });
+  const attach = (role: TranslationRole) =>
+    bridge.attach(role, phones[role].socket(), `MZ_${role}`);
+  const provider = (role: TranslationRole) =>
+    providers[role === 'local' ? 0 : 1];
+  const ready = async (role: TranslationRole) => {
+    provider(role).resolve();
+    await Promise.resolve();
+  };
+  const pair = async () => {
+    attach('local');
+    attach('remote');
+    await ready('local');
+    await ready('remote');
+  };
+  const media = (role: TranslationRole, bytes = Buffer.alloc(160, 0xff)) =>
+    phones[role].receive({
+      event: 'media',
+      streamSid: `MZ_${role}`,
+      media: { track: 'inbound', payload: bytes.toString('base64') },
+    });
+  const mark = (role: TranslationRole, name: string) =>
+    phones[role].receive({
+      event: 'mark',
+      streamSid: `MZ_${role}`,
+      mark: { name },
+    });
+  const assertClosed = () => {
+    for (const phone of Object.values(phones)) {
+      assert.equal(phone.readyState, WebSocket.CLOSED);
+      assert.equal(phone.closeCount, 1);
+    }
+    for (const client of providers) {
+      assert.equal(client.aborted, 1);
+      assert.equal(client.finished, 0);
+    }
+  };
+  return {
+    bridge,
+    phones,
+    providers,
+    provider,
+    attach,
+    ready,
+    pair,
+    media,
+    mark,
+    failures,
+    connections,
+    audio,
+    transcripts,
+    metrics,
+    assertClosed,
+  };
+}
+
+function tone(bytes = 9600): Buffer {
+  const pcm = Buffer.alloc(bytes);
+  for (let offset = 0; offset + 1 < bytes; offset += 2)
+    pcm.writeInt16LE(Math.round(10000 * Math.sin(offset / 12)), offset);
+  return pcm;
+}
+
+function mediaBytes(phone: Phone): Buffer {
+  return Buffer.concat(
+    phone.sent
+      .filter((event) => event.event === 'media')
+      .map((event) => Buffer.from(event.media.payload, 'base64')),
+  );
+}
+
+test('continuous providers start only when both authenticated legs exist and direction is fixed', async () => {
+  const f = fixture();
+  f.attach('local');
+  f.attach('local');
+  assert.equal(f.providers.length, 0);
+  f.attach('remote');
+  f.attach('remote');
+  assert.equal(f.providers.length, 2);
+  assert.equal(f.provider('local').options.targetLanguage, 'en');
+  assert.equal(f.provider('remote').options.targetLanguage, 'zh');
+  assert.deepEqual(f.connections, []);
+  await f.ready('local');
+  assert.deepEqual(f.connections, [{ role: 'local', state: 'ready' }]);
+  await f.ready('remote');
+  assert.deepEqual(f.connections[1], { role: 'remote', state: 'ready' });
+  f.bridge.close();
+  f.assertClosed();
+});
+
+test('continuous audio goes to opposite phone before any text and does not report turn latency', async () => {
+  const f = fixture();
+  await f.pair();
+  const localPcm = tone();
+  const remotePcm = Buffer.alloc(9600);
+  f.provider('local').audio(localPcm);
+  assert.equal(mediaBytes(f.phones.local).length, 0);
+  assert.deepEqual(
+    mediaBytes(f.phones.remote),
+    new Pcm24kToPcmu().push(localPcm),
+  );
+  f.provider('remote').audio(remotePcm);
+  assert.deepEqual(
+    mediaBytes(f.phones.local),
+    new Pcm24kToPcmu().push(remotePcm),
+  );
+  assert.deepEqual(f.transcripts, []);
+  assert.deepEqual(f.metrics, []);
+  assert.deepEqual(f.failures, []);
+  f.bridge.close();
+});
+
+test('input including silence is retained in order before readiness, with independent streaming codec state', async () => {
+  const f = fixture();
+  const first = Buffer.from([0, 0xff, 0x7f, 1]);
+  const second = Buffer.alloc(15996, 0xff);
+  f.attach('local');
+  f.attach('remote');
+  f.media('local', first);
+  f.media('local', second);
+  assert.deepEqual(f.provider('local').appended, []);
+  await f.ready('local');
+  assert.deepEqual(
+    Buffer.concat(f.provider('local').appended),
+    new PcmuToPcm24k().push(Buffer.concat([first, second])),
+  );
+  assert.ok(
+    f.provider('local').appended.every((chunk) => chunk.length <= 48000),
+  );
+  assert.deepEqual(f.provider('remote').appended, []);
+  await f.ready('remote');
+  f.media('remote');
+  assert.deepEqual(
+    Buffer.concat(f.provider('remote').appended),
+    new PcmuToPcm24k().push(Buffer.alloc(160, 0xff)),
+  );
+  f.bridge.close();
+});
+
+test('ringing media before the second phone attaches is neither queued nor replayed', async () => {
+  const f = fixture();
+  f.attach('local');
+  for (let second = 0; second < 15; second += 1)
+    f.media('local', Buffer.alloc(8000, 0xff));
+  assert.deepEqual(f.failures, []);
+  assert.equal(f.providers.length, 0);
+  f.attach('remote');
+  await f.ready('local');
+  await f.ready('remote');
+  assert.deepEqual(f.provider('local').appended, []);
+  assert.deepEqual(f.provider('remote').appended, []);
+  f.media('local');
+  assert.equal(f.provider('local').appended.length, 1);
+  f.bridge.close();
+});
+
+test('pre-ready overflow fails explicitly instead of keeping only the final two seconds', async () => {
+  const f = fixture();
+  f.attach('local');
+  f.attach('remote');
+  f.media('local', Buffer.alloc(16000, 0xff));
+  f.media('local', Buffer.from([0xff]));
+  assert.deepEqual(f.failures, [
+    'continuous_input_before_ready_overflow:local',
+  ]);
+  await f.ready('local');
+  assert.deepEqual(f.provider('local').appended, []);
+  f.assertClosed();
+});
+
+test('stateful output retains chunk remainders without padding or dropping at chunk boundaries', async () => {
+  const f = fixture();
+  await f.pair();
+  const pcm = tone(9600);
+  f.provider('local').audio(pcm.subarray(0, 2));
+  f.provider('local').audio(pcm.subarray(2, 14));
+  f.provider('local').audio(pcm.subarray(14));
+  const expected = new Pcm24kToPcmu().push(pcm);
+  assert.deepEqual(mediaBytes(f.phones.remote), expected);
+  await delay(150);
+  assert.deepEqual(
+    mediaBytes(f.phones.remote),
+    expected,
+    'transport idle must not synthesize padding',
+  );
+  f.bridge.close();
+});
+
+test('marks acknowledge the recipient stream only and await both media and mark write callbacks', async () => {
+  const f = fixture();
+  await f.pair();
+  f.phones.remote.deferWrites = true;
+  f.provider('local').audio(tone());
+  const { name } = f.phones.remote.sent.find(
+    (event) => event.event === 'mark',
+  ).mark;
+  f.mark('remote', name);
+  assert.deepEqual(
+    f.audio.map((event) => event.stage),
+    ['generated'],
+  );
+  f.phones.remote.writes.shift()();
+  assert.deepEqual(
+    f.audio.map((event) => event.stage),
+    ['generated'],
+  );
+  f.phones.remote.writes.shift()();
+  assert.deepEqual(
+    f.audio.map((event) => event.stage),
+    ['generated', 'sent', 'playback_confirmed'],
+  );
+  assert.equal(f.audio[2].generatedBytes, 1600);
+  assert.equal(f.audio[2].sentBytes, 1600);
+  f.mark('remote', name);
+  assert.equal(f.audio.length, 3);
+  f.bridge.close();
+  assert.equal(f.audio.length, 3);
+});
+
+test('unknown stream, wrong inbound track, malformed payload and wrong destination mark fail closed', async () => {
+  const cases = [
+    {
+      event: 'media',
+      streamSid: 'MZ_other',
+      media: { track: 'inbound', payload: '/w==' },
+    },
+    {
+      event: 'media',
+      streamSid: 'MZ_local',
+      media: { track: 'outbound', payload: '/w==' },
+    },
+    {
+      event: 'media',
+      streamSid: 'MZ_local',
+      media: { track: 'inbound', payload: '%%%=' },
+    },
+    {
+      event: 'media',
+      streamSid: 'MZ_local',
+      media: { track: 'inbound', payload: '/x==' },
+    },
+    { event: 'start', streamSid: 'MZ_local' },
+  ];
+  for (const event of cases) {
+    const f = fixture();
+    await f.pair();
+    f.phones.local.receive(event);
+    assert.equal(f.failures.length, 1);
+    assert.match(f.failures[0], /^continuous_/);
+    f.assertClosed();
+  }
+  const f = fixture();
+  await f.pair();
+  f.provider('local').audio(tone());
+  const { name } = f.phones.remote.sent[1].mark;
+  f.mark('local', name);
+  assert.deepEqual(f.failures, ['continuous_invalid_phone_event:local']);
+  assert.equal(f.audio.at(-1).stage, 'unconfirmed');
+});
+
+test('a large audio delta is sent completely in bounded chunks and acknowledged playback frees the cap', async () => {
+  const f = fixture();
+  await f.pair();
+  const input = tone(96000);
+  const expected = new Pcm24kToPcmu().push(input);
+  for (let round = 0; round < 6; round += 1) {
+    f.provider('local').audio(input);
+    const marks = f.phones.remote.sent.filter(
+      (event) => event.event === 'mark',
+    );
+    for (const event of marks) f.mark('remote', event.mark.name);
+  }
+  assert.equal(expected.length, 16000);
+  assert.equal(mediaBytes(f.phones.remote).length, expected.length * 6);
+  assert.ok(
+    f.phones.remote.sent
+      .filter((event) => event.event === 'media')
+      .every(
+        (event) => Buffer.from(event.media.payload, 'base64').length <= 1600,
+      ),
+  );
+  assert.deepEqual(f.failures, []);
+  assert.equal(
+    f.audio.filter((event) => event.stage === 'playback_confirmed').length,
+    60,
+  );
+  f.bridge.close();
+});
+
+test('unacknowledged playback has a byte limit and errors instead of dropping older speech', async () => {
+  const f = fixture();
+  await f.pair();
+  for (let count = 0; count < 40; count += 1) f.provider('local').audio(tone());
+  assert.equal(mediaBytes(f.phones.remote).length, 64000);
+  f.provider('local').audio(tone());
+  assert.deepEqual(f.failures, ['continuous_playback_overflow:remote']);
+  assert.equal(mediaBytes(f.phones.remote).length, 64000);
+  assert.equal(
+    f.audio.filter((event) => event.stage === 'unconfirmed').length,
+    40,
+  );
+  f.assertClosed();
+});
+
+test('tiny output chunks also have a bounded pending mark count', async () => {
+  const f = fixture();
+  await f.pair();
+  for (let count = 0; count < 257; count += 1)
+    f.provider('local').audio(Buffer.alloc(6));
+  assert.deepEqual(f.failures, ['continuous_playback_overflow:remote']);
+  assert.equal(mediaBytes(f.phones.remote).length, 256);
+  f.assertClosed();
+});
+
+test('playback acknowledgement timeout fails without silently retiring the marker', async () => {
+  const f = fixture({ playbackTimeoutMs: 10 });
+  await f.pair();
+  f.provider('local').audio(tone());
+  await delay(25);
+  assert.deepEqual(f.failures, ['continuous_playback_timeout:remote']);
+  assert.equal(f.audio.at(-1).stage, 'unconfirmed');
+  f.assertClosed();
+});
+
+test('phone transport backpressure and send errors are sanitized and abort both providers', async () => {
+  for (const failure of ['buffered', 'throw', 'callback'] as const) {
+    const f = fixture();
+    await f.pair();
+    if (failure === 'buffered') f.phones.remote.bufferedAmount = 128 * 1024;
+    else f.phones.remote.failSend = failure;
+    f.provider('local').audio(tone());
+    assert.equal(f.failures.length, 1);
+    assert.match(
+      f.failures[0],
+      /^continuous_phone_(backpressure|send_failed):remote$/,
+    );
+    assert.equal(f.audio.at(-1).stage, 'unconfirmed');
+    f.assertClosed();
+  }
+});
+
+test('provider failures, failed input append and rejected readiness never reconnect or expose details', async () => {
+  for (const failure of ['provider', 'append', 'ready'] as const) {
+    const f = fixture();
+    if (failure === 'ready') {
+      f.attach('local');
+      f.attach('remote');
+      f.provider('local').reject(new Error('PRIVATE_PROVIDER_DETAILS'));
+      await Promise.resolve();
+      await Promise.resolve();
+    } else {
+      await f.pair();
+      if (failure === 'provider')
+        f.provider('local').options.onError('PRIVATE_PROVIDER_DETAILS');
+      else {
+        f.provider('local').failAppend = true;
+        f.media('local');
+      }
+    }
+    assert.equal(f.failures.length, 1);
+    assert.doesNotMatch(f.failures[0], /PRIVATE/);
+    assert.equal(f.providers.length, 2);
+    f.assertClosed();
+  }
+});
+
+test('hangup aborts immediately, settles unconfirmed output once and ignores late provider/write callbacks', async () => {
+  const f = fixture();
+  await f.pair();
+  f.phones.remote.deferWrites = true;
+  f.provider('local').audio(tone());
+  const sentBefore = f.phones.remote.sent.length;
+  f.bridge.close();
+  f.bridge.close();
+  f.provider('local').audio(tone());
+  f.provider('local').options.onTranscript('late');
+  f.provider('local').options.onError('late');
+  for (const callback of f.phones.remote.writes) callback(new Error('late'));
+  f.phones.local.emit('error', new Error('late'));
+  assert.equal(f.phones.remote.sent.length, sentBefore);
+  assert.deepEqual(
+    f.audio.map((event) => event.stage),
+    ['generated', 'unconfirmed'],
+  );
+  assert.deepEqual(f.transcripts, []);
+  assert.deepEqual(f.failures, []);
+  f.assertClosed();
+});
+
+test('phone stop, error and close clean up both directions once', async () => {
+  for (const event of ['stop', 'error', 'close'] as const) {
+    const f = fixture();
+    await f.pair();
+    if (event === 'stop')
+      f.phones.local.receive({ event: 'stop', streamSid: 'MZ_local' });
+    else if (event === 'error')
+      f.phones.local.emit('error', new Error('PRIVATE'));
+    else f.phones.local.terminate();
+    assert.equal(f.failures.length, 1);
+    f.assertClosed();
+  }
+});
+
+test('transcripts are optional bounded cumulative excerpts, and diagnostic callback failures do not stop audio', async () => {
+  const f = fixture();
+  await f.pair();
+  f.provider('local').options.onTranscript('a'.repeat(600));
+  f.provider('local').options.onTranscript('b'.repeat(600));
+  assert.deepEqual(
+    f.transcripts.map((event) => event.text.length),
+    [600, 1000, 200],
+  );
+  assert.equal(f.transcripts[0].id, f.transcripts[1].id);
+  assert.notEqual(f.transcripts[1].id, f.transcripts[2].id);
+  assert.ok(
+    f.transcripts.every(
+      (event) => event.kind === 'translation' && !event.final,
+    ),
+  );
+  f.bridge.close();
+  const broken = fixture({
+    onTranscript: () => {
+      throw new Error('UI_FAILED');
+    },
+    onAudioDiagnostic: () => {
+      throw new Error('UI_FAILED');
+    },
+    onConnection: () => {
+      throw new Error('UI_FAILED');
+    },
+  });
+  await broken.pair();
+  broken.provider('local').options.onTranscript('hello');
+  broken.provider('local').audio(tone());
+  assert.equal(mediaBytes(broken.phones.remote).length, 1600);
+  assert.deepEqual(broken.failures, []);
+  broken.bridge.close();
+});
+
+test('duplicate or cross-role phone attachment fails and closes the unexpected socket', () => {
+  const f = fixture();
+  f.attach('local');
+  f.bridge.attach('remote', f.phones.local.socket(), 'MZ_remote');
+  assert.deepEqual(f.failures, ['continuous_invalid_phone_stream']);
+  assert.equal(f.phones.local.closeCount, 1);
+  assert.equal(f.providers.length, 0);
+  f.bridge.attach('remote', f.phones.remote.socket(), 'MZ_remote');
+  assert.equal(f.phones.remote.closeCount, 1);
+});

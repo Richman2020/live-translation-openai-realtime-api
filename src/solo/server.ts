@@ -15,8 +15,13 @@ import {
   validTwilioRequest,
 } from './security';
 import { SessionError, SessionManager, type Role } from './session-manager';
-import { verifyProviders } from './provider-checks';
+import { verifyProviders, checkTranslationEngine } from './provider-checks';
 import { checkPublicReadiness } from './public-readiness';
+import {
+  isTranslationEngine,
+  TRANSLATION_ENGINES,
+  type TranslationEngine,
+} from './translation-engine';
 
 export async function buildSoloServer(
   options: {
@@ -24,6 +29,8 @@ export async function buildSoloServer(
     sessionManager?: SessionManager;
     publicDir?: string;
     publicReadinessChecker?: typeof checkPublicReadiness;
+    translationReadinessChecker?: typeof checkTranslationEngine;
+    providerVerifier?: typeof verifyProviders;
   } = {},
 ) {
   const configStore = options.configStore || new ConfigStore();
@@ -59,7 +66,21 @@ export async function buildSoloServer(
     callerNumber: configStore.value.TWILIO_CALLER_NUMBER,
     activeSession: manager.activeSession,
     lastVerification,
+    translationEngines: TRANSLATION_ENGINES,
+    defaultTranslationEngine: 'legacy',
   });
+  function requestedEngine(body: unknown): TranslationEngine {
+    if (
+      body !== undefined &&
+      (body === null || typeof body !== 'object' || Array.isArray(body))
+    )
+      throw new SessionError('INVALID_TRANSLATION_ENGINE');
+    const value = (body as { translationEngine?: unknown })?.translationEngine;
+    if (value === undefined) return 'legacy';
+    if (!isTranslationEngine(value))
+      throw new SessionError('INVALID_TRANSLATION_ENGINE');
+    return value;
+  }
   function requireConfigured() {
     if (!configStore.configured())
       throw new SessionError('CONFIGURATION_REQUIRED', 503);
@@ -128,7 +149,8 @@ export async function buildSoloServer(
     lastVerification = null;
     return { ok: true, ...status() };
   });
-  app.post('/api/verify', async () => {
+  app.post('/api/verify', async (req) => {
+    const engine = requestedEngine(req.body);
     if (manager.activeSession || verifying || checkingOutbound)
       throw new SessionError('CALL_OR_VERIFICATION_IN_PROGRESS', 409);
     if (Date.now() - lastVerifyAttempt < 30000)
@@ -136,7 +158,10 @@ export async function buildSoloServer(
     verifying = true;
     lastVerifyAttempt = Date.now();
     try {
-      lastVerification = await verifyProviders(configStore.value);
+      lastVerification = await (options.providerVerifier || verifyProviders)(
+        configStore.value,
+        engine,
+      );
       return lastVerification;
     } finally {
       verifying = false;
@@ -175,27 +200,44 @@ export async function buildSoloServer(
     manager.setPresence(req.body.available);
     return { ok: true, available: manager.available };
   });
-  app.post<{ Body: { to: string } }>('/api/calls', async (req) => {
-    if (verifying || checkingOutbound)
-      throw new SessionError('VERIFICATION_IN_PROGRESS', 409);
-    requireConfigured();
-    if (typeof req.body?.to !== 'string')
-      throw new SessionError('INVALID_DESTINATION');
-    if (manager.activeSession) throw new SessionError('BUSY', 409);
-    checkingOutbound = true;
-    try {
-      // A registered browser cannot establish a phone call when its public
-      // TwiML/media entry is offline. Check before creating even a local session.
-      const readiness = await (
-        options.publicReadinessChecker || checkPublicReadiness
-      )(configStore.value);
-      if (readiness.status !== 'ready')
-        throw new SessionError(readiness.code, 503);
-      return manager.createOutbound(configStore.value, req.body.to.trim());
-    } finally {
-      checkingOutbound = false;
-    }
-  });
+  app.post<{ Body: { to: string; translationEngine?: TranslationEngine } }>(
+    '/api/calls',
+    async (req) => {
+      const engine = requestedEngine(req.body);
+      if (verifying || checkingOutbound)
+        throw new SessionError('VERIFICATION_IN_PROGRESS', 409);
+      requireConfigured();
+      if (typeof req.body?.to !== 'string')
+        throw new SessionError('INVALID_DESTINATION');
+      if (manager.activeSession) throw new SessionError('BUSY', 409);
+      checkingOutbound = true;
+      try {
+        // A registered browser cannot establish a phone call when its public
+        // TwiML/media entry is offline. Check before creating even a local session.
+        const readiness = await (
+          options.publicReadinessChecker || checkPublicReadiness
+        )(configStore.value);
+        if (readiness.status !== 'ready')
+          throw new SessionError(readiness.code, 503);
+        // Check both candidate language sessions before a real call is created.
+        // A successful legacy probe cannot authorize a different endpoint/model.
+        if (engine === 'continuous') {
+          const translation = await (
+            options.translationReadinessChecker || checkTranslationEngine
+          )(configStore.value, engine);
+          if (translation.status !== 'passed')
+            throw new SessionError('TRANSLATION_ENGINE_UNAVAILABLE', 503);
+        }
+        return manager.createOutbound(
+          configStore.value,
+          req.body.to.trim(),
+          engine,
+        );
+      } finally {
+        checkingOutbound = false;
+      }
+    },
+  );
   app.post<{ Params: { id: string } }>('/api/calls/:id/hangup', async (req) => {
     await manager.end(req.params.id);
     if (!manager.isCleanupConfirmed(req.params.id))

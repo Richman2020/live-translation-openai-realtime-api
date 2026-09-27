@@ -41,7 +41,7 @@ test('audio diagnostics distinguish generated, sent and playback, isolate old se
 test('translation timing displays each direction with milliseconds converted to seconds and genuine zero components', async () => {
   const f = await pageFixture(async () => streamFixture().stream);
   await f.element('start-call').events.click();
-  f.callEvent({ status: 'active' });
+  f.callEvent({ status: 'active', translationReady: true });
   f.metricEvent({ role: 'local', value: 2300, transcriptionMs: 800, queueMs: 0, generationMs: 1500 });
   assert.equal(f.element('translation-timing-local').textContent,
     '英语 → 手机最近一句：服务端停说事件 → 首个译音数据 2.30 秒（等待转写 0.80 秒 · 等待发起 0.00 秒 · 生成首音 1.50 秒）');
@@ -446,11 +446,12 @@ test('a browser without mediaDevices reports unsupported without claiming microp
 
 // Run the shipped page handlers offline, with inert DOM, media and provider fixtures.
 async function pageFixture(requestMedia: (constraints: unknown) => Promise<unknown>, now: () => number = () => Date.now(),
-  options: { initialStatusFailure?: 'network' | 'timeout' | { status: number; error: string } } = {}) {
+  options: { initialStatusFailure?: 'network' | 'timeout' | { status: number; error: string }; beforeResponse?: (path: string, signal: AbortSignal) => Promise<void> } = {}) {
   const nodes = new Map<string, any>();
   function node(): any {
     return {
       textContent: '', value: '', hidden: false, disabled: false, dataset: {}, children: [], events: {},
+      get options() { return this.children; },
       classList: { toggle() {}, add() {} }, style: { setProperty() {} },
       setAttribute() {}, removeAttribute() {}, focus() {},
       append(...children: any[]) { for (const child of children) { this.children.push(child); child.parentNode = this; } },
@@ -469,6 +470,11 @@ async function pageFixture(requestMedia: (constraints: unknown) => Promise<unkno
   }
   const element = (id: string) => { if (!nodes.has(id)) nodes.set(id, node()); return nodes.get(id); };
   const requests: string[] = [];
+  const requestBodies: { path: string; body: any }[] = [];
+  const beforeResponse = options.beforeResponse;
+  type RequestTimeout = { delay: number; cleared: boolean; fire(): void };
+  const timeouts = new Map<ReturnType<typeof setTimeout>, RequestTimeout>();
+  const apiTimeouts: { path: string; timer: RequestTimeout }[] = [];
   const apiFailures = new Map<string, 'network' | 'timeout' | { status: number; error: string }>();
   if (options.initialStatusFailure) apiFailures.set('/api/status', options.initialStatusFailure);
   const intervals = new Map<number, { callback: () => void; delay: number }>();
@@ -532,6 +538,7 @@ async function pageFixture(requestMedia: (constraints: unknown) => Promise<unkno
   const context = vm.createContext({
     audioOutputModule: await import('../public/audio-output.js'),
     microphoneInputModule: await import('../public/microphone-input.js'),
+    translationEngineModule: await import('../public/translation-engine.js'),
     lifecycleModule: { createCallLifecycle, createDeviceMediaOwner, microphoneMessages: (await import('../public/call-lifecycle.js')).microphoneMessages },
     document: { getElementById: element, querySelector: element, querySelectorAll: () => [], createElement: node, createElementNS: node, body: node() },
     window: { Twilio: { Device: FakeDevice }, history: { replaceState() {} }, addEventListener(name: string, callback: () => void) { windowEvents.set(name, callback); }, scrollTo() {} },
@@ -542,21 +549,33 @@ async function pageFixture(requestMedia: (constraints: unknown) => Promise<unkno
     URL: { createObjectURL: (blob: Blob) => { exports.push(blob); return 'blob:offline-export'; }, revokeObjectURL() {} },
     Date: class extends Date { static now() { return now(); } },
     console: { info: (...values: string[]) => sdkLogs.push(values.join(' ')) },
-    setTimeout: (...args: Parameters<typeof setTimeout>) => { const timer = setTimeout(...args); timer.unref(); return timer; }, clearTimeout,
+    setTimeout: (...args: Parameters<typeof setTimeout>) => {
+      const timer = setTimeout(...args); timer.unref();
+      const entry = { delay: args[1] || 0, cleared: false, fire() { if (!entry.cleared) { clearTimeout(timer); Reflect.apply(args[0], undefined, args.slice(2)); } } };
+      timeouts.set(timer, entry); return timer;
+    },
+    clearTimeout: (timer: ReturnType<typeof setTimeout>) => { const entry = timeouts.get(timer); if (entry) entry.cleared = true; clearTimeout(timer); },
     setInterval: (callback: () => void, delay: number) => { const id = intervals.size + 1; intervals.set(id, { callback, delay }); return id; },
     clearInterval: (id: number) => intervals.delete(id),
     fetch: async (path: string, options: any = {}) => {
       requests.push(`${options.method || 'GET'} ${path}`);
+      apiTimeouts.push({ path, timer: [...timeouts.values()].at(-1) });
+      if (options.body) requestBodies.push({ path, body: JSON.parse(options.body) });
+      if (beforeResponse) await beforeResponse(path, options.signal);
       const failure = apiFailures.get(path);
       if (failure === 'network') throw new TypeError('private fetch transport details');
       if (failure === 'timeout') throw Object.assign(new Error('private timeout details'), { name: 'AbortError' });
       if (failure) return { ok: false, status: failure.status, json: async () => ({ error: failure.error }) };
       let payload: any = { ok: true };
-      if (path === '/api/status') payload = { configured: true, activeSession, checks: [] };
+      if (path === '/api/status') payload = { configured: true, activeSession, checks: [], translationEngines: ['legacy', 'continuous'], defaultTranslationEngine: 'legacy' };
       if (path === '/api/token') payload = { token: 'offline-sdk-token' };
       if (path === '/api/calls') {
-        activeSession = { id: `session-${++sessionCounter}`, status: 'connecting', direction: 'outbound', to: '+12125551234' };
+        activeSession = { id: `session-${++sessionCounter}`, status: 'connecting', direction: 'outbound', to: '+12125551234', translationEngine: JSON.parse(options.body).translationEngine || 'legacy', translationReady: false };
         payload = { ...activeSession, connectionParams: { sessionId: activeSession.id, nonce: 'offline-nonce' } };
+      }
+      if (path === '/api/verify') {
+        const translationEngine = JSON.parse(options.body).translationEngine || 'legacy';
+        payload = { translationEngine, checks: [{ name: translationEngine === 'continuous' ? 'openaiContinuous' : 'openaiRealtime', status: 'passed', code: translationEngine === 'continuous' ? 'SESSION_UPDATED_BOTH_LANGUAGES' : 'SESSION_UPDATED' }] };
       }
       if (path.endsWith('/hangup')) activeSession = null;
       return { ok: true, json: async () => payload };
@@ -565,7 +584,7 @@ async function pageFixture(requestMedia: (constraints: unknown) => Promise<unkno
   const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
   const importLine = "await import('./call-lifecycle.js')";
   assert.ok(source.includes(importLine));
-  await vm.runInContext(source.replace(importLine, 'lifecycleModule').replace("await import('./audio-output.js')", 'audioOutputModule').replace("await import('./microphone-input.js')", 'microphoneInputModule'), context);
+  await vm.runInContext(source.replace(importLine, 'lifecycleModule').replace("await import('./audio-output.js')", 'audioOutputModule').replace("await import('./microphone-input.js')", 'microphoneInputModule').replace("await import('./translation-engine.js')", 'translationEngineModule'), context);
   await new Promise(resolve => setImmediate(resolve));
   if (!options.initialStatusFailure) {
     sources[0].onopen();
@@ -574,7 +593,8 @@ async function pageFixture(requestMedia: (constraints: unknown) => Promise<unkno
   }
   element('phone-number').value = '+12125551234';
   return {
-    element, requests, device, sdkLogs, exports, outgoingCall: () => outgoingCall, sdkConnects: () => sdkConnects, media: () => mediaHandedToSdk,
+    element, requests, requestBodies, device, sdkLogs, exports, history: () => JSON.parse(localValues.get('ai-phone-calls-v1') || '[]'), outgoingCall: () => outgoingCall, sdkConnects: () => sdkConnects, media: () => mediaHandedToSdk,
+    requestTimeout(path: string) { return apiTimeouts.filter(entry => entry.path === path).at(-1)?.timer; },
     failApi(path: string, failure: 'network' | 'timeout' | { status: number; error: string }) { apiFailures.set(path, failure); },
     restoreApi(path: string) { apiFailures.delete(path); },
     eventSourceCount: () => sources.length,
@@ -608,13 +628,168 @@ async function pageFixture(requestMedia: (constraints: unknown) => Promise<unkno
       if (['failed', 'completed'].includes(activeSession.status)) activeSession = null;
     },
     incoming() {
-      activeSession = { id: `incoming-${++sessionCounter}`, direction: 'inbound', status: 'ringing', from: '+12125551234' };
+      activeSession = { id: `incoming-${++sessionCounter}`, direction: 'inbound', status: 'ringing', from: '+12125551234', translationEngine: 'legacy', translationReady: false };
       const call = new FakeCall('pending');
       device.emit('incoming', call);
       return call;
     },
   };
 }
+
+test('page sends the chosen engine, locks it during calls, and waits for explicit translation readiness', async () => {
+  const f = await pageFixture(async () => streamFixture().stream);
+  assert.equal(f.element('translation-engine').value, 'legacy');
+  await f.element('start-call').events.click();
+  assert.equal(f.requestBodies.find(entry => entry.path === '/api/calls')?.body.translationEngine, 'legacy');
+  await f.element('end-call').events.click();
+  f.element('translation-engine').value = 'continuous';
+  f.element('translation-engine').events.change();
+  await f.element('start-call').events.click();
+  assert.equal(f.requestBodies.filter(entry => entry.path === '/api/calls').at(-1)?.body.translationEngine, 'continuous');
+  assert.equal(f.element('translation-engine').disabled, true);
+  f.element('translation-engine').value = 'legacy';
+  f.element('translation-engine').events.change();
+  assert.equal(f.element('translation-engine').value, 'continuous');
+  assert.match(f.element('translation-engine-status').textContent, /本通电话使用：连续翻译实验版/);
+  for (const translationReady of [false, undefined, 'true']) {
+    f.callEvent({ status: 'active', translationReady });
+    assert.match(f.element('readiness-copy').textContent, /电话已接通.*请等就绪后说话/);
+    assert.match(f.element('connection-text').textContent, /翻译准备中/);
+  }
+  f.callEvent({ status: 'active', translationReady: true });
+  assert.equal(f.element('connection-text').textContent, '翻译已就绪');
+  assert.match(f.element('transcript-engine-note').textContent, /仅提供译文.*不显示原文/);
+  f.metricEvent({ role: 'local', value: 999, transcriptionMs: 100, queueMs: 0, generationMs: 899 });
+  assert.match(f.element('translation-timing-local').textContent, /不使用旧版逐句停说计时/);
+  assert.doesNotMatch(f.element('translation-timing-local').textContent, /0\.99/);
+  f.callEvent({ status: 'ending', cleanupUnconfirmed: true, error: 'CALL_CLEANUP_UNCONFIRMED' });
+  assert.equal(f.element('translation-engine').disabled, true);
+  await f.element('end-call').events.click();
+  assert.equal(f.element('translation-engine').disabled, false);
+  assert.equal(f.element('translation-engine').value, 'continuous');
+});
+
+test('verification is scoped to the selected engine and changing versions clears its prior result', async () => {
+  const f = await pageFixture(async () => streamFixture().stream);
+  f.element('translation-engine').value = 'continuous';
+  f.element('translation-engine').events.change();
+  const verifying = f.element('verify-connections').events.click();
+  assert.equal(f.element('translation-engine').disabled, true);
+  f.element('translation-engine').value = 'legacy';
+  f.element('translation-engine').events.change();
+  assert.equal(f.element('translation-engine').value, 'continuous');
+  await verifying;
+  assert.equal(f.requestBodies.find(entry => entry.path === '/api/verify')?.body.translationEngine, 'continuous');
+  assert.match(f.element('verification-results').children[0].textContent, /本次验证结果：连续翻译实验版/);
+  assert.equal(f.element('verification-results').children[1].title, '中英双向连续翻译会话已确认配置。');
+  assert.equal(f.requestTimeout('/api/verify').delay, 75000);
+  assert.equal(f.requestTimeout('/api/verify').cleared, true);
+  f.element('translation-engine').value = 'legacy';
+  f.element('translation-engine').events.change();
+  assert.equal(f.element('verification-results').children.length, 1);
+  assert.match(f.element('verification-results').children[0].textContent, /当前版本.*重新验证/);
+  assert.match(f.element('verification-engine').textContent, /验证版本：当前版本/);
+});
+
+test('dialing reserves preflight transport margin while timeout still releases prepared media', async () => {
+  const stream = streamFixture();
+  let dialSignal: AbortSignal;
+  const f = await pageFixture(async () => stream.stream, undefined, {
+    beforeResponse: async (path, signal) => {
+      if (path !== '/api/calls') return;
+      dialSignal = signal;
+      await new Promise<void>((_resolve, reject) => {
+        signal.addEventListener('abort', () => reject(Object.assign(new Error('offline timeout'), { name: 'AbortError' })), { once: true });
+      });
+    },
+  });
+  f.element('translation-engine').value = 'continuous';
+  f.element('translation-engine').events.change();
+  const dialing = f.element('start-call').events.click();
+  await new Promise(resolve => setImmediate(resolve));
+  const timer = f.requestTimeout('/api/calls');
+  assert.equal(timer.delay, 30000);
+  assert.equal(timer.cleared, false);
+  assert.equal(dialSignal.aborted, false);
+  assert.equal(f.requestTimeout('/api/status').delay, 20000);
+  assert.equal(f.sdkConnects(), 0);
+  timer.fire(); // Exercise AbortController cleanup without a real 30-second wait.
+  await dialing;
+  assert.equal(dialSignal.aborted, true);
+  assert.equal(timer.cleared, true);
+  assert.equal(stream.stopped(), 1);
+  assert.equal(f.sdkConnects(), 0);
+  assert.match(f.element('app-error').textContent, /本机服务响应超时/);
+  assert.equal(f.element('start-call').disabled, false);
+});
+
+test('canceling delayed continuous preflight still cleans up its late session with the normal hangup deadline', async () => {
+  const pending = deferred<void>();
+  const stream = streamFixture();
+  const f = await pageFixture(async () => stream.stream, undefined, {
+    beforeResponse: async path => { if (path === '/api/calls') await pending.promise; },
+  });
+  f.element('translation-engine').value = 'continuous';
+  f.element('translation-engine').events.change();
+  const dialing = f.element('start-call').events.click();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.requestTimeout('/api/calls').delay, 30000);
+  await f.element('end-call').events.click();
+  assert.equal(stream.stopped(), 1);
+  pending.resolve();
+  await dialing;
+  assert.equal(f.sdkConnects(), 0);
+  const hangup = f.requests.find(request => /^POST \/api\/calls\/[^/]+\/hangup$/.test(request));
+  assert.ok(hangup, 'a canceled attempt must end the session returned after preflight');
+  assert.equal(f.requestTimeout(hangup.slice(5)).delay, 20000);
+  assert.equal(f.requestTimeout(hangup.slice(5)).cleared, true);
+  assert.equal(f.requestTimeout('/api/calls').cleared, true);
+  assert.equal(f.element('start-call').disabled, false);
+});
+
+test('incoming calls show the server legacy engine while retaining the next outgoing comparison choice', async () => {
+  const f = await pageFixture(async () => streamFixture().stream);
+  f.element('translation-engine').value = 'continuous';
+  f.element('translation-engine').events.change();
+  f.incoming();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.element('translation-engine').value, 'legacy');
+  assert.equal(f.element('translation-engine').disabled, true);
+  assert.match(f.element('translation-engine-status').textContent, /本通电话使用：当前版本/);
+  await f.element('end-call').events.click();
+  assert.equal(f.element('translation-engine').value, 'continuous');
+});
+
+test('continuous call history and exports retain the actual selected version with translated text', async () => {
+  const f = await pageFixture(async () => streamFixture().stream);
+  f.element('save-history-toggle').events.click();
+  f.element('translation-engine').value = 'continuous';
+  f.element('translation-engine').events.change();
+  await f.element('start-call').events.click();
+  f.transcriptEvent({ id: 'continuous-local-0', role: 'local', kind: 'translation', text: 'No coffee, please.', final: true });
+  f.element('export-current').events.click();
+  const text = await f.exports[0].text();
+  assert.match(text, /翻译版本：连续翻译实验版/);
+  assert.match(text, /仅包含服务返回的译文/);
+  assert.match(text, /No coffee, please\./);
+  f.callEvent({ status: 'completed' });
+  assert.equal(f.history()[0].translationEngine, 'continuous');
+  assert.match(f.element('history-list').children[0].children[1].textContent, /连续翻译实验版/);
+});
+
+test('input overflow reports incomplete capture separately from continuous playback backlog', async () => {
+  for (const [error, expected] of [
+    ['continuous_input_before_ready_overflow:local', /输入声音已无法完整保留.*等翻译就绪/],
+    ['translation_input_overflow:remote', /输入声音已无法完整保留.*等翻译就绪/],
+    ['continuous_playback_overflow:remote', /连续翻译声音积压过多/],
+  ] as const) {
+    const f = await pageFixture(async () => streamFixture().stream);
+    await f.element('start-call').events.click();
+    f.callEvent({ status: 'failed', error });
+    assert.match(f.element('app-error').textContent, expected);
+    assert.doesNotMatch(f.element('app-error').textContent, /识别错误/);
+  }
+});
 
 test('real page handlers create no call while microphone permission is pending or canceled', async () => {
   const pending = deferred<unknown>();
@@ -706,7 +881,7 @@ test('signaling errors allow SDK recovery without ending the call or logging pri
   const error = { code: 31005, message: 'private-message', token: 'private-token', CallSid: 'private-call-id', sdp: 'private-sdp' };
   f.device.emit('error', error);
   call.emit('reconnecting', { ...error, code: 53001 });
-  assert.match(f.element('bridge-caption').textContent, /正在恢复/);
+  assert.match(f.element('bridge-caption').textContent, /恢复中/);
   call.emit('warning', 'low-bytes-sent', error);
   call.emit('warning', 'private-warning');
   call.emit('warning-cleared', 'low-bytes-sent', error);
@@ -738,24 +913,24 @@ test('a terminal SDK call error still cleans up the backend session', async () =
 test('translation recovery tracks both roles independently and ignores stale or private event data', async () => {
   const f = await pageFixture(async () => streamFixture().stream);
   await f.element('start-call').events.click();
-  f.callEvent({ status: 'active' });
+  f.callEvent({ status: 'active', translationReady: true });
   const event = { sessionId: 'session-1', role: 'remote', state: 'reconnecting', closeCode: 1006, text: 'private-text', token: 'private-token' };
   f.translationEvent({ ...event, sessionId: 'old-session' });
   assert.doesNotMatch(f.element('bridge-caption').textContent, /翻译短暂中断/);
   f.translationEvent(event);
-  assert.match(f.element('bridge-caption').textContent, /翻译短暂中断.*重说/);
+  assert.match(f.element('bridge-caption').textContent, /翻译恢复中.*暂停/);
   f.translationEvent({ ...event, role: 'local' });
   f.translationEvent({ ...event, state: 'ready' });
   assert.equal(f.element('connection-text').textContent, '正在恢复翻译连接');
   f.translationEvent({ ...event, state: 'ready', role: 'local' });
-  assert.match(f.element('bridge-caption').textContent, /翻译连接已恢复.*重说/);
+  assert.match(f.element('bridge-caption').textContent, /已恢复.*重说/);
   assert.equal(f.requests.some(path => path.endsWith('/hangup')), false);
   const logs = f.sdkLogs.join('\n');
   assert.match(logs, /remote.*reconnecting.*1006/);
   assert.doesNotMatch(logs, /private-|sessionId|old-session/);
   await f.element('end-call').events.click();
   await f.element('start-call').events.click();
-  f.callEvent({ status: 'active' });
+  f.callEvent({ status: 'active', translationReady: true });
   f.translationEvent(event);
   assert.doesNotMatch(f.element('bridge-caption').textContent, /恢复|重说/);
   await f.element('end-call').events.click();
@@ -764,12 +939,12 @@ test('translation recovery tracks both roles independently and ignores stale or 
 test('sound detection and SDK quality warnings remain separate and reset for the next call', async () => {
   const f = await pageFixture(async () => streamFixture().stream);
   await f.element('start-call').events.click();
-  f.callEvent({ status: 'active' });
+  f.callEvent({ status: 'active', translationReady: true });
   const call = f.outgoingCall();
   call.emit('volume', 0, 0);
   call.emit('warning', 'constant-audio-input-level');
   assert.match(f.element('call-hint').textContent, /尚未检测.*安静时正常/);
-  assert.equal(f.element('connection-text').textContent, '通话中');
+  assert.equal(f.element('connection-text').textContent, '翻译已就绪');
   call.emit('volume', 0.08, 0.04);
   call.emit('volume', 0, 0);
   assert.equal(f.element('call-hint').textContent, '本次已检测到麦克风声音');
@@ -779,15 +954,15 @@ test('sound detection and SDK quality warnings remain separate and reset for the
   call.emit('warning-cleared', 'low-bytes-sent');
   assert.match(f.element('connection-text').textContent, /连接质量异常/);
   call.emit('warning-cleared', 'high-packet-loss');
-  assert.equal(f.element('connection-text').textContent, '通话中');
+  assert.equal(f.element('connection-text').textContent, '翻译已就绪');
   assert.equal(f.requests.some(path => path.endsWith('/hangup')), false);
   await f.element('end-call').events.click();
   await f.element('start-call').events.click();
-  f.callEvent({ status: 'active' });
+  f.callEvent({ status: 'active', translationReady: true });
   call.emit('volume', 0.8, 0.4);
   call.emit('warning', 'low-bytes-sent');
   assert.equal(f.element('call-hint').textContent, '麦克风已就绪');
-  assert.equal(f.element('connection-text').textContent, '通话中');
+  assert.equal(f.element('connection-text').textContent, '翻译已就绪');
   await f.element('end-call').events.click();
 });
 

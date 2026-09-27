@@ -4,6 +4,7 @@
   const { createCallLifecycle, createDeviceMediaOwner, microphoneMessages } = await import('./call-lifecycle.js');
   const { createAudioOutput } = await import('./audio-output.js');
   const { createMicrophoneInput } = await import('./microphone-input.js');
+  const { createTranslationEngineSelection, translationEngineLabel, translationReadiness } = await import('./translation-engine.js');
   const $ = id => document.getElementById(id);
   const tokenKey = 'ai-phone-local-token';
   const historyKey = 'ai-phone-calls-v1';
@@ -21,6 +22,8 @@
     PRIVATE_BOOTSTRAP_SETTING: '本机访问保护只能通过桌面启动器设置。',
     INVALID_PRESENCE: '电话在线状态更新失败，请重新开启通话。',
     INVALID_DESTINATION: '请输入有效的美国电话号码（+1 加十位号码）。',
+    INVALID_TRANSLATION_ENGINE: '翻译版本无效，请刷新页面后重新选择。',
+    TRANSLATION_ENGINE_UNAVAILABLE: '所选翻译版本暂不可用，请选择当前版本，或在连接设置中重新验证。',
     CANNOT_DIAL_OWN_NUMBER: '不能拨打自己的 Twilio 号码，请填写对方的测试号码。',
     BROWSER_NOT_READY: '浏览器电话尚未就绪，请先点击「开启通话」。',
     BUSY: '已有一通电话正在进行，请先结束当前通话。',
@@ -62,6 +65,7 @@
     CLOSED_BEFORE_READY: '实时翻译连接在就绪前关闭。',
     INVALID_RESPONSE: '服务返回了无法识别的数据。',
     SESSION_UPDATED: '实时翻译会话已确认配置。',
+    SESSION_UPDATED_BOTH_LANGUAGES: '中英双向连续翻译会话已确认配置。',
     VERIFIED_RESOURCE: '账户资源与配置验证通过。'
   };
   const fields = [
@@ -73,8 +77,8 @@
     ['TWILIO_TWIML_APP_SID', 'Twilio TwiML App SID', false, 'AP…', '应用的语音回调需指向此服务。'],
     ['TWILIO_CALLER_NUMBER', '我的 Twilio 电话号码', false, '+1…', '该账户拥有的美国号码，包含国家区号。'],
     ['OPENAI_API_KEY', 'OpenAI API Key', true, '留空保留现有密钥', '使用具有 Realtime 模型访问权限的密钥。'],
-    ['OPENAI_REALTIME_MODEL', '实时翻译模型', false, 'gpt-realtime-1.5', '可用性以你的 OpenAI 账户验证结果为准。'],
-    ['OPENAI_TRANSCRIPTION_MODEL', '语音转写模型', false, 'whisper-1', '当前默认 whisper-1；也可填写 gpt-4o-transcribe 或 gpt-4o-mini-transcribe。改变后请重新验证 API 并实测准确度。']
+    ['OPENAI_REALTIME_MODEL', '当前版本的翻译模型', false, 'gpt-realtime-1.5', '仅用于当前版本。连续翻译实验版使用独立模型，无需改这里。'],
+    ['OPENAI_TRANSCRIPTION_MODEL', '当前版本的语音转写模型', false, 'whisper-1', '仅用于当前版本；支持 whisper-1、gpt-4o-transcribe 或 gpt-4o-mini-transcribe。改变后请重新验证并实测。']
   ];
   let accessToken = '';
   let localAccessRejected = false;
@@ -106,6 +110,7 @@
   let translationRecoveryHint = false;
   const audioDelivery = new Map();
   const translationTiming = new Map();
+  const translationEngine = createTranslationEngineSelection();
   const audioOutput = createAudioOutput({ onChange: () => renderStatus() });
   const microphoneInput = createMicrophoneInput({ mediaDevices: navigator.mediaDevices, onChange: snapshot => renderMicrophoneInput(snapshot) });
   const callLifecycle = createCallLifecycle({
@@ -139,6 +144,15 @@
   function cleanMessage(value, fallback = '操作未完成，请检查连接后重试。') {
     if (typeof value !== 'string' || !value.trim()) return fallback;
     if (errorMessages[value]) return errorMessages[value];
+    if (/^(continuous_input_before_ready_overflow|translation_input_overflow):(local|remote)$/.test(value)) {
+      return '翻译准备或恢复耗时过长，输入声音已无法完整保留，通话已请求结束。请重新拨打，并等翻译就绪后再说话。';
+    }
+    if (/^continuous_[a-z_]+(?::(?:local|remote))?$/i.test(value)) {
+      if (/timeout|closed|connection|socket/i.test(value)) return '连续翻译连接未完成或已中断，请检查网络后重新验证该版本。';
+      if (/overflow|backpressure|queue/i.test(value)) return '连续翻译声音积压过多，通话已请求结束。请稍后重试或选择当前版本。';
+      if (/rejected|mismatch|session|auth|model/i.test(value)) return '连续翻译会话未通过检查，请在连接设置中验证连续翻译实验版。';
+      return '连续翻译服务未完成本次处理，请结束后重新验证；也可选择当前版本。';
+    }
     const translationWait = /^(openai_transcription_timeout|translation_queue_timeout):(local|remote)$/.exec(value);
     if (translationWait) return translationWait[1] === 'openai_transcription_timeout'
       ? `等待${translationWait[2] === 'local' ? '你的中文' : '对方的英文'}识别超时，通话已请求结束。请检查网络后重试。`
@@ -206,8 +220,9 @@
   async function api(path, options = {}) {
     if (!accessToken) throw new Error('本机访问凭据缺失，请通过桌面「AI 电话」重新打开。');
     const controller = new AbortController();
-    // Provider checks run four sequential 15-second requests; allow network overhead.
-    const timeout = setTimeout(() => controller.abort(), path === '/api/verify' ? 75000 : 20000);
+    // Verification allows four sequential requests. Dialing can require a
+    // 5-second public probe plus a 15-second engine probe, with transport margin.
+    const timeout = setTimeout(() => controller.abort(), path === '/api/verify' ? 75000 : path === '/api/calls' ? 30000 : 20000);
     try {
       const response = await fetch(path, { ...options, cache: 'no-store', signal: controller.signal, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` } });
       let payload = {}; try { payload = await response.json(); } catch { /* A non-JSON error has a useful HTTP status. */ }
@@ -237,12 +252,13 @@
     $('local-state').textContent = state ? '本机服务已连接' : '本机服务未连接';
     $('configuration-badge').textContent = state ? (configured ? '配置已填写' : '需要补充配置') : '未连接';
     $('readiness-title').textContent = !state ? '本机服务未连接' : !configured ? '先完成连接设置' : registered ? '电话已开启' : '配置已填写';
-    $('readiness-copy').textContent = !state ? '请从桌面「AI 电话」重新打开。' : !configured ? '填入真实连接信息后，再开启通话。' : registered ? '可以拨号或接听；电话接通后才会产生实际翻译字幕。' : '点击「开启通话」注册线路。配置通过不代表真实通话已验证。';
+    $('readiness-copy').textContent = !state ? '请从桌面「AI 电话」重新打开。' : !configured ? '填入真实连接信息后，再开启通话。' : registered ? '拨号前可选择翻译版本；电话接通后，等「翻译已就绪」再说话。' : '点击「开启通话」注册线路。配置通过不代表真实通话已验证。';
     if (cleanupPending) { $('readiness-title').textContent = '线路关闭待确认'; $('readiness-copy').textContent = '请重试挂断。确认线路关闭前，工作台会阻止新的拨号。'; }
     $('device-state').textContent = enabling ? '正在开启电话…' : registered ? (eventsOnline ? '已注册 · 可接收来电' : '已注册 · 状态连接恢复中') : '通话尚未开启';
     $('device-dot').classList.toggle('ready', registered && eventsOnline);
     $('enable-device').textContent = enabling ? '正在开启…' : registered ? '关闭通话' : '开启通话';
     $('enable-device').disabled = !state || !configured || enabling || busy() || saving || verifying;
+    renderTranslationEngine();
     $('start-call').disabled = !configured || !registered || !eventsOnline || busy() || saving || verifying || audioOutput.snapshot.status !== 'idle';
     $('start-call').querySelector('span').textContent = dialing ? '正在拨号…' : busy() ? '通话进行中' : '拨打电话';
     $('phone-number').disabled = busy(); $('erase-number').disabled = busy();
@@ -269,17 +285,46 @@
     $('export-current').disabled = !record?.lines.length;
     const currentState = activeSession?.status || (record?.endedAt ? record.status : '');
     const phase = callLifecycle.current?.phase;
+    const readiness = translationReadiness(activeSession);
     const translationRecovering = Boolean(activeSession && !terminal(currentState) && currentState !== 'ending' && !ending && recoveringTranslationRoles.size);
+    if (readiness && !cleanupPending) {
+      $('readiness-title').textContent = readiness.label;
+      $('readiness-copy').textContent = readiness.instruction;
+      if (translationRecovering || phase === 'reconnecting') {
+        $('readiness-title').textContent = '正在恢复翻译连接';
+        $('readiness-copy').textContent = '请暂停说话，等翻译就绪后再重说刚才未完成的一句。';
+      }
+    }
     const qualityWarning = currentState === 'active' && Boolean(callDiagnostics?.qualityWarnings.size);
-    $('connection-text').textContent = cleanupPending ? '线路关闭待确认' : phase === 'reconnecting' ? '正在恢复音频连接' : translationRecovering ? '正在恢复翻译连接' : qualityWarning ? '通话中 · 连接质量异常' : statusNames[currentState] || '等待开始';
-    $('connection-status').classList.toggle('active', currentState === 'active' && !qualityWarning && !translationRecovering && phase !== 'reconnecting');
-    document.body.classList.toggle('is-active', currentState === 'active');
-    $('bridge-caption').textContent = phase === 'reconnecting' ? callPhases[phase] : translationRecovering ? '翻译短暂中断，正在恢复；请稍后重说刚才未完成的一句。' : currentState === 'active' && translationRecoveryHint ? '翻译连接已恢复，请重说刚才未完成的一句。' : currentState === 'active' ? '中文与英文，正在传递' : phase === 'microphone' ? callPhases[phase] : currentState === 'ringing' ? '正在呼叫对方，等待接听' : callPhases[phase] || '连接后，听见彼此的语言';
+    $('connection-text').textContent = cleanupPending ? '线路关闭待确认' : phase === 'reconnecting' ? '正在恢复音频连接' : translationRecovering ? '正在恢复翻译连接' : readiness && !readiness.ready ? readiness.label : qualityWarning ? '通话中 · 连接质量异常' : readiness?.label || statusNames[currentState] || '等待开始';
+    $('connection-status').classList.toggle('active', readiness?.ready === true && !qualityWarning && !translationRecovering && phase !== 'reconnecting');
+    document.body.classList.toggle('is-active', readiness?.ready === true);
+    $('bridge-caption').textContent = phase === 'reconnecting' ? '音频恢复中，请暂停说话' : translationRecovering ? '翻译恢复中，请暂停说话' : readiness && !readiness.ready ? '请等翻译就绪后再说话' : readiness?.ready && translationRecoveryHint ? '已恢复，请重说刚才的一句' : readiness?.instruction || (phase === 'microphone' ? callPhases[phase] : currentState === 'ringing' ? '正在呼叫对方，等待接听' : callPhases[phase] || '连接后，听见彼此的语言');
     $('call-timer').textContent = timeText(duration());
     renderAudioOutput();
     renderMicrophoneInput();
     $('browser-playback').textContent = !callDiagnostics ? '浏览器接收与播放器状态将在通话时显示。' :
       `${callDiagnostics.outputDetected ? '本次已检测到接收声音' : '尚未检测到接收声音'} · ${callDiagnostics.playerState || '等待播放器状态'}`;
+  }
+  function renderTranslationEngine() {
+    translationEngine.update({
+      engines: state ? state.translationEngines : translationEngine.snapshot.available,
+      session: activeSession || (incomingCall ? { translationEngine: 'legacy' } : null),
+      locked: !state || busy() || enabling || saving || verifying,
+    });
+    const snapshot = translationEngine.snapshot;
+    const select = $('translation-engine');
+    for (const option of select.options) option.disabled = !snapshot.available.includes(option.value) && option.value !== snapshot.sessionEngine;
+    select.value = snapshot.value; select.disabled = snapshot.locked;
+    $('translation-engine-status').textContent = snapshot.sessionEngine
+      ? `本通电话使用：${translationEngineLabel(snapshot.sessionEngine)}。通话结束后才能换版本。`
+      : snapshot.selected === 'continuous' ? '下一通使用连续翻译实验版。请与当前版本分两次通话比较效果。' : '下一通使用当前版本。';
+    $('verification-engine').textContent = `验证版本：${translationEngineLabel(snapshot.value)}。在工作台的「本次翻译版本」中选择。`;
+    const displayEngine = activeSession?.translationEngine || record?.translationEngine || snapshot.value;
+    $('transcript-engine-note').textContent = displayEngine === 'continuous'
+      ? '连续版目前仅提供译文记录，不显示原文；译音效果请双方实际听取。'
+      : '当前版本可显示原文与译文；文字不能代替实际听感。';
+    renderAudioDelivery();
   }
   function renderAudioOutput(snapshot = audioOutput.snapshot) {
     const select = $('audio-output');
@@ -324,13 +369,13 @@
     if (!state?.checks?.length) $('configuration-checks').append(element('p', 'form-intro', '连接本机服务后显示配置状态。'));
   }
   function makeRecord(session) {
-    return { id: session.id, number: session.direction === 'inbound' ? (session.from || '来电') : (session.to || ''), direction: session.direction, status: session.status, startedAt: Date.now(), connectedAt: session.status === 'active' ? Date.now() : null, endedAt: null, duration: 0, lines: [] };
+    return { id: session.id, number: session.direction === 'inbound' ? (session.from || '来电') : (session.to || ''), direction: session.direction, translationEngine: session.translationEngine || 'legacy', status: session.status, startedAt: Date.now(), connectedAt: session.status === 'active' ? Date.now() : null, endedAt: null, duration: 0, lines: [] };
   }
   function finishRecord(status) {
     if (!record || record.endedAt) return;
     record.duration = duration(); record.endedAt = Date.now(); record.status = status;
     if (preferences.saveHistory) { historyRecords = [structuredClone(record), ...historyRecords.filter(r => r.id !== record.id)].slice(0, 30); saveLocal(historyKey, historyRecords); }
-    $('transcript-subtitle').textContent = `${statusNames[status] || '通话已结束'} · ${record.lines.length ? '可导出文字记录' : '未收到字幕'}`;
+    $('transcript-subtitle').textContent = `${translationEngineLabel(record.translationEngine)} · ${statusNames[status] || '通话已结束'} · ${record.lines.length ? '可导出文字记录' : '未收到文字记录'}`;
     renderHistory();
   }
   function clearSdkCall() {
@@ -362,9 +407,9 @@
       if (session.error) showError(callFailureMessage(session));
     } else if (session) {
       if (!record || record.id !== session.id) { if (record && !record.endedAt) finishRecord('completed'); audioDelivery.clear(); translationTiming.clear(); renderAudioDelivery(); record = makeRecord(session); $('transcript').replaceChildren(); $('empty-conversation').hidden = false; }
-      activeSession = session; record.status = session.status;
+      activeSession = session; record.status = session.status; record.translationEngine = session.translationEngine || 'legacy';
       if (session.status === 'active' && !record.connectedAt) record.connectedAt = Date.now();
-      $('transcript-subtitle').textContent = `${session.direction === 'inbound' ? '来电' : '拨出'} · ${record.number} · ${statusNames[session.status] || session.status}`;
+      $('transcript-subtitle').textContent = `${translationEngineLabel(record.translationEngine)} · ${session.direction === 'inbound' ? '来电' : '拨出'} · ${record.number} · ${statusNames[session.status] || session.status}`;
       if (incomingCall) $('incoming-number').textContent = session.from || '收到来电';
       if (requiresCleanup(session)) showError(errorMessages.CALL_CLEANUP_UNCONFIRMED);
     } else if (activeSession) {
@@ -419,20 +464,26 @@
     renderStatus();
   }
   function renderAudioDelivery() {
+    const continuous = (activeSession?.translationEngine || record?.translationEngine || translationEngine.snapshot.value) === 'continuous';
+    $('translation-timing-note').textContent = continuous
+      ? '连续版会边听边翻译，旧版逐句停说计时不适用。请比较实际开始出声、持续讲话落后和说完后的等待；数据块数不是句数，也不代表双方已经听清。'
+      : '计时不含停顿判断、线路传输及设备播放，不等于实际听见的等待时间。线路确认播放后仍需双方检查实际听感。';
     for (const role of ['local', 'remote']) {
       const counts = audioDelivery.get(role);
       const target = role === 'local' ? '英语 → 手机' : '中文 → 电脑';
+      const unit = continuous ? '块' : '段';
       $(`audio-delivery-${role}`).textContent = !counts ? `${target}：尚无译音记录` :
-        `${target}：生成 ${counts.generated} 段 · 已送出 ${counts.sent} 段 · 线路确认播放 ${counts.playback_confirmed} 段${counts.unconfirmed ? ` · 未确认 ${counts.unconfirmed} 段` : ''}${counts.silent ? ` · ${counts.silent} 段未生成声音` : ''}`;
+        `${target}：生成 ${counts.generated} ${unit} · 已送出 ${counts.sent} ${unit} · 线路确认播放 ${counts.playback_confirmed} ${unit}${counts.unconfirmed ? ` · 未确认 ${counts.unconfirmed} ${unit}` : ''}${counts.silent ? ` · ${counts.silent} ${unit}未生成声音` : ''}`;
       const timing = translationTiming.get(role);
       const seconds = value => `${(value / 1000).toFixed(2)} 秒`;
-      $(`translation-timing-${role}`).textContent = !timing ? `${target}：尚无服务端计时` :
+      $(`translation-timing-${role}`).textContent = continuous ? `${target}：连续翻译，不使用旧版逐句停说计时` : !timing ? `${target}：尚无服务端计时` :
         `${target}最近一句：服务端停说事件 → 首个译音数据 ${seconds(timing.value)}` +
         (timing.parts ? `（等待转写 ${seconds(timing.parts[0])} · 等待发起 ${seconds(timing.parts[1])} · 生成首音 ${seconds(timing.parts[2])}）` : '（分项时间不可用）');
     }
   }
   function applyTranslationTiming(value) {
     if (!value || !activeSession || value.sessionId !== activeSession.id || terminal(activeSession.status) || activeSession.status === 'ending') return;
+    if (activeSession.translationEngine === 'continuous') return;
     if (!['local', 'remote'].includes(value.role) || value.name !== 'speech_stop_to_first_audio_ms' || value.scope !== 'provider_generation') return;
     if (!Number.isFinite(value.value) || value.value < 0 || !Number.isFinite(value.at)) return;
     const previous = translationTiming.get(value.role);
@@ -457,7 +508,7 @@
     const article = element('article', `utterance ${line.role === 'remote' ? 'their' : 'mine'} ${line.kind === 'original' ? 'original-entry' : ''}`);
     article.dataset.transcriptId = line.id;
     const meta = element('div', 'utterance-meta');
-    meta.append(element('strong', '', line.role === 'local' ? '你' : '对方'), element('span', '', line.kind === 'original' ? '原文' : '译文'), element('span', 'draft-label', line.final ? '' : '识别中'));
+    meta.append(element('strong', '', line.role === 'local' ? '你' : '对方'), element('span', '', line.kind === 'original' ? '原文' : '译文'), element('span', 'draft-label', line.final ? '' : '更新中'));
     const at = new Date(line.at); if (!Number.isNaN(at.getTime())) meta.append(element('time', '', at.toLocaleTimeString('zh-CN', { hour12: false })));
     const bubble = element('div', 'speech-bubble'); bubble.append(element('p', 'transcript-text', line.text)); article.append(meta, bubble); return article;
   }
@@ -635,9 +686,10 @@
     navigate('workspace'); renderStatus(); refreshStatus().catch(error => showError(error));
   }
   async function startCall() {
-    if (busy() || !registered || !eventsOnline || audioOutput.snapshot.status !== 'idle') return;
+    if (busy() || !registered || !eventsOnline || saving || verifying || enabling || translationEngine.snapshot.locked || audioOutput.snapshot.status !== 'idle') return;
     const to = $('phone-number').value.replace(/[\s()-]/g, '');
     if (!/^\+[1-9]\d{6,14}$/.test(to)) { $('phone-error').textContent = '请输入含国家区号的号码，例如 +1 加十位美国号码。'; $('phone-number').setAttribute('aria-invalid', 'true'); $('phone-number').focus(); return; }
+    const chosenEngine = translationEngine.snapshot.selected;
     dialing = true; clearError(); renderStatus();
     const attempt = callLifecycle.begin();
     const attemptDevice = device;
@@ -651,7 +703,7 @@
       if (!callLifecycle.isCurrent(attempt)) return;
       audioOutput.refresh();
       callLifecycle.update(attempt, { phase: 'checking' });
-      const created = await post('/api/calls', { to }); createdId = created.id;
+      const created = await post('/api/calls', { to, translationEngine: chosenEngine }); createdId = created.id;
       if (!createdId || !created.connectionParams) throw new Error('电话服务未返回有效连接信息。');
       if (!callLifecycle.isCurrent(attempt)) { await post(`/api/calls/${encodeURIComponent(createdId)}/hangup`).catch(() => {}); return; }
       callLifecycle.update(attempt, { sessionId: createdId });
@@ -716,7 +768,7 @@
   }
   function exportRecord(item) {
     if (!item?.lines.length) return;
-    const text = ['AI 电话 — 通话文字记录', `方向：${item.direction === 'inbound' ? '来电' : '拨出'}`, `号码：${item.number}`, `时间：${dateText(item.startedAt)}`, `页面观察时长：${timeText(duration(item))}`, '字幕由语音服务生成，可能存在识别或翻译错误。', '', ...orderedTranscriptLines(item.lines).map(line => `[${line.role === 'local' ? '你' : '对方'} · ${line.kind === 'original' ? '原文' : '译文'}${line.final ? '' : ' · 未定稿'}] ${line.text}`)].join('\r\n');
+    const text = ['AI 电话 — 通话文字记录', `翻译版本：${translationEngineLabel(item.translationEngine)}`, `方向：${item.direction === 'inbound' ? '来电' : '拨出'}`, `号码：${item.number}`, `时间：${dateText(item.startedAt)}`, `页面观察时长：${timeText(duration(item))}`, '文字仅用于辅助排查；以双方实际听到的译音为准。', ...(item.translationEngine === 'continuous' ? ['连续版未开启原文转写，此记录仅包含服务返回的译文。'] : []), '', ...orderedTranscriptLines(item.lines).map(line => `[${line.role === 'local' ? '你' : '对方'} · ${line.kind === 'original' ? '原文' : '译文'}${line.final ? '' : ' · 未定稿'}] ${line.text}`)].join('\r\n');
     const url = URL.createObjectURL(new Blob(['\uFEFF', text], { type: 'text/plain;charset=utf-8' }));
     const link = element('a'); link.href = url; link.download = `AI电话-通话记录-${new Date(item.startedAt).toISOString().replace(/[:.]/g, '-')}.txt`; document.body.append(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 5000);
   }
@@ -725,13 +777,13 @@
     if (!historyRecords.some(r => r.id === selectedHistory)) selectedHistory = historyRecords[0]?.id || null;
     for (const item of historyRecords) {
       const button = element('button', 'history-item'); button.classList.toggle('selected', item.id === selectedHistory); button.setAttribute('aria-pressed', String(item.id === selectedHistory));
-      button.append(element('strong', '', item.number), element('small', '', `${item.direction === 'inbound' ? '来电' : '拨出'} · ${statusNames[item.status] || '已结束'}`));
+      button.append(element('strong', '', item.number), element('small', '', `${translationEngineLabel(item.translationEngine)} · ${item.direction === 'inbound' ? '来电' : '拨出'} · ${statusNames[item.status] || '已结束'}`));
       const meta = element('div', 'history-meta'); meta.append(element('span', '', dateText(item.startedAt)), element('span', '', timeText(item.duration))); button.append(meta);
       button.addEventListener('click', () => { selectedHistory = item.id; renderHistory(); }); $('history-list').append(button);
     }
     $('history-detail').replaceChildren(); const item = historyRecords.find(r => r.id === selectedHistory);
     if (!item) { const empty = element('div', 'empty-conversation'); empty.append(icon('clock'), element('h3', '', '还没有保存的通话'), element('p', '', '可在连接设置中开启「保存通话文字」。')); $('history-detail').append(empty); return; }
-    const heading = element('div', 'detail-heading'); const title = element('div'); title.append(element('h2', '', item.number), element('p', '', `${dateText(item.startedAt)} · 普通话 ↔ English`));
+    const heading = element('div', 'detail-heading'); const title = element('div'); title.append(element('h2', '', item.number), element('p', '', `${dateText(item.startedAt)} · ${translationEngineLabel(item.translationEngine)} · 普通话 ↔ English`));
     const download = element('button', 'secondary-button', '导出文字'); download.disabled = !item.lines.length; download.addEventListener('click', () => exportRecord(item)); heading.append(title, download);
     $('history-detail').append(heading, ...orderedTranscriptLines(item.lines).map(renderLine));
   }
@@ -760,11 +812,15 @@
     finally { for (const [name, , secret] of fields) if (secret) $(`setting-${name}`).value = ''; saving = false; renderStatus(); }
   }
   async function verifyConnections() {
-    if (verifying || busy()) return;
-    verifying = true; $('verification-results').replaceChildren(element('p', 'form-intro', '正在验证账户、号码、电话应用与实时翻译会话…')); renderStatus();
+    if (verifying || busy() || saving || !state?.configured) return;
+    const chosenEngine = translationEngine.snapshot.selected;
+    verifying = true; $('verification-results').replaceChildren(element('p', 'form-intro', `正在验证${translationEngineLabel(chosenEngine)}的账户、号码、电话应用与翻译连接…`)); renderStatus();
     try {
-      const result = await post('/api/verify'); $('verification-results').replaceChildren();
-      const labels = { twilioAccount: 'Twilio 账户', twilioNumber: 'Twilio 号码', twilioApplication: '电话应用', openaiRealtime: 'OpenAI Realtime' };
+      const result = await post('/api/verify', { translationEngine: chosenEngine });
+      const verifiedEngine = result.translationEngine || 'legacy';
+      $('verification-results').replaceChildren(element('p', 'form-intro', `本次验证结果：${translationEngineLabel(verifiedEngine)}`));
+      if (verifiedEngine !== chosenEngine) $('verification-results').append(element('p', 'field-error', '服务返回的版本与本次选择不同，所选版本尚未确认；请刷新并重新验证。'));
+      const labels = { twilioAccount: 'Twilio 账户', twilioNumber: 'Twilio 号码', twilioApplication: '电话应用', openaiRealtime: '当前版翻译连接', openaiContinuous: '连续翻译连接（双向）' };
       for (const check of result.checks || []) {
         const row = element('div', 'config-check'); row.append(element('span', '', labels[check.name] || check.name), element('span', `check-state ${check.status === 'passed' ? 'ready' : 'needs-attention'}`, { passed: '连接验证通过', failed: '验证未通过', missing: '缺少配置' }[check.status] || '待检查'));
         if (check.code) row.title = cleanMessage(String(check.code)); $('verification-results').append(row);
@@ -784,6 +840,12 @@
   document.querySelectorAll('[data-navigate]').forEach(button => button.addEventListener('click', () => navigate(button.dataset.navigate)));
   document.querySelector('.brand').addEventListener('click', event => { event.preventDefault(); navigate('workspace'); });
   $('enable-device').addEventListener('click', enableDevice); $('start-call').addEventListener('click', startCall); $('end-call').addEventListener('click', () => endCall());
+  $('translation-engine').addEventListener('change', () => {
+    if (translationEngine.select($('translation-engine').value)) {
+      $('verification-results').replaceChildren(element('p', 'form-intro', `已切换为${translationEngineLabel(translationEngine.snapshot.selected)}，请重新验证此版本；其他版本的结果不能代替。`));
+    }
+    renderStatus();
+  });
   $('accept-call').addEventListener('click', acceptCall); $('reject-call').addEventListener('click', rejectCall);
   $('audio-output').addEventListener('change', async () => { if (!registered || busy()) return; const pending = audioOutput.select($('audio-output').value); renderStatus(); await pending; renderStatus(); });
   $('microphone-input').addEventListener('change', () => { if (busy() || enabling) return; microphoneInput.select($('microphone-input').value); renderStatus(); });

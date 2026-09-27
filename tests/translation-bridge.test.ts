@@ -306,13 +306,15 @@ test('bridge does not accept an acknowledgement with missing or different transc
   }
 });
 
-test('pre-pair and pre-ack PCMU input is capped at two seconds and never crosses sessions', () => {
+test('ringing-period audio is excluded, while paired pre-ack input is preserved intact', () => {
   const f = fixture();
   f.attach('local');
   for (let i = 0; i < 150; i += 1)
     f.media('local', Buffer.alloc(160, i).toString('base64'));
   assert.equal(f.phones.remote.sent.length, 0);
   f.attach('remote');
+  for (let i = 0; i < 100; i += 1)
+    f.media('local', Buffer.alloc(160, i).toString('base64'));
   f.ready('remote');
   assert.equal(f.provider('local').sent.length, 0);
   f.provider('local').open();
@@ -325,11 +327,23 @@ test('pre-pair and pre-ack PCMU input is capped at two seconds and never crosses
     .provider('local')
     .sent.filter((event) => event.type === 'input_audio_buffer.append');
   assert.equal(appended.length, 100);
-  assert.equal(Buffer.from(appended[0].audio, 'base64')[0], 50);
-  assert.equal(Buffer.from(appended[99].audio, 'base64')[0], 149);
+  assert.equal(Buffer.from(appended[0].audio, 'base64')[0], 0);
+  assert.equal(Buffer.from(appended[99].audio, 'base64')[0], 99);
   assert.equal(f.provider('remote').sent.length, 1);
   assert.deepEqual(f.failures, []);
   f.bridge.close();
+});
+
+test('paired input overflow fails explicitly instead of silently deleting earlier speech', () => {
+  for (const chunks of [[16001], [...Array(101).fill(160)]]) {
+    const f = fixture();
+    f.attach('local');
+    f.attach('remote');
+    for (const size of chunks)
+      f.media('local', Buffer.alloc(size, 255).toString('base64'));
+    assert.deepEqual(f.failures, ['translation_input_overflow:local']);
+    f.assertClosed();
+  }
 });
 
 test('both speech directions translate to the opposite leg with no original-audio passthrough', () => {
@@ -1329,7 +1343,7 @@ test('one transport closure recovers only that translation leg without replaying
   assert.equal(f.phones.remote.readyState, WebSocket.OPEN);
   assert.equal(f.provider('local').readyState, WebSocket.OPEN);
   const replacement = f.providers[2];
-  for (let i = 0; i < 150; i += 1)
+  for (let i = 0; i < 99; i += 1)
     f.media('remote', Buffer.alloc(160, i).toString('base64'));
   old.receive({
     type: 'response.output_audio.delta',
@@ -1349,7 +1363,9 @@ test('one transport closure recovers only that translation leg without replaying
   old.pendingWrite?.(new Error('private late write failure'));
   assert.deepEqual(f.failures, []);
   assert.equal(buffered.length, 100);
-  assert.equal(Buffer.from(buffered[0].audio, 'base64')[0], 50);
+  assert.equal(buffered[0].audio, 'AQID');
+  assert.equal(Buffer.from(buffered[1].audio, 'base64')[0], 0);
+  assert.equal(Buffer.from(buffered[99].audio, 'base64')[0], 98);
   assert.equal(
     replacement.sent.filter((event) => event.type === 'response.create').length,
     0,

@@ -9,6 +9,11 @@ import {
   type SettingName,
 } from './config';
 import { createOpenAIWebSocket } from './openai-websocket';
+import {
+  createContinuousTranslationClient,
+  type ContinuousTranslationClient,
+} from './continuous-translation-client';
+import type { TranslationEngine } from './translation-engine';
 
 type Check = {
   name: string;
@@ -18,8 +23,69 @@ type Check = {
 export type ProviderReport = {
   checkedAt: string;
   realCallTested: false;
+  translationEngine?: TranslationEngine;
   checks: Check[];
 };
+
+type CreateSocket = (
+  url: string,
+  options: WebSocket.ClientOptions,
+) => WebSocket;
+
+const continuousFailureCodes: Record<string, string> = {
+  PROVIDER_READY_TIMEOUT: 'SESSION_TIMEOUT',
+  PROVIDER_SESSION_MISMATCH: 'SESSION_MISMATCH',
+  PROVIDER_CONNECTION_FAILED: 'CONNECTION_FAILED',
+  PROVIDER_HANDSHAKE_REJECTED: 'HANDSHAKE_REJECTED',
+  PROVIDER_CLOSED_UNEXPECTEDLY: 'CLOSED_BEFORE_READY',
+  PROVIDER_SESSION_REJECTED: 'SESSION_REJECTED',
+  PROVIDER_SEND_FAILED: 'CONNECTION_FAILED',
+  PROVIDER_SEND_UNAVAILABLE: 'CONNECTION_FAILED',
+  INVALID_PROVIDER_EVENT: 'INVALID_RESPONSE',
+  PROVIDER_OUTPUT_BEFORE_READY: 'INVALID_RESPONSE',
+};
+
+/** Verify both target languages without sending audio or generating speech. */
+export async function checkContinuousRealtime(
+  config: SoloConfig,
+  createSocket: CreateSocket = (url, options) => new WebSocket(url, options),
+  timeoutMs = 15000,
+): Promise<Check> {
+  const clients: ContinuousTranslationClient[] = [];
+  try {
+    for (const targetLanguage of ['en', 'zh'] as const)
+      clients.push(
+        createContinuousTranslationClient({
+          apiKey: config.OPENAI_API_KEY,
+          proxyUrl: config.OPENAI_PROXY_URL,
+          targetLanguage,
+          onAudio: () => {},
+          createWebSocket: createSocket,
+          timeoutMs,
+        }),
+      );
+    await Promise.all(clients.map((client) => client.ready));
+    return {
+      name: 'openaiContinuous',
+      status: 'passed',
+      code: 'SESSION_UPDATED_BOTH_LANGUAGES',
+    };
+  } catch (error) {
+    // Never surface provider payloads, credential-bearing transport errors,
+    // or arbitrary exception messages in a local verification response.
+    const code =
+      error instanceof Error &&
+      Object.prototype.hasOwnProperty.call(
+        continuousFailureCodes,
+        error.message,
+      )
+        ? continuousFailureCodes[error.message]
+        : 'CONNECTION_FAILED';
+    return { name: 'openaiContinuous', status: 'failed', code };
+  } finally {
+    for (const client of clients) client.abort();
+  }
+}
 
 // Verify an actual Realtime session, without submitting audio or generating a response.
 export function checkRealtime(
@@ -117,8 +183,27 @@ export function checkRealtime(
   });
 }
 
+export function checkTranslationEngine(
+  config: SoloConfig,
+  engine: TranslationEngine,
+  createSocket?: CreateSocket,
+  timeoutMs = 15000,
+): Promise<Check> {
+  if (engine === 'continuous')
+    return checkContinuousRealtime(config, createSocket, timeoutMs);
+  if (engine === 'legacy')
+    return checkRealtime(config, createSocket, timeoutMs);
+  return Promise.resolve({
+    name: 'openaiTranslation',
+    status: 'failed',
+    code: 'INVALID_TRANSLATION_ENGINE',
+  });
+}
+
 export async function verifyProviders(
   config: SoloConfig,
+  engine: TranslationEngine = 'legacy',
+  checkEngine: typeof checkTranslationEngine = checkTranslationEngine,
 ): Promise<ProviderReport> {
   const missing = new Set(
     checkConfig(config)
@@ -224,13 +309,26 @@ export async function verifyProviders(
     );
   }
   checks.push(
-    has('OPENAI_API_KEY', 'OPENAI_REALTIME_MODEL', 'OPENAI_TRANSCRIPTION_MODEL')
-      ? await checkRealtime(config)
+    (
+      engine === 'continuous'
+        ? has('OPENAI_API_KEY')
+        : has(
+            'OPENAI_API_KEY',
+            'OPENAI_REALTIME_MODEL',
+            'OPENAI_TRANSCRIPTION_MODEL',
+          )
+    )
+      ? await checkEngine(config, engine)
       : {
-          name: 'openaiRealtime',
+          name: engine === 'continuous' ? 'openaiContinuous' : 'openaiRealtime',
           status: 'missing',
           code: 'CONFIGURATION_REQUIRED',
         },
   );
-  return { checkedAt: new Date().toISOString(), realCallTested: false, checks };
+  return {
+    checkedAt: new Date().toISOString(),
+    realCallTested: false,
+    translationEngine: engine,
+    checks,
+  };
 }

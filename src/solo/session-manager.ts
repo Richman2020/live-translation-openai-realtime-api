@@ -8,6 +8,11 @@ import RequestClient from 'twilio/lib/base/RequestClient';
 import type { SoloConfig } from './config';
 import { safeEqual } from './security';
 import { TranslationBridge } from './translation-bridge';
+import { ContinuousTranslationBridge } from './continuous-translation-bridge';
+import {
+  isTranslationEngine,
+  type TranslationEngine,
+} from './translation-engine';
 
 export type Role = 'local' | 'remote';
 export type CallView = {
@@ -22,6 +27,8 @@ export type CallView = {
     | 'failed';
   to: string;
   from: string;
+  translationEngine: TranslationEngine;
+  translationReady: boolean;
   error?: string;
   providerErrorCode?: number;
   providerHttpStatus?: number;
@@ -35,7 +42,11 @@ export type BridgeLike = {
   attach(role: Role, socket: WebSocket, streamSid: string): void;
   close(): void;
 };
-export type BridgeOptions = ConstructorParameters<typeof TranslationBridge>[0];
+export type BridgeOptions = ConstructorParameters<
+  typeof TranslationBridge
+>[0] & {
+  translationEngine?: TranslationEngine;
+};
 type Session = {
   view: CallView;
   config: SoloConfig;
@@ -49,6 +60,7 @@ type Session = {
   uncertainRoles: Set<Role>;
   cleanupTasks: Map<string, Promise<void>>;
   bridge?: BridgeLike;
+  readyRoles: Set<Role>;
   timer?: ReturnType<typeof setTimeout>;
   ended: boolean;
   ending?: Promise<void>;
@@ -148,7 +160,11 @@ export class SessionManager extends EventEmitter {
     this.now = options.now || Date.now;
     this.providerFactory = options.providerFactory || twilioProvider;
     this.bridgeFactory =
-      options.bridgeFactory || ((settings) => new TranslationBridge(settings));
+      options.bridgeFactory ||
+      ((settings) =>
+        settings.translationEngine === 'continuous'
+          ? new ContinuousTranslationBridge(settings)
+          : new TranslationBridge(settings));
     this.setupTimeoutMs = options.setupTimeoutMs ?? 75000;
     this.maxCallMs = options.maxCallMs ?? 60 * 60 * 1000;
   }
@@ -212,6 +228,7 @@ export class SessionManager extends EventEmitter {
     direction: CallView['direction'],
     to: string,
     from: string,
+    translationEngine: TranslationEngine = 'legacy',
   ): Session {
     if (this.closing) throw new SessionError('SHUTTING_DOWN', 503);
     if (this.activeId) throw new SessionError('BUSY', 409);
@@ -219,7 +236,16 @@ export class SessionManager extends EventEmitter {
       throw new SessionError('CALL_CLEANUP_UNCONFIRMED', 409);
     const id = randomUUID();
     const session: Session = {
-      view: { id, direction, status: 'connecting', to, from },
+      view: {
+        id,
+        direction,
+        status: 'connecting',
+        to,
+        from,
+        translationEngine,
+        translationReady: false,
+      },
+      readyRoles: new Set(),
       config: { ...config },
       nonces: {
         local: randomBytes(24).toString('hex'),
@@ -261,7 +287,10 @@ export class SessionManager extends EventEmitter {
   createOutbound(
     config: SoloConfig,
     to: string,
+    translationEngine: TranslationEngine = 'legacy',
   ): CallView & { connectionParams: { sessionId: string; nonce: string } } {
+    if (!isTranslationEngine(translationEngine))
+      throw new SessionError('INVALID_TRANSLATION_ENGINE');
     if (!/^\+1[2-9]\d{2}[2-9]\d{6}$/.test(to))
       throw new SessionError('INVALID_DESTINATION');
     if (to === config.TWILIO_CALLER_NUMBER)
@@ -272,6 +301,7 @@ export class SessionManager extends EventEmitter {
       'outbound',
       to,
       config.TWILIO_CALLER_NUMBER,
+      translationEngine,
     );
     return {
       ...session.view,
@@ -434,6 +464,7 @@ export class SessionManager extends EventEmitter {
           model: session.config.OPENAI_REALTIME_MODEL,
           transcriptionModel: session.config.OPENAI_TRANSCRIPTION_MODEL,
           proxyUrl: session.config.OPENAI_PROXY_URL,
+          translationEngine: session.view.translationEngine,
           onTranscript: (transcript) => {
             if (!session.ended)
               this.emit('event', {
@@ -445,11 +476,20 @@ export class SessionManager extends EventEmitter {
             this.end(session.view.id, reason);
           },
           onConnection: (connection) => {
-            if (!session.ended)
+            if (!session.ended) {
+              if (connection.state === 'ready')
+                session.readyRoles.add(connection.role);
+              else session.readyRoles.delete(connection.role);
+              const translationReady = session.readyRoles.size === 2;
+              if (session.view.translationReady !== translationReady) {
+                session.view.translationReady = translationReady;
+                this.publish(session);
+              }
               this.emit('event', {
                 event: 'translation-connection',
                 data: { ...connection, sessionId: session.view.id },
               });
+            }
           },
           onAudioDiagnostic: (audio) => {
             // Keep final unconfirmed playback reports when a call is closing.
@@ -644,6 +684,8 @@ export class SessionManager extends EventEmitter {
       return undefined;
     }
     session.ended = true;
+    session.view.translationReady = false;
+    session.readyRoles.clear();
     clearTimeout(session.timer);
     session.view.status = 'ending';
     if (error) session.view.error = error;

@@ -526,17 +526,19 @@ export class TranslationBridge {
     if (event.event !== 'media' || event.media?.track !== 'inbound')
       throw new Error('unexpected_phone_event');
     const audio = decodeAudio(event.media.payload);
+    // The browser sends frames while the PSTN leg is still ringing. This is
+    // not yet a paired conversation; do not replay ringing-period microphone
+    // audio or overflow a readiness queue before the recipient connects.
+    if (this.phones.size < 2) return;
     const provider = this.providers.get(role);
     if (!provider?.ready || provider.socket.readyState !== WebSocket.OPEN) {
       if (provider?.ready) this.waitForClose(role, provider);
-      const chunk =
-        audio.length > MAX_PENDING_BYTES
-          ? audio.subarray(-MAX_PENDING_BYTES)
-          : audio;
-      leg.pending.push(chunk);
-      leg.pendingBytes += chunk.length;
-      while (leg.pendingBytes > MAX_PENDING_BYTES)
-        leg.pendingBytes -= leg.pending.shift().length;
+      if (leg.pendingBytes + audio.length > MAX_PENDING_BYTES) {
+        this.fail(`translation_input_overflow:${role}`);
+        return;
+      }
+      leg.pending.push(audio);
+      leg.pendingBytes += audio.length;
       return;
     }
     this.send(

@@ -29,3 +29,10 @@ dialog{border:1px solid #e3e9f1;border-radius:16px;width:430px;max-width:calc(10
 .audio-output-controls select{min-width:0;flex:1;border:1px solid #dbe4ef;background:#fafcfe;border-radius:7px;padding:8px;color:var(--ink);font-size:12px}
 .audio-output-controls button{white-space:nowrap;padding:9px 11px;font-size:12px}
 .audio-output-panel p,.microphone-input-panel p{font-size:11px;line-height:1.7;color:#66758a;margin-top:8px;overflow-wrap:anywhere}
+.translation-engine-panel{margin:0 0 18px;padding:14px;border:1px solid #dce6f4;border-radius:9px;background:#f7faff}
+.translation-engine-panel label{display:block;font-size:12px;font-weight:600;color:#405c7f;margin-bottom:8px}
+.translation-engine-panel select{width:100%;min-width:0;border:1px solid #cfdbeb;border-radius:7px;background:#fff;padding:9px 10px;color:var(--ink);font-size:13px}
+.translation-engine-panel p{font-size:11px;line-height:1.8;color:#66758a;margin-top:9px}
+.translation-engine-panel p[role=status]{color:#365c91;font-weight:500}
+.translation-engine-panel select:disabled{color:#62748c;background:#eef3fa;opacity:1}
+.verification-engine{font-size:12px;line-height:1.8;color:#526a89;margin-top:16px}

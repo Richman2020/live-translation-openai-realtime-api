@@ -13,6 +13,10 @@ import type {
 } from '../src/solo/public-readiness';
 import { buildSoloServer } from '../src/solo/server';
 import { SessionManager } from '../src/solo/session-manager';
+import type {
+  checkTranslationEngine,
+  verifyProviders,
+} from '../src/solo/provider-checks';
 
 const config: SoloConfig = {
   API_PORT: '5050',
@@ -61,6 +65,8 @@ function deferred<T>() {
 async function fixture(
   t: TestContext,
   publicReadinessChecker: typeof checkPublicReadiness,
+  translationReadinessChecker?: typeof checkTranslationEngine,
+  providerVerifier?: typeof verifyProviders,
 ) {
   // Injection never opens a listener. These guards also prevent a regression in
   // the /api/verify gate from reaching real providers with the fake credentials.
@@ -107,6 +113,8 @@ async function fixture(
     sessionManager: manager,
     publicDir: dir,
     publicReadinessChecker,
+    translationReadinessChecker,
+    providerVerifier,
   });
   t.after(async () => {
     await app.close();
@@ -159,6 +167,110 @@ test('ready public callback prepares only a local session and browser connection
   assert.equal(manager.activeSession?.id, session.id);
   assert.equal(checks, 1);
   assert.deepEqual(calls, { factory: 1, create: 0, hangup: 0, bridge: 0 });
+});
+
+test('continuous selection is checked before any phone session and never falls back after failure', async (t) => {
+  const engines: string[] = [];
+  const { app, calls, manager } = await fixture(
+    t,
+    async () => ready,
+    async (_config, engine) => {
+      engines.push(engine);
+      return {
+        name: 'openaiContinuous',
+        status: 'failed',
+        code: 'SESSION_MISMATCH',
+      };
+    },
+  );
+  const failed = await app.inject({
+    ...request,
+    payload: { ...request.payload, translationEngine: 'continuous' },
+  });
+  assert.equal(failed.statusCode, 503);
+  assert.equal(failed.json().error, 'TRANSLATION_ENGINE_UNAVAILABLE');
+  assert.equal(manager.activeSession, null);
+  assert.equal(calls.factory, 0);
+  assert.deepEqual(engines, ['continuous']);
+  const legacy = await app.inject(request);
+  assert.equal(legacy.statusCode, 200);
+  assert.equal(legacy.json().translationEngine, 'legacy');
+  assert.equal(legacy.json().translationReady, false);
+  assert.deepEqual(engines, ['continuous']);
+});
+
+test('continuous success snapshots the chosen engine and a busy request cannot change it', async (t) => {
+  const { app, manager } = await fixture(
+    t,
+    async () => ready,
+    async (_config, engine) => {
+      assert.equal(engine, 'continuous');
+      return {
+        name: 'openaiContinuous',
+        status: 'passed',
+        code: 'SESSION_UPDATED',
+      };
+    },
+  );
+  const chosen = await app.inject({
+    ...request,
+    payload: { ...request.payload, translationEngine: 'continuous' },
+  });
+  assert.equal(chosen.statusCode, 200);
+  assert.equal(chosen.json().translationEngine, 'continuous');
+  const denied = await app.inject(request);
+  assert.equal(denied.statusCode, 409);
+  assert.equal(manager.activeSession?.translationEngine, 'continuous');
+});
+
+test('unknown engines are rejected without checking providers or preparing a phone session', async (t) => {
+  let checks = 0;
+  const { app, calls } = await fixture(t, async () => {
+    checks += 1;
+    return ready;
+  });
+  for (const value of ['unknown', null, 123, {}]) {
+    const invalid = await app.inject({
+      ...request,
+      payload: { ...request.payload, translationEngine: value },
+    });
+    assert.equal(invalid.statusCode, 400);
+    assert.equal(invalid.json().error, 'INVALID_TRANSLATION_ENGINE');
+  }
+  assert.equal(checks, 0);
+  assert.equal(calls.factory, 0);
+});
+
+test('provider verification records the selected engine separately from the default engine', async (t) => {
+  const { app } = await fixture(
+    t,
+    async () => ready,
+    undefined,
+    async (_config, engine) => ({
+      translationEngine: engine,
+      checkedAt: new Date().toISOString(),
+      realCallTested: false,
+      checks: [
+        { name: 'openaiContinuous', status: 'passed', code: 'SESSION_UPDATED' },
+      ],
+    }),
+  );
+  const verified = await app.inject({
+    ...request,
+    url: '/api/verify',
+    payload: { translationEngine: 'continuous' },
+  });
+  assert.equal(verified.statusCode, 200);
+  assert.equal(verified.json().translationEngine, 'continuous');
+  const status = await app.inject({
+    method: 'GET',
+    url: '/api/status',
+    remoteAddress: request.remoteAddress,
+    headers: request.headers,
+  });
+  assert.equal(status.json().defaultTranslationEngine, 'legacy');
+  assert.deepEqual(status.json().translationEngines, ['legacy', 'continuous']);
+  assert.equal(status.json().lastVerification.translationEngine, 'continuous');
 });
 
 test('pending readiness blocks concurrent dialing, settings and provider verification, then releases for retry', async (t) => {
