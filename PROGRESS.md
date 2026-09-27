@@ -4,6 +4,14 @@
 
 需求见 [PROJECT_BRIEF.md](PROJECT_BRIEF.md)，工作规则见 [AGENTS.md](AGENTS.md)，运行步骤见 [LOCAL_SETUP.md](LOCAL_SETUP.md)，后续执行入口见 [LOCAL_CODEX_HANDOFF.md](LOCAL_CODEX_HANDOFF.md)。
 
+## 最新交付：三句连贯英语 A/C 对照（2026-09-27）
+
+- 用户试听检索候选短句后仍认为改善不明显，要求用两三句连贯讲话再判断。保持模型和参数不变，不启动新训练或继续调参。
+- 使用同一 Windows Zira、Rate=0、Volume=100，以一次 Speak 调用生成三句英语：`Hello, thank you for calling. I finish work at five, so we can talk this evening. Please tell me what time is good for you.` 源音频 9.7745 秒、32 kHz 单声道；原文与源哈希绑定于私密清单。
+- 同一 579 步模型对整段分别转换，A 为无检索原版，C 为检索 0.35 / 保护 0.33；均保持 -6 半音、保零 F0。两版各保留原声、32 kHz 输出、8 kHz 电话编码 WAV 和 μ-law 文件。每份输出 9.7745 秒，不拼接旧短句、不时间拉伸。
+- 已生成私密目录 `sample-0579-three-sentences-A/` 与 `sample-0579-three-sentences-C/`，供比较整段衔接、机械感、咬字和句尾。音频/模型仍只留本机；本轮没有修改转换代码、电话默认或真实拨号。连续性与自然度尚未通过真人听感验收。
+- 独立只读核验 8/8 文件哈希、帧数和两版源/模型绑定通过；均非空，无满幅/近满幅削波，μ-law 解码逐样本等于电话 WAV。长度一致与数值检查不代替英文完整性或顺滑度判断。
+
 ## 最新候选：本人录音特征检索与辅音保护（2026-09-27）
 
 - 用户继续反馈转换后顿挫和机械感，要求优化。对照固定上游后，未发现 nearest 上采样或解码随机系数的明确实现错误；前一轮 F0 对照未获可感知改善，因此本轮保持原 F0 模式，不再将其称为修复。

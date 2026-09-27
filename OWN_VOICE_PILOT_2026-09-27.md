@@ -95,6 +95,12 @@
 
 复现新候选可在下列转换命令后增加 `--retrieval-feature-report '<feature directory>/feature-report.json' --retrieval-rate 0.35 --unvoiced-protect 0.33`；继续使用新输出目录。检索 helper 使用隔离环境已有 faiss，不安装或修改主电话依赖。
 
+### 延长到三句话的试听对照
+
+用户对检索短句仍未感到明显改善，要求更连贯的两三句素材。已用 Windows Zira、Rate=0、Volume=100 一次性朗读 `Hello, thank you for calling. I finish work at five, so we can talk this evening. Please tell me what time is good for you.`，生成 9.7745 秒 32 kHz 单声道源。然后使用同一 579 步模型对整段分别运行 A 无检索和 C 检索 0.35 / 保护 0.33，其他参数保持 -6 半音与保零 F0；不是把三个已有小样拼接，也没有改变播放速度。
+
+两版分别位于私密 `sample-0579-three-sentences-A/`、`sample-0579-three-sentences-C/`，保留三层 WAV 与 μ-law 编码，供用户直接试听整段。短句反馈不能当作长段验收；C 暂无已改善自然度的结论。本轮只延长固定测试内容，没有改转换代码、继续训练或接入电话。
+
 复现命令中所有输出目录都必须是新目录；本人原声和模型继续仅留本机：
 
 ```powershell
