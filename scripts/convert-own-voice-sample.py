@@ -113,6 +113,29 @@ def pitch_inputs(raw_f0, semitones, mode):
     return coarse.astype(np.int64), f0, voiced
 
 
+def blend_retrieved_features(original, retrieved, voiced, rate, protect):
+    """Mix at 100 Hz; protect unvoiced consonants using the original pitch mask.
+
+    As in RVC, protect=0.5 disables protection; otherwise it is the fraction of
+    the retrieval change retained on unvoiced frames. No temporal smoothing.
+    """
+    import torch
+    if (original.shape != retrieved.shape or original.ndim != 3
+            or original.shape[0] != 1 or original.shape[2] != 768
+            or tuple(voiced.shape) != (original.shape[1],) or voiced.dtype != torch.bool
+            or not math.isfinite(rate) or not 0 <= rate <= 1
+            or not math.isfinite(protect) or not 0 <= protect <= .5
+            or not torch.isfinite(original).all() or not torch.isfinite(retrieved).all()):
+        raise ValueError("Invalid retrieval features, voicing mask or mixing settings")
+    if rate == 0:
+        return original
+    mixed = retrieved * rate + (1 - rate) * original
+    if protect < .5:
+        mask = torch.where(voiced, 1.0, protect).to(original).view(1, -1, 1)
+        mixed = mixed * mask + original * (1 - mask)
+    return mixed
+
+
 def arguments():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--upstream", required=True, type=Path)
@@ -126,6 +149,10 @@ def arguments():
     parser.add_argument("--semitones", type=float, default=0)
     parser.add_argument("--f0-mode", choices=("preserve-unvoiced", "interpolate"),
                         default="preserve-unvoiced")
+    parser.add_argument("--retrieval-feature-report", type=Path,
+                        help="Private verified training features; disabled unless rate is positive")
+    parser.add_argument("--retrieval-rate", type=float, default=0)
+    parser.add_argument("--unvoiced-protect", type=float, default=.33)
     parser.add_argument("--allow-base-control", action="store_true",
                         help="Explicit unpersonalized control only; never a clone-quality result")
     args = parser.parse_args()
@@ -133,8 +160,15 @@ def arguments():
         parser.error("threads must be positive and semitones finite in [-12,12]")
     if args.force_legacy_cuda and args.device != "cuda":
         parser.error("force-legacy-cuda requires device=cuda")
+    if (not math.isfinite(args.retrieval_rate) or not 0 <= args.retrieval_rate <= 1
+            or not math.isfinite(args.unvoiced_protect) or not 0 <= args.unvoiced_protect <= .5):
+        parser.error("retrieval-rate must be in [0,1] and unvoiced-protect in [0,0.5]")
+    if bool(args.retrieval_feature_report) != (args.retrieval_rate > 0):
+        parser.error("retrieval report and positive retrieval rate must be provided together")
     for name in ("upstream", "checkpoint", "input", "source_manifest", "out_dir"):
         setattr(args, name, private_path(getattr(args, name)))
+    if args.retrieval_feature_report:
+        args.retrieval_feature_report = private_path(args.retrieval_feature_report)
     if args.input.suffix.lower() != ".wav":
         parser.error("input must be a WAV")
     return args
@@ -238,6 +272,20 @@ def run(args, report):
         report["checkpoint"]["role"] = "UNPERSONALIZED_BASE_CONTROL_NOT_A_CLONE"
     else:
         raise ValueError("Require own_voice_metadata; use explicit flag only for verified base control")
+    bank = None
+    report["retrieval"] = {"enabled": False}
+    if args.retrieval_feature_report:
+        if not own_metadata:
+            raise ValueError("Feature retrieval requires an actual own-voice checkpoint")
+        from own_voice_retrieval import VoiceFeatureBank
+        bank = measured("retrieval_bank_load", lambda: VoiceFeatureBank(
+            args.retrieval_feature_report, own_metadata["dataset_sha256"],
+            UPSTREAM_COMMIT, OFFICIAL_HASHES, threads=args.threads))
+        report["retrieval"] = {**bank.metadata, "enabled": True,
+                               "rate": args.retrieval_rate, "unvoiced_protect": args.unvoiced_protect,
+                               "voicing_policy": "raw RMVPE mask before any F0 interpolation"}
+        report["limits"].remove("No retrieval index")
+        report["limits"].append("Exact local training-feature retrieval; quality and phone latency unaccepted")
     weights = checkpoint["weight"]
     if any(key.startswith("enc_q.") for key in weights):
         raise ValueError("Export an inference checkpoint without the training posterior encoder")
@@ -290,6 +338,10 @@ def run(args, report):
         if normalize_hubert_audio:
             wave_tensor = functional.layer_norm(wave_tensor, (wave_tensor.shape[-1],))
         features = measured("hubert_features", lambda: extract_hubert_features(hubert, wave_tensor, "v2"))
+        retrieved_features = None
+        if bank is not None:
+            retrieved_features = measured("feature_retrieval", lambda: torch.from_numpy(
+                bank.retrieve(features[0].detach().cpu().float().numpy())).unsqueeze(0).to(device))
         # Realtime RVC repeats the final HuBERT frame before doubling to 100 Hz.
         # This supplies edge context while retaining the entire last source phoneme.
         features = torch.cat((features, features[:, -1:, :]), dim=1)
@@ -297,10 +349,21 @@ def run(args, report):
         if features.shape[1] < frames or features.shape[2] != 768 or not torch.isfinite(features).all():
             raise RuntimeError("Invalid or insufficient actual HuBERT features")
         features = features[:, :frames, :]
+        if retrieved_features is not None:
+            retrieved_features = torch.cat((retrieved_features, retrieved_features[:, -1:, :]), dim=1)
+            retrieved_features = functional.interpolate(
+                retrieved_features.transpose(1, 2), scale_factor=2).transpose(1, 2)[:, :frames, :]
         raw_f0 = measured("rmvpe_f0", lambda: rmvpe.infer_from_audio(padded, thred=.03))
         if len(raw_f0) < frames:
             raise RuntimeError("RMVPE frame count is shorter than source")
         coarse, fine, voiced = pitch_inputs(raw_f0[:frames], args.semitones, args.f0_mode)
+        if retrieved_features is not None:
+            original_features = features
+            features = measured("retrieval_blend", lambda: blend_retrieved_features(
+                original_features, retrieved_features, torch.from_numpy(voiced).to(device),
+                args.retrieval_rate, args.unvoiced_protect))
+            report["retrieval"]["feature_change_rms"] = float(
+                (features - original_features).square().mean().sqrt().item())
         report["features"] = {"frames": frames, "dimensions": 768,
                               "raw_voiced_fraction": float(voiced.mean()),
                               "raw_voiced_median_hz": float(np.median(raw_f0[:frames][voiced])) if voiced.any() else None,
@@ -346,7 +409,8 @@ def run(args, report):
         "sha256": sha256(args.out_dir / "converted-phone-8k.ulaw"),
         "format": "G711_MULAW_8000_MONO", "bytes": len(ulaw), "duration_seconds": len(ulaw) / 8000,
     }
-    compute_seconds = sum(timings[name] for name in ("hubert_features", "rmvpe_f0", "generation_and_copy"))
+    compute_seconds = sum(timings.get(name, 0) for name in (
+        "hubert_features", "rmvpe_f0", "feature_retrieval", "retrieval_blend", "generation_and_copy"))
     report["measurement"] = {"actual_input_seconds": duration,
                              "actual_output_seconds": len(audio32) / 32000,
                              "whole_file_compute_seconds": compute_seconds,

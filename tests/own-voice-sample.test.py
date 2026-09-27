@@ -93,6 +93,32 @@ class PitchTests(unittest.TestCase):
         self.assertEqual(coarse[-1], 255)
 
 
+class RetrievalProtectionTests(unittest.TestCase):
+    def test_zero_rate_preserves_baseline_and_zero_protect_preserves_consonants(self):
+        import torch
+        original = torch.full((1, 3, 768), 2.0)
+        reference = torch.full_like(original, 10.0)
+        voiced = torch.tensor([True, False, True])
+        baseline = sample.blend_retrieved_features(original, reference, voiced, 0, .33)
+        self.assertIs(baseline, original)
+        protected = sample.blend_retrieved_features(original, reference, voiced, .5, 0)
+        torch.testing.assert_close(protected[:, 1], original[:, 1], rtol=0, atol=0)
+        torch.testing.assert_close(protected[:, 0], torch.full((1, 768), 6.0))
+        unprotected = sample.blend_retrieved_features(original, reference, voiced, .5, .5)
+        torch.testing.assert_close(unprotected, torch.full_like(original, 6.0))
+        torch.testing.assert_close(original, torch.full_like(original, 2.0))
+
+    def test_rejects_invalid_mask_shape_or_nonfinite_features(self):
+        import torch
+        original = torch.zeros((1, 3, 768))
+        voiced = torch.tensor([True, False, True])
+        for reference, mask in ((original[:, :2], voiced),
+                                (original, voiced.float()),
+                                (torch.full_like(original, float("nan")), voiced)):
+            with self.assertRaises(ValueError):
+                sample.blend_retrieved_features(original, reference, mask, .35, .33)
+
+
 class PrivateFixtureTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="own-voice-sample-test-", dir=sample.PRIVATE_ROOT)
@@ -120,6 +146,21 @@ class PrivateFixtureTests(unittest.TestCase):
                 self.assertEqual(args.semitones, semitones)
                 self.assertEqual(args.f0_mode, "preserve-unvoiced")
                 self.assertEqual(args.device, "cpu")
+                self.assertEqual(args.retrieval_rate, 0)
+                self.assertIsNone(args.retrieval_feature_report)
+
+    def test_retrieval_requires_paired_private_report_and_bounded_rate(self):
+        report = str(self.directory / "feature-report.json")
+        invalid = [["--retrieval-rate", ".35"], ["--retrieval-feature-report", report],
+                   ["--retrieval-rate", "nan"], ["--retrieval-rate", "1.1"],
+                   ["--unvoiced-protect", "-.01"], ["--unvoiced-protect", "nan"]]
+        for extra in invalid:
+            with self.subTest(extra=extra), patch.object(sys, "argv", self.cli(0) + extra):
+                with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    sample.arguments()
+        with patch.object(sys, "argv", self.cli(0) + ["--retrieval-feature-report", report,
+                                                     "--retrieval-rate", ".35"]):
+            self.assertEqual(sample.arguments().retrieval_feature_report, Path(report))
 
     def source_fixture(self):
         path = self.directory / "en-example.wav"
