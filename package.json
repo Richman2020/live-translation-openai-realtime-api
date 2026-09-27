@@ -16,6 +16,7 @@
     "quality:voice": "node --import tsx scripts/compare-fixed-voice.ts",
     "quality:import": "node --import tsx scripts/import-quality-recordings.ts",
     "quality:review": "node --import tsx scripts/render-quality-review.ts",
+    "quality:analyze": "node --import tsx scripts/analyze-quality-results.ts",
     "quality:silence": "node --import tsx scripts/check-continuous-silence.ts",
     "test": "node --import tsx --test tests/*.test.ts",
     "predev": "npm run check:config",
