@@ -106,15 +106,59 @@ def memory_snapshot():
 
 
 def prohibit_python_network(report):
-    """Fail closed on Python socket network events; this is not an OS firewall."""
+    """Block all listed events, separating one known blocked local probe.
+
+    urllib3 detects IPv6 during import by binding ::1:0 and catches the failure.
+    That exact capability probe is still denied, but does not imply an attempted
+    download/upload. Unknown binds, connections and DNS remain run failures.
+    This Python audit guard is not an OS firewall.
+    """
+    import socket
+
     network = report["network"]
+    network.setdefault("blocked_local_capability_probes", 0)
+    network["counter_meaning"] = (
+        "blocked_attempts counts unknown or network access events; "
+        "blocked_local_capability_probes counts only the denied urllib3 "
+        "IPv6 import capability bind. Both counters describe blocked actions.")
     blocked = {"socket.connect", "socket.bind", "socket.sendto", "socket.sendmsg",
                "socket.getaddrinfo", "socket.gethostbyname", "socket.gethostbyaddr"}
 
-    def audit(event, unused_args):
+    def audit(event, args):
         if event in blocked:
-            network["blocked_attempts"] += 1
-            network["last_blocked_event"] = event
+            known_local_probe = False
+            if event == "socket.bind" and len(args) == 2:
+                sock, address = args
+                caller = sys._getframe(1)
+                module = sys.modules.get("urllib3.util.connection")
+                function = getattr(module, "_has_ipv6", None)
+                # Verify the actual loaded function/code/globals, not just a
+                # stack function name that another caller could share.
+                known_local_probe = (
+                    module is not None
+                    and caller.f_globals is vars(module)
+                    and caller.f_code is getattr(function, "__code__", None)
+                    and caller.f_code.co_name == "_has_ipv6"
+                    and caller.f_locals.get("sock") is sock
+                    and caller.f_locals.get("host") == "::1"
+                    and isinstance(sock, socket.socket)
+                    and sock.family == socket.AF_INET6
+                    and sock.type == socket.SOCK_STREAM
+                    and address == ("::1", 0)
+                )
+                del caller
+            if known_local_probe:
+                network["blocked_local_capability_probes"] += 1
+                network["last_blocked_local_capability_probe"] = {
+                    "event": event, "address": ["::1", 0],
+                    "caller": "urllib3.util.connection._has_ipv6",
+                    "allowed": False,
+                }
+            else:
+                network["blocked_attempts"] += 1
+                network["last_blocked_event"] = event
+            # Never allow the known probe either: urllib3 catches this failure
+            # and uses its IPv4 fallback without opening a listening socket.
             raise RuntimeError("Offline probe blocked network event: " + event)
 
     sys.addaudithook(audit)
@@ -372,6 +416,7 @@ def main():
               "created_at_utc": datetime.now(timezone.utc).isoformat(),
               "script_sha256": sha256(Path(__file__)), "fixtures": [],
               "network": {"downloads": False, "uploads": False, "blocked_attempts": 0,
+                          "blocked_local_capability_probes": 0,
                           "python_socket_guard_active": False,
                           "boundary": "Python socket audit guard and HF offline mode; not an OS firewall"},
               "acceptance": {"naturalness": "PENDING_HUMAN_LISTENING", "voice_similarity": "PENDING_HUMAN_LISTENING",
