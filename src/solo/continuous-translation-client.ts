@@ -5,6 +5,7 @@ import { createOpenAIWebSocket } from './openai-websocket';
 export type ContinuousTranslationOptions = {
   apiKey: string;
   targetLanguage: 'en' | 'zh';
+  noiseReduction?: 'near_field' | 'far_field' | null;
   proxyUrl?: string;
   onAudio: (pcm: Buffer) => void;
   onTranscript?: (delta: string) => void;
@@ -76,8 +77,8 @@ function decodePcm(value: unknown): Buffer {
 }
 
 /**
- * Isolated PCM benchmark client, not the production phone bridge. Translation
- * consumes continuous audio directly; no ASR or transcript gates its output.
+ * Dedicated continuous translation client shared by the phone adapter and
+ * isolated benchmarks. No ASR or transcript gates its audio output.
  * Input and output are headerless, mono little-endian PCM16 at 24 kHz.
  */
 export function createContinuousTranslationClient(
@@ -86,6 +87,9 @@ export function createContinuousTranslationClient(
   const timeoutMs = options.timeoutMs ?? 10000;
   if (
     !['en', 'zh'].includes(options.targetLanguage) ||
+    (options.noiseReduction !== undefined &&
+      options.noiseReduction !== null &&
+      !['near_field', 'far_field'].includes(options.noiseReduction)) ||
     typeof options.apiKey !== 'string' ||
     !options.apiKey.trim() ||
     typeof options.onAudio !== 'function' ||
@@ -164,7 +168,21 @@ export function createContinuousTranslationClient(
     configured = true;
     send({
       type: 'session.update',
-      session: { audio: { output: { language: options.targetLanguage } } },
+      session: {
+        audio: {
+          ...(options.noiseReduction === undefined
+            ? {}
+            : {
+                input: {
+                  noise_reduction:
+                    options.noiseReduction === null
+                      ? null
+                      : { type: options.noiseReduction },
+                },
+              }),
+          output: { language: options.targetLanguage },
+        },
+      },
     });
   };
 
@@ -185,7 +203,12 @@ export function createContinuousTranslationClient(
       if (
         !configured ||
         event.session?.model !== MODEL ||
-        event.session?.audio?.output?.language !== options.targetLanguage
+        event.session?.audio?.output?.language !== options.targetLanguage ||
+        (options.noiseReduction !== undefined &&
+          (options.noiseReduction === null
+            ? event.session?.audio?.input?.noise_reduction !== null
+            : event.session?.audio?.input?.noise_reduction?.type !==
+              options.noiseReduction))
       ) {
         fail('PROVIDER_SESSION_MISMATCH');
         return;

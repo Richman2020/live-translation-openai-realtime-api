@@ -135,6 +135,127 @@ test('explicit proxy is passed through the existing authenticated websocket help
   f.client.abort();
 });
 
+for (const noiseReduction of [null, 'near_field', 'far_field'] as const) {
+  test(`explicit noise reduction ${noiseReduction} is sent and requires matching acknowledgement`, async () => {
+    const f = fixture({ noiseReduction });
+    try {
+      const configured =
+        noiseReduction === null ? null : { type: noiseReduction };
+      f.socket.open();
+      assert.deepEqual(f.socket.sent, [
+        {
+          type: 'session.update',
+          session: {
+            audio: {
+              input: { noise_reduction: configured },
+              output: { language: 'en' },
+            },
+          },
+        },
+      ]);
+      assert.throws(
+        () => f.client.append(Buffer.alloc(960)),
+        /CLIENT_NOT_READY/,
+      );
+      f.socket.receive({
+        type: 'session.updated',
+        session: {
+          model: 'gpt-realtime-translate',
+          audio: {
+            input: { noise_reduction: configured },
+            output: { language: 'en' },
+          },
+        },
+      });
+      await f.client.ready;
+      f.client.append(Buffer.alloc(960));
+      assert.equal(f.socket.sent[1].type, 'session.input_audio_buffer.append');
+      assert.deepEqual(f.errors, []);
+    } finally {
+      f.client.abort();
+    }
+  });
+}
+
+test('undefined noise reduction preserves the request and accepts provider defaults without acknowledgement', async () => {
+  for (const input of [
+    undefined,
+    {},
+    { noise_reduction: null },
+    { noise_reduction: { type: 'near_field' } },
+    { noise_reduction: { type: 'far_field' } },
+  ]) {
+    const f = fixture({ noiseReduction: undefined });
+    try {
+      f.socket.open();
+      assert.deepEqual(f.socket.sent, [
+        {
+          type: 'session.update',
+          session: { audio: { output: { language: 'en' } } },
+        },
+      ]);
+      f.socket.receive({
+        type: 'session.updated',
+        session: {
+          model: 'gpt-realtime-translate',
+          audio: { input, output: { language: 'en' } },
+        },
+      });
+      await f.client.ready;
+      assert.deepEqual(f.errors, []);
+    } finally {
+      f.client.abort();
+    }
+  }
+});
+
+test('explicit noise reduction rejects missing, malformed or mismatched acknowledgements before audio delivery', async () => {
+  for (const noiseReduction of [null, 'near_field', 'far_field'] as const) {
+    const mismatchInputs = [
+      undefined,
+      null,
+      {},
+      { noise_reduction: {} },
+      { noise_reduction: { type: null } },
+      { noise_reduction: 'near_field' },
+      { noise_reduction: false },
+      { noise_reduction: { type: 'unsupported' } },
+      ...([null, 'near_field', 'far_field'] as const)
+        .filter((value) => value !== noiseReduction)
+        .map((value) => ({
+          noise_reduction: value === null ? null : { type: value },
+        })),
+    ];
+    for (const input of mismatchInputs) {
+      const f = fixture({ noiseReduction });
+      f.socket.open();
+      f.socket.receive({
+        type: 'session.updated',
+        session: {
+          model: 'gpt-realtime-translate',
+          audio: { input, output: { language: 'en' } },
+        },
+      });
+      await assert.rejects(
+        f.client.ready,
+        /^Error: PROVIDER_SESSION_MISMATCH$/,
+      );
+      await assert.rejects(
+        f.client.finish(),
+        /^Error: PROVIDER_SESSION_MISMATCH$/,
+      );
+      f.socket.receive({
+        type: 'session.output_audio.delta',
+        delta: 'AAAAAA==',
+      });
+      assert.deepEqual(f.audio, []);
+      assert.deepEqual(f.errors, ['PROVIDER_SESSION_MISMATCH']);
+      assert.equal(f.socket.closeCount, 1);
+      assert.equal(f.socket.listenerCount('message'), 0);
+    }
+  }
+});
+
 test('invalid options fail before opening a transport', () => {
   let created = 0;
   const createWebSocket = () => {
@@ -150,6 +271,14 @@ test('invalid options fail before opening a transport', () => {
     { timeoutMs: 0 },
     { timeoutMs: Infinity },
     { timeoutMs: 120001 },
+    { noiseReduction: '' },
+    { noiseReduction: 'none' },
+    { noiseReduction: 'near-field' },
+    { noiseReduction: true },
+    { noiseReduction: 0 },
+    { noiseReduction: {} },
+    { noiseReduction: [] },
+    { noiseReduction: { type: 'near_field' } },
   ]) {
     assert.throws(
       () =>

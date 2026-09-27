@@ -24,6 +24,7 @@ const allowed = new Set([
   '--out',
   '--direct',
   '--synthetic',
+  '--noise-reduction',
 ]);
 const values = new Map<string, string>();
 for (let index = 0; index < args.length; index += 1) {
@@ -44,6 +45,16 @@ if (
   !values.get('--out')
 )
   throw new Error('USE_INPUT_PCMU_ROLE_LOCAL_OR_REMOTE_OUT_RUNTIME');
+const requestedNoiseReduction = values.get('--noise-reduction');
+if (
+  requestedNoiseReduction !== undefined &&
+  !['off', 'near_field', 'far_field'].includes(requestedNoiseReduction)
+)
+  throw new Error('NOISE_REDUCTION_MUST_BE_OFF_NEAR_FIELD_OR_FAR_FIELD');
+const noiseReduction =
+  requestedNoiseReduction === 'off'
+    ? null
+    : (requestedNoiseReduction as 'near_field' | 'far_field' | undefined);
 const privateRoot = resolve('.runtime');
 const outputRoot = resolve(values.get('--out')!);
 const outputRelative = relative(privateRoot, outputRoot);
@@ -93,6 +104,8 @@ const newOutput: Output = {
 const readyRoles = new Set<TranslationRole>();
 const metrics: unknown[] = [];
 const candidateFormats: unknown[] = [];
+const candidateRawOutput: Buffer[] = [];
+let candidateRawOutputBytes = 0;
 let failure: string | undefined;
 let oldCompletedResponses = 0;
 let oldConnections = 0;
@@ -204,6 +217,7 @@ const outputConverter = new Pcm24kToPcmu();
 const continuous = createContinuousTranslationClient({
   apiKey: cfg.OPENAI_API_KEY,
   targetLanguage: role === 'local' ? 'en' : 'zh',
+  noiseReduction,
   proxyUrl,
   createWebSocket: (url, options) => {
     const socket = new WebSocket(url, options);
@@ -226,7 +240,15 @@ const continuous = createContinuousTranslationClient({
     });
     return socket;
   },
-  onAudio: (pcm) => receive(newOutput, outputConverter.push(pcm)),
+  onAudio: (pcm) => {
+    // Preserve exactly the provider PCM before telephone conversion. The same
+    // 120-second audio limit applies; no padding or resampling is added here.
+    if (candidateRawOutputBytes + pcm.length > 120 * 48000)
+      throw new Error('OUTPUT_LIMIT_120_SECONDS');
+    candidateRawOutput.push(Buffer.from(pcm));
+    candidateRawOutputBytes += pcm.length;
+    receive(newOutput, outputConverter.push(pcm));
+  },
   onTranscript: (text) =>
     newOutput.transcripts.push({
       atMs: now(),
@@ -277,6 +299,7 @@ const attempt = {
   model,
   transcriptionModel,
   candidate: 'gpt-realtime-translate',
+  candidateNoiseReduction: requestedNoiseReduction ?? 'provider_default',
   limitMs: 100000,
   inputBytes: input.length,
   inputSha256: createHash('sha256').update(input).digest('hex'),
@@ -356,6 +379,11 @@ try {
   clearTimeout(limit);
   continuous.abort();
   legacy.close();
+  const candidateRawPcm = Buffer.concat(candidateRawOutput);
+  writeFileSync(
+    resolve(outputRoot, 'continuous-provider-24k.wav'),
+    wav(candidateRawPcm, 24000),
+  );
   const summary = (label: string, out: Output) => {
     const bytes = Buffer.concat(out.bytes);
     const energyPlayback = analyzePcmuPlayback(bytes, out.deltas);
@@ -403,6 +431,15 @@ try {
     // Completing observed turns is not proof that every source word was heard.
     legacyFinalInputDrainConfirmed: false,
     candidateFilterDrainBytes,
+    candidateRawOutput: {
+      file: 'continuous-provider-24k.wav',
+      format: 'PCM16LE_24000_mono',
+      bytes: candidateRawPcm.length,
+      durationMs: candidateRawPcm.length / 48,
+      sha256: createHash('sha256').update(candidateRawPcm).digest('hex'),
+      beforeTelephoneConversion: true,
+      includesLocalFilterDrain: false,
+    },
     firstInputAtMs,
     lastSpeechFileFrameAtMs,
     lastInputAtMs,
