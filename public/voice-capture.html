@@ -1,0 +1,377 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>本人声音 · 本机录音室</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: system-ui, 'Microsoft YaHei', sans-serif;
+        color: #172f3b;
+        background: #eef3f6;
+        --ink: #172f3b;
+        --teal: #165f60;
+        --muted: #526b78;
+        --line: #d7e2e9;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        padding: 32px 24px 60px;
+      }
+      main {
+        max-width: 1100px;
+        margin: auto;
+      }
+      h1 {
+        font-size: clamp(28px, 4vw, 42px);
+        letter-spacing: -0.04em;
+        margin: 10px 0 12px;
+      }
+      h2 {
+        font-size: 20px;
+        margin: 0 0 16px;
+      }
+      p {
+        line-height: 1.8;
+        margin: 12px 0;
+      }
+      a {
+        color: var(--teal);
+      }
+      .eyebrow {
+        color: var(--teal);
+        font-size: 13px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+      }
+      .intro {
+        max-width: 770px;
+        color: var(--muted);
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 300px;
+        gap: 20px;
+        align-items: start;
+        margin-top: 24px;
+      }
+      .panel {
+        background: white;
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        padding: 26px;
+      }
+      .consent {
+        display: flex;
+        align-items: start;
+        gap: 10px;
+        font-size: 14px;
+        line-height: 1.8;
+        margin-bottom: 20px;
+      }
+      input[type='checkbox'] {
+        width: 20px;
+        height: 20px;
+        flex: 0 0 auto;
+        margin: 3px 0 0;
+        accent-color: var(--teal);
+      }
+      label.field {
+        display: block;
+        font-size: 13px;
+        font-weight: 700;
+        margin: 16px 0 8px;
+      }
+      select,
+      button {
+        font: inherit;
+        border-radius: 8px;
+        padding: 11px 14px;
+        border: 1px solid #bdced8;
+        background: white;
+        color: var(--ink);
+      }
+      select {
+        width: 100%;
+      }
+      button {
+        cursor: pointer;
+      }
+      button.primary {
+        background: var(--teal);
+        border-color: var(--teal);
+        color: white;
+      }
+      button.stop {
+        border-color: #ae4545;
+        color: #973838;
+      }
+      button:disabled {
+        opacity: 0.45;
+        cursor: default;
+      }
+      :focus-visible {
+        outline: 3px solid #76aaa8;
+        outline-offset: 3px;
+      }
+      .reading {
+        border-left: 3px solid #8caead;
+        padding-left: 22px;
+        margin: 26px 0;
+      }
+      #prompt {
+        font-family: 'Microsoft YaHei', system-ui, sans-serif;
+        font-size: 23px;
+        line-height: 1.95;
+        letter-spacing: 0.02em;
+        white-space: pre-line;
+      }
+      .hint,
+      small {
+        font-size: 13px;
+        color: var(--muted);
+        line-height: 1.8;
+      }
+      .controls {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin-top: 18px;
+      }
+      #status {
+        min-height: 28px;
+        margin-bottom: 0;
+        font-size: 14px;
+      }
+      .clock {
+        font-family: 'Cascadia Mono', Consolas, monospace;
+        font-size: 44px;
+        font-variant-numeric: tabular-nums;
+        margin: 4px 0 14px;
+      }
+      .clock small {
+        font:
+          14px system-ui,
+          sans-serif;
+      }
+      .meter-line {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      meter {
+        width: 100%;
+        height: 18px;
+      }
+      #level {
+        width: 72px;
+        flex-shrink: 0;
+        text-align: right;
+        font:
+          12px Consolas,
+          monospace;
+      }
+      progress {
+        display: block;
+        width: 100%;
+        accent-color: var(--teal);
+        height: 8px;
+        margin: 14px 0 10px;
+      }
+      .stat {
+        padding: 20px 0;
+        border-top: 1px solid var(--line);
+        margin-top: 20px;
+      }
+      .stat strong {
+        font-size: 24px;
+        font-variant-numeric: tabular-nums;
+      }
+      .stat p {
+        margin-bottom: 0;
+      }
+      details {
+        font-size: 13px;
+        line-height: 1.8;
+      }
+      summary {
+        cursor: pointer;
+        color: var(--teal);
+      }
+      #settings {
+        white-space: pre-line;
+        overflow-wrap: anywhere;
+        color: var(--muted);
+      }
+      .archive {
+        margin-top: 20px;
+      }
+      .archive-head {
+        display: flex;
+        gap: 16px;
+        justify-content: space-between;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      .archive-head h2 {
+        margin: 0;
+      }
+      .clip {
+        border-top: 1px solid var(--line);
+        padding: 20px 0 0;
+        margin-top: 20px;
+      }
+      .clip h3 {
+        font-size: 16px;
+        margin: 0 0 6px;
+      }
+      .clip p {
+        margin: 6px 0;
+        font-size: 13px;
+      }
+      audio {
+        width: 100%;
+        margin-top: 12px;
+      }
+      .warning {
+        color: #88571d;
+      }
+      .foot {
+        display: flex;
+        gap: 20px;
+        justify-content: space-between;
+        flex-wrap: wrap;
+        margin-top: 20px;
+      }
+      @media (max-width: 800px) {
+        body {
+          padding: 24px 14px 40px;
+        }
+        .grid {
+          grid-template-columns: 1fr;
+        }
+        .panel {
+          padding: 22px;
+        }
+        .reading {
+          padding-left: 16px;
+        }
+        #prompt {
+          font-size: 21px;
+        }
+        .monitor {
+          order: -1;
+        }
+        .monitor .stat {
+          padding-bottom: 0;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="eyebrow">本人声音 / 仅本机录制</div>
+      <h1>像平常聊天一样，留下你的声音。</h1>
+      <p class="intro">
+        先试录 30 秒，试听确认麦克风。然后每段读 60–90 秒，逐段积累约 10
+        分钟。自然说话，不模仿别人、不压低嗓音；读错就停顿一下接着说。这一页不会上传声音或启动训练。
+      </p>
+      <div class="grid">
+        <section class="panel" aria-label="朗读与录制">
+          <label class="consent"
+            ><input id="consent" type="checkbox" />
+            <span
+              >我确认录制的是我本人的声音，并同意在本机保存，供本项目后续声音模型实验使用。我知道录音是否适合训练，仍需另行检查。</span
+            ></label
+          >
+          <label class="field" for="microphone">录音麦克风</label>
+          <select id="microphone">
+            <option value="default">
+              浏览器默认麦克风（首次授权后可选择具体设备）
+            </option>
+          </select>
+          <label class="field" for="passage">这一段读什么</label>
+          <select id="passage"></select>
+          <div class="reading"><p id="prompt"></p></div>
+          <p id="reading-hint" class="hint"></p>
+          <div class="controls">
+            <button id="record" class="primary" disabled>开始 30 秒试录</button
+            ><button id="stop" class="stop" disabled>停止</button
+            ><button id="next" disabled>下一段</button>
+          </div>
+          <p id="status" role="status" aria-live="polite">
+            尚未开启麦克风。勾选本人录音确认后，再点击开始。
+          </p>
+        </section>
+        <aside class="panel monitor" aria-label="录音状态">
+          <div class="eyebrow">当前片段</div>
+          <div class="clock">
+            <span id="elapsed">00:00</span> <small id="limit">/ 00:30</small>
+          </div>
+          <div class="meter-line">
+            <meter
+              id="meter"
+              min="0"
+              max="1"
+              value="0"
+              aria-label="输入声音电平"
+            ></meter
+            ><span id="level">未录制</span>
+          </div>
+          <p class="hint">
+            距离麦克风约一掌，保持位置。避开风扇、音乐和其他人的讲话。录制时不会返听。
+          </p>
+          <div class="stat">
+            <span class="hint">本页正式素材累计 · 试录不计入</span><br /><strong
+              id="total"
+              >00:00</strong
+            ><span class="hint"> / 10:00</span
+            ><progress
+              id="progress"
+              max="600"
+              value="0"
+              aria-label="本页正式录音累计时长"
+            ></progress>
+            <p id="progress-hint" class="hint">
+              累计为录音时长，含停顿，并非有效讲话时长。
+            </p>
+          </div>
+          <details open>
+            <summary>实际采音设置</summary>
+            <p id="settings">
+              点击开始后读取。请求关闭回声消除、降噪和自动增益，是否生效以实际回读为准。
+            </p>
+          </details>
+        </aside>
+      </div>
+      <section class="panel archive" aria-label="本页录音">
+        <div class="archive-head">
+          <h2>试听，然后保存每一段</h2>
+          <button id="manifest" disabled>下载录音清单</button>
+        </div>
+        <p class="hint">
+          录音是单声道 PCM16 WAV，保留浏览器实际采样率，不转成电话用的 8
+          kHz，也不压缩成 MP3。每段最多 90 秒；本页最多暂存 15
+          分钟，保存并删除旧片段后可继续。
+        </p>
+        <p class="warning">
+          录音只在当前页面内存中。刷新或关闭会清空，请逐段下载，并在下载列表确认文件已保存。清单仅含稿件和录音参数，不包含声音。
+        </p>
+        <div id="clips">
+          <p id="empty" class="hint">
+            第一段会出现在这里。先试录，再用耳机试听。
+          </p>
+        </div>
+      </section>
+      <div class="foot">
+        <a href="/">返回电话工作台</a
+        ><small>电平检查只是提醒，不等于音质或训练验收。</small>
+      </div>
+    </main>
+    <script type="module" src="/voice-capture.js"></script>
+  </body>
+</html>
