@@ -1,5 +1,7 @@
 # 中英双向电话翻译：项目目标与范围
 
+**最新基础要求（2026-09-28）**：用户要求低延迟与长时间通话的稳定输出同时作为基础能力；不能只优化首句，让后续越积越慢，也不能牺牲内容完整性。需覆盖传输/播放积压、模型到期与连接恢复、凭据续期和长历史资源使用，按 5/30/60 分钟分级验收。本轮已完成核查并形成 [待实施方案](LOW_LATENCY_STABILITY_PLAN_2026-09-28.md)，尚未执行其中的优化或长通话验收，现用候选保持不变。
+
 共享仓库：<https://github.com/Richman2020/live-translation-openai-realtime-api>。更新日期：2026-09-28。
 
 本文件保存用户需求、决定与实现范围；验证进度见 [PROGRESS.md](PROGRESS.md)，运行步骤见 [LOCAL_SETUP.md](LOCAL_SETUP.md)，协作规则见 [AGENTS.md](AGENTS.md)。
