@@ -1,4 +1,8 @@
-export const TRANSLATION_ENGINES = ['legacy', 'continuous'] as const;
+export const TRANSLATION_ENGINES = [
+  'legacy',
+  'continuous',
+  'continuous-nano',
+] as const;
 export type TranslationEngine = (typeof TRANSLATION_ENGINES)[number];
 
 export function isTranslationEngine(

@@ -68,5 +68,29 @@ test('connected phone legs never imply translation readiness, including old serv
 test('history labels distinguish both engines and avoid inferring old missing metadata', () => {
   assert.equal(translationEngineLabel('legacy'), '当前版本');
   assert.equal(translationEngineLabel('continuous'), '连续翻译实验版');
+  assert.equal(translationEngineLabel('continuous-nano'), '本人声线实验版');
   assert.equal(translationEngineLabel(undefined), '版本未记录');
+});
+
+test('own voice is opt-in, server-advertised and locked to the active call', () => {
+  const selection = createTranslationEngineSelection();
+  selection.update({ engines, session: null, locked: false });
+  assert.equal(selection.select('continuous-nano'), false);
+  selection.update({ engines: [...engines, 'continuous-nano'], session: null, locked: false });
+  assert.equal(selection.snapshot.value, 'legacy');
+  assert.equal(selection.select('continuous-nano'), true);
+  selection.update({ engines: [...engines, 'continuous-nano'], session: { translationEngine: 'continuous-nano' }, locked: false });
+  assert.equal(selection.snapshot.sessionEngine, 'continuous-nano');
+  assert.equal(selection.select('legacy'), false);
+  assert.equal(createTranslationEngineSelection().snapshot.value, 'legacy');
+});
+
+test('own voice readiness requires explicit server readiness and explains sentence synthesis', () => {
+  const pending = translationReadiness({ status: 'active', translationEngine: 'continuous-nano' });
+  assert.equal(pending.ready, false);
+  assert.match(pending.label, /本人声线准备中/);
+  assert.match(pending.instruction, /请等就绪后说话/);
+  const ready = translationReadiness({ status: 'active', translationEngine: 'continuous-nano', translationReady: true });
+  assert.equal(ready.ready, true);
+  assert.match(ready.instruction, /明确句尾.*分句合成后播放/);
 });

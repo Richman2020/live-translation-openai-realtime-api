@@ -567,7 +567,7 @@ async function pageFixture(requestMedia: (constraints: unknown) => Promise<unkno
       if (failure === 'timeout') throw Object.assign(new Error('private timeout details'), { name: 'AbortError' });
       if (failure) return { ok: false, status: failure.status, json: async () => ({ error: failure.error }) };
       let payload: any = { ok: true };
-      if (path === '/api/status') payload = { configured: true, activeSession, checks: [], translationEngines: ['legacy', 'continuous'], defaultTranslationEngine: 'legacy' };
+      if (path === '/api/status') payload = { configured: true, activeSession, checks: [], translationEngines: ['legacy', 'continuous', 'continuous-nano'], defaultTranslationEngine: 'legacy' };
       if (path === '/api/token') payload = { token: 'offline-sdk-token' };
       if (path === '/api/calls') {
         activeSession = { id: `session-${++sessionCounter}`, status: 'connecting', direction: 'outbound', to: '+12125551234', translationEngine: JSON.parse(options.body).translationEngine || 'legacy', translationReady: false };
@@ -575,7 +575,7 @@ async function pageFixture(requestMedia: (constraints: unknown) => Promise<unkno
       }
       if (path === '/api/verify') {
         const translationEngine = JSON.parse(options.body).translationEngine || 'legacy';
-        payload = { translationEngine, checks: [{ name: translationEngine === 'continuous' ? 'openaiContinuous' : 'openaiRealtime', status: 'passed', code: translationEngine === 'continuous' ? 'SESSION_UPDATED_BOTH_LANGUAGES' : 'SESSION_UPDATED' }] };
+        payload = { translationEngine, checks: [{ name: translationEngine === 'continuous-nano' ? 'nanoTranslation' : translationEngine === 'continuous' ? 'openaiContinuous' : 'openaiRealtime', status: 'passed', code: translationEngine === 'continuous-nano' ? 'NANO_AND_CONTINUOUS_READY' : translationEngine === 'continuous' ? 'SESSION_UPDATED_BOTH_LANGUAGES' : 'SESSION_UPDATED' }] };
       }
       if (path.endsWith('/hangup')) activeSession = null;
       return { ok: true, json: async () => payload };
@@ -775,6 +775,105 @@ test('continuous call history and exports retain the actual selected version wit
   f.callEvent({ status: 'completed' });
   assert.equal(f.history()[0].translationEngine, 'continuous');
   assert.match(f.element('history-list').children[0].children[1].textContent, /连续翻译实验版/);
+});
+
+test('own voice page requests, readiness, records and exports preserve its distinct engine', async () => {
+  const f = await pageFixture(async () => streamFixture().stream);
+  assert.equal(f.element('translation-engine').value, 'legacy');
+  f.element('save-history-toggle').events.click();
+  f.element('translation-engine').value = 'continuous-nano';
+  f.element('translation-engine').events.change();
+  assert.match(f.element('translation-engine-status').textContent, /本人声线实验版.*增加等待/);
+  assert.match(f.element('translation-engine-help').textContent, /电脑中文 → 手机英文.*本人声线.*电脑中文保留连续翻译原声/);
+  await f.element('verify-connections').events.click();
+  assert.equal(f.requestBodies.find(entry => entry.path === '/api/verify')?.body.translationEngine, 'continuous-nano');
+  assert.match(f.element('verification-results').children[0].textContent, /本人声线实验版/);
+  assert.equal(f.requestTimeout('/api/verify').delay, 150000);
+  assert.equal(f.element('verification-results').children[1].children[0].textContent, '本人声线与双向连续翻译');
+  assert.match(f.element('verification-results').children[1].title, /本人声线已预热.*连续翻译连接已就绪/);
+  await f.element('start-call').events.click();
+  assert.equal(f.requestBodies.find(entry => entry.path === '/api/calls')?.body.translationEngine, 'continuous-nano');
+  assert.equal(f.requestTimeout('/api/calls').delay, 150000);
+  assert.equal(f.element('translation-engine').disabled, true);
+  f.callEvent({ status: 'active', translationReady: false });
+  assert.match(f.element('connection-text').textContent, /本人声线准备中/);
+  f.callEvent({ status: 'active', translationReady: true });
+  assert.equal(f.element('connection-text').textContent, '本人声线翻译已就绪');
+  assert.match(f.element('transcript-engine-note').textContent, /本人声线版仅提供译文/);
+  f.transcriptEvent({ id: 'nano-local-0', role: 'local', kind: 'translation', text: 'Please call at five.', final: true });
+  f.element('export-current').events.click();
+  const text = await f.exports[0].text();
+  assert.match(text, /翻译版本：本人声线实验版/);
+  assert.match(text, /仅包含服务返回的译文/);
+  assert.match(text, /电脑中文.*本机本人声线.*电脑中文保留连续翻译原声/);
+  assert.match(text, /Please call at five\./);
+  f.callEvent({ status: 'completed' });
+  assert.equal(f.history()[0].translationEngine, 'continuous-nano');
+  assert.match(f.element('history-list').children[0].children[1].textContent, /本人声线实验版/);
+});
+
+test('own voice warmup keeps selection locked and late preflight cannot revive a cancelled call', async () => {
+  const pending = deferred<void>();
+  const stream = streamFixture();
+  const f = await pageFixture(async () => stream.stream, undefined, {
+    beforeResponse: async path => { if (path === '/api/calls') await pending.promise; },
+  });
+  f.element('translation-engine').value = 'continuous-nano';
+  f.element('translation-engine').events.change();
+  const dialing = f.element('start-call').events.click();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.requestTimeout('/api/calls').delay, 150000);
+  assert.equal(f.element('translation-engine').disabled, true);
+  assert.equal(f.element('start-call').disabled, true);
+  assert.match(f.element('translation-engine-status').textContent, /首次准备.*2 分钟.*尚未拨出/);
+  assert.match(f.element('start-call').querySelector('span').textContent, /正在准备本人声线/);
+  assert.match(f.element('bridge-caption').textContent, /准备好后才拨号/);
+  assert.equal(f.sdkConnects(), 0);
+  await f.element('end-call').events.click();
+  assert.equal(stream.stopped(), 1);
+  pending.resolve();
+  await dialing;
+  assert.equal(f.sdkConnects(), 0);
+  const hangup = f.requests.find(request => /^POST \/api\/calls\/[^/]+\/hangup$/.test(request));
+  assert.ok(hangup);
+  assert.equal(f.requestTimeout(hangup.slice(5)).delay, 20000);
+  assert.equal(f.element('start-call').disabled, false);
+});
+
+test('own voice timing accepts only local synthesis metrics and never presents legacy turn latency', async () => {
+  const f = await pageFixture(async () => streamFixture().stream);
+  f.element('translation-engine').value = 'continuous-nano';
+  f.element('translation-engine').events.change();
+  await f.element('start-call').events.click();
+  f.callEvent({ status: 'active', translationReady: true });
+  assert.match(f.element('translation-timing-note').textContent, /不等于实际电话延迟/);
+  f.metricEvent({ role: 'local', value: 999, transcriptionMs: 100, queueMs: 0, generationMs: 899 });
+  assert.match(f.element('translation-timing-local').textContent, /等待完整译文句子.*尚无合成计时/);
+  f.metricEvent({ role: 'local', name: 'nano_text_to_audio_ms', scope: 'provider_generation', value: 999 });
+  assert.match(f.element('translation-timing-local').textContent, /尚无合成计时/);
+  f.metricEvent({ role: 'remote', name: 'nano_text_to_audio_ms', scope: 'local_synthesis', value: 999 });
+  assert.match(f.element('translation-timing-remote').textContent, /连续翻译原声.*不使用旧版逐句停说计时/);
+  f.metricEvent({ role: 'local', name: 'nano_text_to_audio_ms', scope: 'local_synthesis', value: 1234 });
+  assert.match(f.element('translation-timing-local').textContent, /本人声线合成 1\.23 秒（含合成排队）/);
+  assert.doesNotMatch(f.element('translation-timing-local').textContent, /服务端停说|等待转写/);
+});
+
+test('own voice service and sentence failures have actionable Chinese messages', async () => {
+  for (const [error, expected] of [
+    ['NANOVOICE_NOT_READY', /本人声线尚未准备好/],
+    ['NANOVOICE_TIMEOUT', /本人声线准备或合成超时/],
+    ['nano_text_too_long:local', /等待完整句子时文字过长.*较短的完整句子/],
+    ['nano_text_boundary_failed:local', /译文过长或句子边界无法确认.*较短的完整句子/],
+    ['nano_queue_overflow:local', /本人声线合成或播放积压过多/],
+    ['nano_worker_closed:local', /本人声线服务连接中断/],
+    ['nano_unknown_failure:local', /本人声线合成未完成/],
+  ] as const) {
+    const f = await pageFixture(async () => streamFixture().stream);
+    await f.element('start-call').events.click();
+    f.callEvent({ status: 'failed', error });
+    assert.match(f.element('app-error').textContent, expected);
+    assert.doesNotMatch(f.element('app-error').textContent, /NANOVOICE_|nano_/);
+  }
 });
 
 test('input overflow reports incomplete capture separately from continuous playback backlog', async () => {

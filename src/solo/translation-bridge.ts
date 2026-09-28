@@ -16,10 +16,10 @@ export type TranscriptEvent = {
 
 export type TranslationMetric = {
   role: TranslationRole;
-  name: 'speech_stop_to_first_audio_ms';
+  name: 'speech_stop_to_first_audio_ms' | 'nano_text_to_audio_ms';
   value: number;
   at: number;
-  scope: 'provider_generation';
+  scope: 'provider_generation' | 'local_synthesis';
   transcriptionMs?: number;
   queueMs?: number;
   generationMs?: number;

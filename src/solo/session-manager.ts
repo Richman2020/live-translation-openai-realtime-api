@@ -9,6 +9,7 @@ import type { SoloConfig } from './config';
 import { safeEqual } from './security';
 import { TranslationBridge } from './translation-bridge';
 import { ContinuousTranslationBridge } from './continuous-translation-bridge';
+import { getNanoVoiceWorker } from './nano-runtime';
 import {
   isTranslationEngine,
   type TranslationEngine,
@@ -161,10 +162,16 @@ export class SessionManager extends EventEmitter {
     this.providerFactory = options.providerFactory || twilioProvider;
     this.bridgeFactory =
       options.bridgeFactory ||
-      ((settings) =>
-        settings.translationEngine === 'continuous'
-          ? new ContinuousTranslationBridge(settings)
-          : new TranslationBridge(settings));
+      ((settings) => {
+        if (settings.translationEngine === 'continuous-nano')
+          return new ContinuousTranslationBridge({
+            ...settings,
+            localVoice: getNanoVoiceWorker(),
+          });
+        if (settings.translationEngine === 'continuous')
+          return new ContinuousTranslationBridge(settings);
+        return new TranslationBridge(settings);
+      });
     this.setupTimeoutMs = options.setupTimeoutMs ?? 75000;
     this.maxCallMs = options.maxCallMs ?? 60 * 60 * 1000;
   }

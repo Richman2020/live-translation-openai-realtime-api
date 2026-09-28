@@ -1,4 +1,4 @@
-"""Generate private, offline RVC voice samples from a declared synthetic English WAV.
+"""Generate private, offline RVC voice samples from a declared synthetic WAV.
 
 Uses real local HuBERT/RMVPE weights and a strictly loaded trained inference checkpoint.
 Outputs are full-file 32 kHz and telephone-codec 8 kHz samples, not a real-time or
@@ -15,6 +15,7 @@ import subprocess
 import sys
 import time
 import traceback
+import wave
 
 
 REPO = Path(__file__).resolve().parent.parent
@@ -41,8 +42,101 @@ def private_path(value):
     return value
 
 
+def controlled_openai_source(input_path, manifest_path, manifest):
+    """Bind an existing Chinese API comparison output; never invoke its provider.
+
+    The report contains the returned text, not an observed voice identifier.
+    Accordingly the stock voice is a configuration declaration, not proof of
+    speaker identity or that the audio says the diagnostic transcript exactly.
+    """
+    if (manifest.get("provider") != "OpenAI" or manifest.get("language") != "zh-CN"
+            or manifest.get("personalVoice") is not False
+            or manifest.get("conversionOffline") is not True
+            or manifest.get("outputRole") != "legacy"
+            or manifest.get("requestedVoice") != "marin"
+            or manifest.get("voiceEvidence") != "configuration-declaration-not-session-observed"):
+        raise ValueError("Expected declared controlled OpenAI Chinese stock-voice output")
+
+    def bound_file(key):
+        entry = manifest.get(key)
+        if not isinstance(entry, dict) or not isinstance(entry.get("path"), str) or not entry["path"]:
+            raise ValueError("Missing controlled source file binding: " + key)
+        path = private_path(manifest_path.parent / entry["path"])
+        if not path.is_file() or entry.get("sha256") != sha256(path):
+            raise ValueError("Controlled source changed since manifest: " + key)
+        return path
+
+    source_path = bound_file("sourceWav")
+    result_path = bound_file("comparisonResult")
+    fixture_path = bound_file("sourceFixture")
+    fixture_manifest_path = bound_file("sourceFixtureManifest")
+    fixture_manifest = json.loads(fixture_manifest_path.read_text(encoding="utf-8-sig"))
+    if (not isinstance(fixture_manifest, dict)
+            or fixture_manifest.get("version") != "phone-quality-inputs/1"
+            or fixture_manifest.get("consentForProjectEvaluation") is not True
+            or fixture_manifest.get("kind") != "human"
+            or fixture_manifest.get("format") != "PCMU_8000_mono"
+            or not isinstance(fixture_manifest.get("cases"), list)):
+        raise ValueError("Controlled comparison requires an authorized recorded fixture")
+    cases = [entry for entry in fixture_manifest["cases"] if isinstance(entry, dict)
+             and isinstance(entry.get("inputFile"), str)
+             and (fixture_manifest_path.parent / entry["inputFile"]).resolve() == fixture_path
+             and entry.get("inputSha256") == sha256(fixture_path)
+             and entry.get("role") == "remote" and entry.get("targetLanguage") == "zh"]
+    if len(cases) != 1:
+        raise ValueError("Controlled comparison fixture must uniquely match its authorized manifest")
+    if (source_path != input_path.resolve() or source_path.name != "legacy.wav"
+            or result_path.name != "result.json" or source_path.parent != result_path.parent):
+        raise ValueError("Controlled source WAV must belong to the bound comparison result")
+    result = json.loads(result_path.read_text(encoding="utf-8-sig"))
+    if (not isinstance(result, dict) or result.get("failure", "missing") is not None
+            or result.get("role") != "remote" or result.get("realPhone") is not False
+            or result.get("format") != "PCMU_8000_mono"
+            or not isinstance(result.get("model"), str) or not result["model"].strip()
+            or result.get("model") != manifest.get("model")
+            or result.get("inputSha256") != sha256(fixture_path)
+            or result.get("inputBytes") != fixture_path.stat().st_size):
+        raise ValueError("Invalid or mismatched controlled comparison provenance")
+    legacy = result.get("legacy")
+    if not isinstance(legacy, dict) or not isinstance(legacy.get("transcripts"), list):
+        raise ValueError("Controlled comparison must contain final returned translations")
+    translations = [entry["text"] for entry in legacy["transcripts"]
+                    if isinstance(entry, dict) and entry.get("kind") == "translation"
+                    and entry.get("final") is True and isinstance(entry.get("text"), str)
+                    and entry["text"].strip()]
+    text = "\n".join(translations)
+    if (not translations or text != manifest.get("actualReturnedTranslation")
+            or type(result.get("oldCompletedResponses")) is not int
+            or len(translations) != result["oldCompletedResponses"]):
+        raise ValueError("Controlled translation must exactly match completed comparison output")
+    with wave.open(str(source_path), "rb") as wav:
+        frames = wav.getnframes()
+        # compare-translation-audio.ts decodes PCMU to 24 kHz after appending
+        # 80 silence bytes to drain the existing resampler (10 ms, not speech).
+        output_bytes = legacy.get("outputBytes")
+        if (wav.getnchannels() != 1 or wav.getsampwidth() != 2
+                or wav.getframerate() != 24000 or wav.getcomptype() != "NONE"
+                or not 0 < frames <= 20 * 24000 or type(output_bytes) is not int
+                or output_bytes <= 0 or frames != (output_bytes + 80) * 3
+                or legacy.get("outputDurationMs") != output_bytes / 8):
+            raise ValueError("Controlled WAV must match the comparison telephone output duration")
+    return {"kind": "HASH_BOUND_OPENAI_CONTROLLED_SYNTHETIC", "voice": "marin",
+            "voice_evidence": manifest["voiceEvidence"], "language": "zh-CN", "text": text,
+            "model": result["model"], "manifest_sha256": sha256(manifest_path),
+            "comparison_result_sha256": sha256(result_path),
+            "source_fixture_sha256": sha256(fixture_path),
+            "source_fixture_manifest_sha256": sha256(fixture_manifest_path),
+            "conversion_offline": True, "narrowband_source": True,
+            "source_render": "PCMU_8000 decoded to PCM16_24000 with 10ms filter drain",
+            "limit": "Existing API output from an authorized recorded fixture; stock voice is "
+                     "configuration-declared, not session-observed. Text is diagnostic; content, "
+                     "similarity and live latency still require separate assessment."}
+
+
 def synthetic_source(input_path, manifest_path):
     manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+    if isinstance(manifest, dict) and manifest.get("version") == "own-voice-openai-controlled-source/1":
+        return controlled_openai_source(input_path, manifest_path, manifest)
     if isinstance(manifest, dict) and manifest.get("version") == "own-voice-synthetic-source/1":
         if (manifest.get("upload") is not False or manifest.get("personalVoice") is not False
                 or manifest.get("source") != "Installed Microsoft Zira Desktop offline SAPI"):
@@ -319,12 +413,13 @@ def run(args, report):
         raise ValueError("Controlled source must be finite mono audio")
     original = original[:, 0]
     duration = len(original) / sample_rate
-    if not .1 <= duration <= 15:
-        raise ValueError("Offline whole-file sample must be 0.1 to 15 seconds")
+    maximum_seconds = 20 if report["source"]["kind"] == "HASH_BOUND_OPENAI_CONTROLLED_SYNTHETIC" else 15
+    if not .1 <= duration <= maximum_seconds:
+        raise ValueError(f"Offline whole-file sample must be 0.1 to {maximum_seconds} seconds")
     if float(np.max(np.abs(original))) < .0001:
         raise ValueError("Source is effectively silent")
     report["source"].update({"sample_rate": sample_rate, "duration_seconds": duration,
-                             "narrowband_source": sample_rate <= 8000})
+                             "narrowband_source": report["source"].get("narrowband_source", sample_rate <= 8000)})
     divisor = math.gcd(sample_rate, 16000)
     audio16 = measured("input_resampling", lambda: resample_poly(
         original, 16000 // divisor, sample_rate // divisor).astype(np.float32))

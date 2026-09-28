@@ -6,6 +6,7 @@ import {
   type ContinuousTranslationOptions,
 } from './continuous-translation-client';
 import { Pcm24kToPcmu, PcmuToPcm24k } from './translation-pcm';
+import { createNanoTextCommitter } from './nano-text-committer';
 import type {
   TranscriptEvent,
   TranslationAudioDiagnostic,
@@ -13,11 +14,25 @@ import type {
   TranslationRole,
 } from './translation-bridge';
 
+export type LocalVoiceSynthesizer = {
+  ready: Promise<void>;
+  synthesize(
+    text: string,
+    signal?: AbortSignal,
+  ): Promise<{
+    pcm: Buffer;
+    sampleRate: 24000;
+    metrics: { generationMs: number; audioMs: number };
+  }>;
+};
 export type ContinuousTranslationBridgeOptions = TranslationBridgeOptions & {
   createClient?: (
     options: ContinuousTranslationOptions,
   ) => ContinuousTranslationClient;
   playbackTimeoutMs?: number;
+  /** Explicit one-way candidate. The local provider audio is never forwarded. */
+  localVoice?: LocalVoiceSynthesizer;
+  sentenceBoundaryDelayMs?: number;
 };
 
 type Phone = {
@@ -105,7 +120,8 @@ function isId(value: unknown): value is string {
 /**
  * Optional phone adapter for the dedicated continuous translation protocol.
  * attach() receives only phone legs authenticated by SessionManager. Each
- * speaker has independent codec/session state; text never controls audio.
+ * speaker has independent codec/session state. By default text is diagnostic;
+ * explicit localVoice uses append-only translated sentences for one-way TTS.
  */
 export class ContinuousTranslationBridge {
   private readonly phones = new Map<TranslationRole, Phone>();
@@ -122,10 +138,27 @@ export class ContinuousTranslationBridge {
 
   private closed = false;
 
+  private readonly nanoAbort = new AbortController();
+
+  private readonly nanoPlaybackWaiters = new Set<() => void>();
+
+  private readonly nanoQueue: { text: string; at: number }[] = [];
+
+  private nanoBusy = false;
+
+  private readonly nanoCommitter?: ReturnType<typeof createNanoTextCommitter>;
+
   constructor(private readonly options: ContinuousTranslationBridgeOptions) {
     const timeout = options.playbackTimeoutMs ?? 20000;
     if (!Number.isFinite(timeout) || timeout < 1 || timeout > 120000)
       throw new Error('INVALID_CONTINUOUS_PLAYBACK_TIMEOUT');
+    if (options.localVoice) {
+      this.nanoCommitter = createNanoTextCommitter({
+        boundaryDelayMs: options.sentenceBoundaryDelayMs,
+        onCommit: (text) => this.enqueueNano(text),
+        onError: () => this.shutdown('nano_text_boundary_failed:local'),
+      });
+    }
   }
 
   public attach(
@@ -224,6 +257,12 @@ export class ContinuousTranslationBridge {
         createWebSocket: this.options.createWebSocket,
         onAudio: (pcm) => this.onAudio(role, provider, pcm),
         onTranscript: (delta) => this.onTranscript(role, provider, delta),
+        ...(role === 'local' && this.nanoCommitter
+          ? {
+              onTranslatedText: (delta: string) =>
+                this.nanoCommitter.append(delta),
+            }
+          : {}),
         // Never expose provider errors, credentials, audio or transcripts.
         onError: () => this.shutdown(`continuous_provider_failed:${role}`),
       });
@@ -232,7 +271,11 @@ export class ContinuousTranslationBridge {
         client.abort();
         return;
       }
-      client.ready
+      const readiness =
+        role === 'local' && this.options.localVoice
+          ? Promise.all([client.ready, this.options.localVoice.ready])
+          : client.ready;
+      readiness
         .then(() => {
           if (this.closed || this.providers.get(role) !== provider) return;
           provider.ready = true;
@@ -334,6 +377,7 @@ export class ContinuousTranslationBridge {
     pcm: Buffer,
   ): void {
     if (this.closed || this.providers.get(role) !== provider) return;
+    if (role === 'local' && this.options.localVoice) return;
     // The client can deliver output immediately after resolving ready, before
     // its promise continuation runs; client protocol validation owns readiness.
     this.forward(role, provider.output.push(pcm));
@@ -341,6 +385,93 @@ export class ContinuousTranslationBridge {
     // and resampling phase across every chunk, including provider silence;
     // never add synthetic padding between chunks. Hangup discards the tail
     // together with all remaining audio rather than speaking after departure.
+  }
+
+  private enqueueNano(text: string): void {
+    if (this.closed) return;
+    // At most one active sentence and three waiting; do not silently lose words.
+    if (this.nanoQueue.length + Number(this.nanoBusy) >= 4) {
+      this.shutdown('nano_synthesis_queue_full:local');
+      return;
+    }
+    this.nanoQueue.push({ text, at: (this.options.now || Date.now)() });
+    this.processNano().catch(() =>
+      this.shutdown('nano_synthesis_failed:local'),
+    );
+  }
+
+  private async processNano(): Promise<void> {
+    if (this.nanoBusy || this.closed) return;
+    this.nanoBusy = true;
+    try {
+      while (!this.closed && this.nanoQueue.length) {
+        const job = this.nanoQueue.shift();
+        // eslint-disable-next-line no-await-in-loop -- One FIFO synthesis at a time preserves spoken order.
+        const generated = await this.options.localVoice.synthesize(
+          job.text,
+          this.nanoAbort.signal,
+        );
+        if (this.closed) return;
+        if (
+          generated.sampleRate !== 24000 ||
+          !Buffer.isBuffer(generated.pcm) ||
+          !generated.pcm.length ||
+          generated.pcm.length % 2 ||
+          generated.pcm.length > 48000 * 20
+        )
+          throw new Error('NANO_INVALID_AUDIO');
+        try {
+          this.options.onMetric?.({
+            role: 'local',
+            name: 'nano_text_to_audio_ms',
+            scope: 'local_synthesis',
+            value: Math.max(0, (this.options.now || Date.now)() - job.at),
+            generationMs: generated.metrics.generationMs,
+            at: (this.options.now || Date.now)(),
+          });
+        } catch {
+          /* Optional diagnostic only. */
+        }
+        // Each generated sentence is a complete waveform. Drain its FIR tail
+        // explicitly; do not reset a resampler between arbitrary provider chunks.
+        const converter = new Pcm24kToPcmu();
+        const audio = Buffer.concat([
+          converter.push(generated.pcm),
+          converter.push(Buffer.alloc(384)),
+        ]);
+        for (
+          let offset = 0;
+          offset < audio.length && !this.closed;
+          offset += DELIVERY_BYTES
+        ) {
+          const chunk = audio.subarray(offset, offset + DELIVERY_BYTES);
+          // Keep at most four seconds queued at Twilio. Playback marks release
+          // capacity; hangup/error wakes waiters and discards all late audio.
+          while (
+            !this.closed &&
+            (this.phones.get('remote')?.outstandingBytes ?? 0) + chunk.length >
+              32000
+          ) {
+            // eslint-disable-next-line no-await-in-loop -- Playback acknowledgments release bounded capacity.
+            await new Promise<void>((resolve) => {
+              this.nanoPlaybackWaiters.add(resolve);
+            });
+          }
+          if (this.closed) return;
+          this.forward('local', chunk);
+        }
+      }
+    } catch {
+      if (!this.closed) this.shutdown('nano_synthesis_failed:local');
+    } finally {
+      this.nanoBusy = false;
+    }
+  }
+
+  private wakeNanoPlayback(): void {
+    const waiters = [...this.nanoPlaybackWaiters];
+    this.nanoPlaybackWaiters.clear();
+    waiters.forEach((resolve) => resolve());
   }
 
   private forward(role: TranslationRole, audio: Buffer): void {
@@ -475,6 +606,7 @@ export class ContinuousTranslationBridge {
     this.deliveries.delete(delivery.name);
     this.phones.get(delivery.recipientRole).outstandingBytes -=
       delivery.generatedBytes;
+    this.wakeNanoPlayback();
     // A Twilio mark proves queue drainage, never human audibility.
     this.diagnostic(delivery, 'playback_confirmed');
   }
@@ -519,8 +651,28 @@ export class ContinuousTranslationBridge {
   private shutdown(reason?: string): void {
     if (this.closed) return;
     this.closed = true;
+    this.nanoCommitter?.close();
+    this.nanoAbort.abort();
+    this.nanoQueue.length = 0;
+    this.wakeNanoPlayback();
     this.removeListeners.splice(0).forEach((remove) => remove());
     const phones = [...this.phones.values()];
+    if (this.options.localVoice) {
+      for (const phone of phones) {
+        try {
+          if (
+            phone.socket.readyState === WebSocket.OPEN &&
+            phone.socket.bufferedAmount < MAX_TRANSPORT_BYTES
+          )
+            phone.socket.send(
+              JSON.stringify({ event: 'clear', streamSid: phone.streamSid }),
+              () => {},
+            );
+        } catch {
+          /* Best effort; the session manager also ends both calls. */
+        }
+      }
+    }
     for (const [role, provider] of this.providers) {
       try {
         provider.client?.abort();

@@ -1,4 +1,4 @@
-const engineLabels = Object.freeze({ legacy: '当前版本', continuous: '连续翻译实验版' });
+const engineLabels = Object.freeze({ legacy: '当前版本', continuous: '连续翻译实验版', 'continuous-nano': '本人声线实验版' });
 
 export function translationEngineLabel(value) {
   return engineLabels[value] || '版本未记录';
@@ -30,8 +30,11 @@ export function createTranslationEngineSelection() {
 
 export function translationReadiness(session) {
   if (session?.status !== 'active') return null;
+  const ownVoice = session.translationEngine === 'continuous-nano';
   if (session.translationReady !== true) {
+    if (ownVoice) return { ready: false, label: '电话已接通 · 本人声线准备中', instruction: '电话已接通，正在准备翻译和本人声线；请等就绪后说话。' };
     return { ready: false, label: '电话已接通 · 翻译准备中', instruction: '电话已接通，正在准备翻译；请等就绪后说话。' };
   }
+  if (ownVoice) return { ready: true, label: '本人声线翻译已就绪', instruction: '可以开始说话；请用有明确句尾的短句，本人声线会在分句合成后播放。' };
   return { ready: true, label: '翻译已就绪', instruction: '翻译已就绪，可以开始说话。' };
 }

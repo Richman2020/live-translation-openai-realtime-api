@@ -223,6 +223,115 @@ test('continuous success snapshots the chosen engine and a busy request cannot c
   assert.equal(manager.activeSession?.translationEngine, 'continuous');
 });
 
+test('continuous-nano failed preflight creates no phone session and never silently selects another engine', async (t) => {
+  const engines: string[] = [];
+  const { app, calls, manager, events } = await fixture(
+    t,
+    async () => ready,
+    async (_config, engine) => {
+      engines.push(engine);
+      return {
+        name: 'nanoVoice',
+        status: 'failed',
+        code: 'NANOVOICE_UNAVAILABLE',
+      };
+    },
+  );
+  const failed = await app.inject({
+    ...request,
+    payload: { ...request.payload, translationEngine: 'continuous-nano' },
+  });
+  assert.equal(failed.statusCode, 503);
+  assert.deepEqual(failed.json(), { error: 'TRANSLATION_ENGINE_UNAVAILABLE' });
+  assert.deepEqual(engines, ['continuous-nano']);
+  assert.equal(manager.activeSession, null);
+  assert.deepEqual(calls, { factory: 0, create: 0, hangup: 0, bridge: 0 });
+  assert.deepEqual(events, []);
+
+  // A later explicit legacy request is allowed; failure cannot choose it for us.
+  const legacy = await app.inject(request);
+  assert.equal(legacy.statusCode, 200);
+  assert.equal(legacy.json().translationEngine, 'legacy');
+  assert.deepEqual(engines, ['continuous-nano']);
+});
+
+test('continuous-nano waits for its own preflight before preparing the selected phone session', async (t) => {
+  const entered = deferred<void>();
+  const probe = deferred<Awaited<ReturnType<typeof checkTranslationEngine>>>();
+  const engines: string[] = [];
+  const { app, calls, manager, events } = await fixture(
+    t,
+    async () => ready,
+    async (_config, engine) => {
+      engines.push(engine);
+      entered.resolve();
+      return probe.promise;
+    },
+  );
+  const pending = app
+    .inject({
+      ...request,
+      payload: { ...request.payload, translationEngine: 'continuous-nano' },
+    })
+    .then((response) => response);
+  try {
+    await entered.promise;
+    assert.equal(manager.activeSession, null);
+    assert.deepEqual(calls, { factory: 0, create: 0, hangup: 0, bridge: 0 });
+    assert.deepEqual(events, []);
+    const blocked = await app.inject(request);
+    assert.equal(blocked.statusCode, 409);
+    assert.deepEqual(blocked.json(), { error: 'VERIFICATION_IN_PROGRESS' });
+    assert.deepEqual(engines, ['continuous-nano']);
+  } finally {
+    probe.resolve({
+      name: 'nanoTranslation',
+      status: 'passed',
+      code: 'NANO_AND_CONTINUOUS_READY',
+    });
+    await pending;
+  }
+  const chosen = await pending;
+  assert.equal(chosen.statusCode, 200);
+  assert.equal(chosen.json().translationEngine, 'continuous-nano');
+  assert.equal(chosen.json().translationReady, false);
+  assert.equal(manager.activeSession?.translationEngine, 'continuous-nano');
+  assert.deepEqual(calls, { factory: 1, create: 0, hangup: 0, bridge: 0 });
+});
+
+test('continuous-nano preflight exceptions release the gate without creating a session or leaking diagnostics', async (t) => {
+  let checks = 0;
+  const { app, manager, calls, events } = await fixture(
+    t,
+    async () => ready,
+    async (_config, engine) => {
+      assert.equal(engine, 'continuous-nano');
+      checks += 1;
+      if (checks === 1) throw new Error('private model path and diagnostic');
+      return {
+        name: 'nanoTranslation',
+        status: 'passed',
+        code: 'NANO_AND_CONTINUOUS_READY',
+      };
+    },
+  );
+  const nanoRequest = {
+    ...request,
+    payload: { ...request.payload, translationEngine: 'continuous-nano' },
+  };
+  const failed = await app.inject(nanoRequest);
+  assert.equal(failed.statusCode, 500);
+  assert.deepEqual(failed.json(), { error: 'REQUEST_FAILED' });
+  assert.equal(manager.activeSession, null);
+  assert.deepEqual(calls, { factory: 0, create: 0, hangup: 0, bridge: 0 });
+  assert.deepEqual(events, []);
+  const retried = await app.inject(nanoRequest);
+  assert.equal(retried.statusCode, 200);
+  assert.equal(retried.json().translationEngine, 'continuous-nano');
+  assert.equal(checks, 2);
+  assert.deepEqual(calls, { factory: 1, create: 0, hangup: 0, bridge: 0 });
+});
+
 test('unknown engines are rejected without checking providers or preparing a phone session', async (t) => {
   let checks = 0;
   const { app, calls } = await fixture(t, async () => {
@@ -269,7 +378,11 @@ test('provider verification records the selected engine separately from the defa
     headers: request.headers,
   });
   assert.equal(status.json().defaultTranslationEngine, 'legacy');
-  assert.deepEqual(status.json().translationEngines, ['legacy', 'continuous']);
+  assert.deepEqual(status.json().translationEngines, [
+    'legacy',
+    'continuous',
+    'continuous-nano',
+  ]);
   assert.equal(status.json().lastVerification.translationEngine, 'continuous');
 });
 

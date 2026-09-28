@@ -203,6 +203,140 @@ function mediaBytes(phone: Phone): Buffer {
   );
 }
 
+test('Nano candidate suppresses original English audio and keeps reverse Chinese routing', async () => {
+  const calls: string[] = [];
+  const pcm = tone();
+  const f = fixture({
+    sentenceBoundaryDelayMs: 1,
+    localVoice: {
+      ready: Promise.resolve(),
+      async synthesize(text) {
+        calls.push(text);
+        return {
+          pcm,
+          sampleRate: 24000,
+          metrics: { generationMs: 10, audioMs: 200 },
+        };
+      },
+    },
+  });
+  await f.pair();
+  f.provider('local').audio(tone(4800));
+  assert.equal(mediaBytes(f.phones.remote).length, 0);
+  f.provider('remote').audio(tone(4800));
+  assert.equal(mediaBytes(f.phones.local).length, 800);
+  f.provider('local').options.onTranslatedText('Hello, thank you for calling.');
+  await delay(15);
+  assert.deepEqual(calls, ['Hello, thank you for calling.']);
+  const codec = new Pcm24kToPcmu();
+  assert.deepEqual(
+    mediaBytes(f.phones.remote),
+    Buffer.concat([codec.push(pcm), codec.push(Buffer.alloc(384))]),
+  );
+  assert.equal(f.metrics[0].name, 'nano_text_to_audio_ms');
+  assert.equal(f.metrics[0].scope, 'local_synthesis');
+  assert.deepEqual(f.failures, []);
+  f.bridge.close();
+});
+
+test('Nano hangup aborts pending synthesis and discards its late completion', async () => {
+  let resolve: (value: any) => void;
+  let signal: AbortSignal;
+  const f = fixture({
+    sentenceBoundaryDelayMs: 1,
+    localVoice: {
+      ready: Promise.resolve(),
+      synthesize(_text, supplied) {
+        signal = supplied;
+        return new Promise((yes) => {
+          resolve = yes;
+        });
+      },
+    },
+  });
+  await f.pair();
+  f.provider('local').options.onTranslatedText('A complete sentence.');
+  await delay(10);
+  f.bridge.close();
+  assert.equal(signal.aborted, true);
+  assert.ok(f.phones.remote.sent.some((event) => event.event === 'clear'));
+  resolve({
+    pcm: tone(),
+    sampleRate: 24000,
+    metrics: { generationMs: 20, audioMs: 200 },
+  });
+  await delay(5);
+  assert.equal(mediaBytes(f.phones.remote).length, 0);
+  assert.deepEqual(f.failures, []);
+});
+
+test('Nano synthesis queue fails closed instead of dropping or duplicating translated sentences', async () => {
+  const f = fixture({
+    localVoice: {
+      ready: Promise.resolve(),
+      synthesize() {
+        return new Promise(() => {});
+      },
+    },
+  });
+  await f.pair();
+  f.provider('local').options.onTranslatedText(
+    'First. Second. Third. Fourth. Fifth. Sixth',
+  );
+  assert.deepEqual(f.failures, ['nano_synthesis_queue_full:local']);
+  f.assertClosed();
+  assert.equal(mediaBytes(f.phones.remote).length, 0);
+});
+
+test('Nano long waveform waits for playback marks and keeps at most four seconds buffered', async () => {
+  const pcm = tone(6 * 48000);
+  const f = fixture({
+    sentenceBoundaryDelayMs: 1,
+    localVoice: {
+      ready: Promise.resolve(),
+      async synthesize() {
+        return {
+          pcm,
+          sampleRate: 24000,
+          metrics: { generationMs: 1, audioMs: 6000 },
+        };
+      },
+    },
+  });
+  await f.pair();
+  f.provider('local').options.onTranslatedText(
+    'This longer sentence must retain every audio sample.',
+  );
+  await delay(15);
+  assert.equal(mediaBytes(f.phones.remote).length, 32000);
+  const markers = f.phones.remote.sent.filter(
+    (event) => event.event === 'mark',
+  );
+  for (const marker of markers) f.mark('remote', marker.mark.name);
+  await delay(10);
+  assert.equal(mediaBytes(f.phones.remote).length, 48064);
+  assert.deepEqual(f.failures, []);
+  f.bridge.close();
+});
+
+test('Nano failure terminates both legs without falling back to provider audio', async () => {
+  const f = fixture({
+    sentenceBoundaryDelayMs: 1,
+    localVoice: {
+      ready: Promise.resolve(),
+      async synthesize() {
+        throw new Error('PRIVATE_FAILURE');
+      },
+    },
+  });
+  await f.pair();
+  f.provider('local').options.onTranslatedText('This is a sentence.');
+  await delay(10);
+  assert.deepEqual(f.failures, ['nano_synthesis_failed:local']);
+  f.assertClosed();
+  assert.equal(mediaBytes(f.phones.remote).length, 0);
+});
+
 test('continuous providers start only when both authenticated legs exist and direction is fixed', async () => {
   const f = fixture();
   f.attach('local');

@@ -266,6 +266,7 @@ test('invalid options fail before opening a transport', () => {
     { targetLanguage: 'fr' },
     { apiKey: '' },
     { onAudio: undefined },
+    { onTranslatedText: true },
     { onTranscript: true },
     { onError: true },
     { timeoutMs: 0 },
@@ -290,6 +291,63 @@ test('invalid options fail before opening a transport', () => {
     );
   }
   assert.equal(created, 0);
+});
+
+test('required translated text receives raw append-only deltas before optional diagnostics', async () => {
+  const received: string[] = [];
+  const f = fixture({
+    onTranslatedText: (delta) => received.push(`required:${delta}`),
+    onTranscript: (delta) => received.push(`display:${delta}`),
+  });
+  f.acknowledge();
+  await f.client.ready;
+  for (const delta of ['Hello', ', thank', ' you.'])
+    f.socket.receive({ type: 'session.output_transcript.delta', delta });
+  assert.deepEqual(received, [
+    'required:Hello', 'display:Hello',
+    'required:, thank', 'display:, thank',
+    'required: you.', 'display: you.',
+  ]);
+  assert.deepEqual(f.errors, []);
+  f.client.abort();
+});
+
+test('required translated-text callback failure terminates the session and suppresses later output', async () => {
+  const f = fixture({ onTranslatedText: () => { throw new Error('private text'); } });
+  f.acknowledge();
+  await f.client.ready;
+  f.socket.receive({ type: 'session.output_transcript.delta', delta: 'Hello.' });
+  f.socket.receive({ type: 'session.output_audio.delta', delta: 'AAAAAA==' });
+  assert.deepEqual(f.errors, ['TRANSLATED_TEXT_CALLBACK_FAILED']);
+  assert.deepEqual(f.transcripts, []);
+  assert.deepEqual(f.audio, []);
+  assert.equal(f.socket.closeCount, 1);
+  await assert.rejects(f.client.finish(), /^Error: TRANSLATED_TEXT_CALLBACK_FAILED$/);
+});
+
+test('optional caption failure cannot disable required translated text', async () => {
+  const translated: string[] = [];
+  const f = fixture({
+    onTranslatedText: (text) => translated.push(text),
+    onTranscript: () => { throw new Error('display failed'); },
+  });
+  f.acknowledge();
+  await f.client.ready;
+  f.socket.receive({ type: 'session.output_transcript.delta', delta: 'Hello.' });
+  f.socket.receive({ type: 'session.output_transcript.delta', delta: ' Goodbye.' });
+  assert.deepEqual(translated, ['Hello.', ' Goodbye.']);
+  assert.deepEqual(f.errors, []);
+  f.client.abort();
+});
+
+test('abort inside required translated text prevents a diagnostic callback after shutdown', async () => {
+  const f = fixture({ onTranslatedText: () => f.client.abort() });
+  f.acknowledge();
+  await f.client.ready;
+  f.socket.receive({ type: 'session.output_transcript.delta', delta: 'Hello.' });
+  assert.deepEqual(f.transcripts, []);
+  assert.deepEqual(f.errors, []);
+  assert.equal(f.socket.closeCount, 1);
 });
 
 test('ready requires the exact model and target-language acknowledgement', async () => {

@@ -8,6 +8,8 @@ export type ContinuousTranslationOptions = {
   noiseReduction?: 'near_field' | 'far_field' | null;
   proxyUrl?: string;
   onAudio: (pcm: Buffer) => void;
+  /** Append-only translated text; no provider sentence-final event is implied. */
+  onTranslatedText?: (delta: string) => void;
   onTranscript?: (delta: string) => void;
   onError?: (code: string) => void;
   createWebSocket?: (
@@ -93,6 +95,8 @@ export function createContinuousTranslationClient(
     typeof options.apiKey !== 'string' ||
     !options.apiKey.trim() ||
     typeof options.onAudio !== 'function' ||
+    (options.onTranslatedText !== undefined &&
+      typeof options.onTranslatedText !== 'function') ||
     (options.onTranscript !== undefined &&
       typeof options.onTranscript !== 'function') ||
     (options.onError !== undefined && typeof options.onError !== 'function') ||
@@ -267,6 +271,14 @@ export function createContinuousTranslationClient(
     } else if (typeof event.delta !== 'string') {
       fail('INVALID_PROVIDER_TRANSCRIPT');
     } else {
+      try {
+        options.onTranslatedText?.(event.delta);
+      } catch {
+        fail('TRANSLATED_TEXT_CALLBACK_FAILED');
+        return;
+      }
+      // A required text consumer can abort the client while handling a delta.
+      if (state !== 'ready' && state !== 'draining') return;
       try {
         options.onTranscript?.(event.delta);
       } catch {

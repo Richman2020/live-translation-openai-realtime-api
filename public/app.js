@@ -66,6 +66,8 @@
     INVALID_RESPONSE: '服务返回了无法识别的数据。',
     SESSION_UPDATED: '实时翻译会话已确认配置。',
     SESSION_UPDATED_BOTH_LANGUAGES: '中英双向连续翻译会话已确认配置。',
+    NANO_AND_CONTINUOUS_READY: '本机本人声线已预热，中英双向连续翻译连接已就绪。',
+    NANO_READY: '本机本人声线已完成预热。',
     VERIFIED_RESOURCE: '账户资源与配置验证通过。'
   };
   const fields = [
@@ -144,6 +146,15 @@
   function cleanMessage(value, fallback = '操作未完成，请检查连接后重试。') {
     if (typeof value !== 'string' || !value.trim()) return fallback;
     if (errorMessages[value]) return errorMessages[value];
+    if (/^(?:NANOVOICE_|nano_)/i.test(value)) {
+      if (/text_boundary_failed/i.test(value)) return '本人声线译文过长或句子边界无法确认，通话已请求结束。请用较短的完整句子重新测试。';
+      if (/text_too_long|sentence_too_long|unterminated|text_length|max_chars/i.test(value)) return '本人声线等待完整句子时文字过长，通话已请求结束。请用较短的完整句子重新测试。';
+      if (/overflow|backpressure|queue/i.test(value)) return '本人声线合成或播放积压过多，通话已请求结束。请稍后重试或选择其他版本。';
+      if (/timeout/i.test(value)) return '本机本人声线准备或合成超时，请结束后重新验证本人声线实验版。';
+      if (/not_configured|missing|reference|manifest|checkpoint|config|unavailable|not_ready/i.test(value)) return '本机本人声线尚未准备好，请检查本机声线服务与参考声音，再验证本人声线实验版。';
+      if (/closed|connection|socket|exit|worker/i.test(value)) return '本机本人声线服务连接中断或未能启动，请结束后重新验证本人声线实验版。';
+      return '本机本人声线合成未完成，请结束后重新验证本人声线实验版；也可选择其他版本。';
+    }
     if (/^(continuous_input_before_ready_overflow|translation_input_overflow):(local|remote)$/.test(value)) {
       return '翻译准备或恢复耗时过长，输入声音已无法完整保留，通话已请求结束。请重新拨打，并等翻译就绪后再说话。';
     }
@@ -217,12 +228,12 @@
     if (view === 'history') renderHistory();
     window.scrollTo(0, 0);
   }
-  async function api(path, options = {}) {
+  async function api(path, options = {}, timeoutMs) {
     if (!accessToken) throw new Error('本机访问凭据缺失，请通过桌面「AI 电话」重新打开。');
     const controller = new AbortController();
     // Verification allows four sequential requests. Dialing can require a
     // 5-second public probe plus a 15-second engine probe, with transport margin.
-    const timeout = setTimeout(() => controller.abort(), path === '/api/verify' ? 75000 : path === '/api/calls' ? 30000 : 20000);
+    const timeout = setTimeout(() => controller.abort(), timeoutMs ?? (path === '/api/verify' ? 75000 : path === '/api/calls' ? 30000 : 20000));
     try {
       const response = await fetch(path, { ...options, cache: 'no-store', signal: controller.signal, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` } });
       let payload = {}; try { payload = await response.json(); } catch { /* A non-JSON error has a useful HTTP status. */ }
@@ -244,7 +255,7 @@
       throw error;
     } finally { clearTimeout(timeout); }
   }
-  const post = (path, body = {}) => api(path, { method: 'POST', body: JSON.stringify(body) });
+  const post = (path, body = {}, timeoutMs) => api(path, { method: 'POST', body: JSON.stringify(body) }, timeoutMs);
 
   function renderStatus() {
     const configured = state?.configured === true;
@@ -260,7 +271,9 @@
     $('enable-device').disabled = !state || !configured || enabling || busy() || saving || verifying;
     renderTranslationEngine();
     $('start-call').disabled = !configured || !registered || !eventsOnline || busy() || saving || verifying || audioOutput.snapshot.status !== 'idle';
-    $('start-call').querySelector('span').textContent = dialing ? '正在拨号…' : busy() ? '通话进行中' : '拨打电话';
+    $('start-call').querySelector('span').textContent = dialing
+      ? (translationEngine.snapshot.value === 'continuous-nano' && callLifecycle.current?.phase === 'checking' ? '正在准备本人声线…' : '正在拨号…')
+      : busy() ? '通话进行中' : '拨打电话';
     $('phone-number').disabled = busy(); $('erase-number').disabled = busy();
     document.querySelectorAll('.dial-key').forEach(button => { button.disabled = busy(); });
     $('end-call').disabled = (!activeSession && !callLifecycle.current) || (activeSession && terminal(activeSession.status) && !cleanupPending) || ending;
@@ -285,6 +298,9 @@
     $('export-current').disabled = !record?.lines.length;
     const currentState = activeSession?.status || (record?.endedAt ? record.status : '');
     const phase = callLifecycle.current?.phase;
+    const phaseInstruction = phase === 'checking' && translationEngine.snapshot.value === 'continuous-nano'
+      ? '正在准备本人声线，首次可能需要约 2 分钟；准备好后才拨号'
+      : callPhases[phase];
     const readiness = translationReadiness(activeSession);
     const translationRecovering = Boolean(activeSession && !terminal(currentState) && currentState !== 'ending' && !ending && recoveringTranslationRoles.size);
     if (readiness && !cleanupPending) {
@@ -299,7 +315,7 @@
     $('connection-text').textContent = cleanupPending ? '线路关闭待确认' : phase === 'reconnecting' ? '正在恢复音频连接' : translationRecovering ? '正在恢复翻译连接' : readiness && !readiness.ready ? readiness.label : qualityWarning ? '通话中 · 连接质量异常' : readiness?.label || statusNames[currentState] || '等待开始';
     $('connection-status').classList.toggle('active', readiness?.ready === true && !qualityWarning && !translationRecovering && phase !== 'reconnecting');
     document.body.classList.toggle('is-active', readiness?.ready === true);
-    $('bridge-caption').textContent = phase === 'reconnecting' ? '音频恢复中，请暂停说话' : translationRecovering ? '翻译恢复中，请暂停说话' : readiness && !readiness.ready ? '请等翻译就绪后再说话' : readiness?.ready && translationRecoveryHint ? '已恢复，请重说刚才的一句' : readiness?.instruction || (phase === 'microphone' ? callPhases[phase] : currentState === 'ringing' ? '正在呼叫对方，等待接听' : callPhases[phase] || '连接后，听见彼此的语言');
+    $('bridge-caption').textContent = phase === 'reconnecting' ? '音频恢复中，请暂停说话' : translationRecovering ? '翻译恢复中，请暂停说话' : readiness && !readiness.ready ? '请等翻译就绪后再说话' : readiness?.ready && translationRecoveryHint ? '已恢复，请重说刚才的一句' : readiness?.instruction || (phase === 'microphone' ? phaseInstruction : currentState === 'ringing' ? '正在呼叫对方，等待接听' : phaseInstruction || '连接后，听见彼此的语言');
     $('call-timer').textContent = timeText(duration());
     renderAudioOutput();
     renderMicrophoneInput();
@@ -316,12 +332,21 @@
     const select = $('translation-engine');
     for (const option of select.options) option.disabled = !snapshot.available.includes(option.value) && option.value !== snapshot.sessionEngine;
     select.value = snapshot.value; select.disabled = snapshot.locked;
-    $('translation-engine-status').textContent = snapshot.sessionEngine
+    const preparingOwnVoice = snapshot.value === 'continuous-nano' && !activeSession && (verifying || (dialing && callLifecycle.current?.phase === 'checking'));
+    $('translation-engine-status').textContent = preparingOwnVoice
+      ? '正在检查翻译与本机本人声线，首次准备可能需要约 2 分钟；尚未拨出，请等待。'
+      : snapshot.sessionEngine
       ? `本通电话使用：${translationEngineLabel(snapshot.sessionEngine)}。通话结束后才能换版本。`
+      : snapshot.selected === 'continuous-nano' ? '下一通使用本人声线实验版。分句合成会增加等待，请用完整短句测试。'
       : snapshot.selected === 'continuous' ? '下一通使用连续翻译实验版。请与当前版本分两次通话比较效果。' : '下一通使用当前版本。';
+    $('translation-engine-help').textContent = snapshot.value === 'continuous-nano'
+      ? '电脑中文 → 手机英文使用本机本人声线；对方英文 → 电脑中文保留连续翻译原声。等待完整译文句子后合成，会增加等待；无完整句尾时继续等候。拨号前选择，通话中不能切换；来电保持当前版本。'
+      : '拨号前选择，通话中不能切换。用相同内容分两次拨打，比较实际听到的译音和等待。来电保持当前版本。';
     $('verification-engine').textContent = `验证版本：${translationEngineLabel(snapshot.value)}。在工作台的「本次翻译版本」中选择。`;
     const displayEngine = activeSession?.translationEngine || record?.translationEngine || snapshot.value;
-    $('transcript-engine-note').textContent = displayEngine === 'continuous'
+    $('transcript-engine-note').textContent = displayEngine === 'continuous-nano'
+      ? '本人声线版仅提供译文记录，不显示原文；手机英文由本机合成本人声线，电脑中文保留连续翻译原声。文字不代表声音已播放。'
+      : displayEngine === 'continuous'
       ? '连续版目前仅提供译文记录，不显示原文；译音效果请双方实际听取。'
       : '当前版本可显示原文与译文；文字不能代替实际听感。';
     renderAudioDelivery();
@@ -464,8 +489,12 @@
     renderStatus();
   }
   function renderAudioDelivery() {
-    const continuous = (activeSession?.translationEngine || record?.translationEngine || translationEngine.snapshot.value) === 'continuous';
-    $('translation-timing-note').textContent = continuous
+    const engine = activeSession?.translationEngine || record?.translationEngine || translationEngine.snapshot.value;
+    const ownVoice = engine === 'continuous-nano';
+    const continuous = ownVoice || engine === 'continuous';
+    $('translation-timing-note').textContent = ownVoice
+      ? '本人声线等待完整译文句子后合成。合成耗时从句子提交到本机声音生成完成，含合成排队；不含此前等待分句、线路传输及播放，不等于实际电话延迟。回程中文使用连续翻译原声。'
+      : continuous
       ? '连续版会边听边翻译，旧版逐句停说计时不适用。请比较实际开始出声、持续讲话落后和说完后的等待；数据块数不是句数，也不代表双方已经听清。'
       : '计时不含停顿判断、线路传输及设备播放，不等于实际听见的等待时间。线路确认播放后仍需双方检查实际听感。';
     for (const role of ['local', 'remote']) {
@@ -476,7 +505,9 @@
         `${target}：生成 ${counts.generated} ${unit} · 已送出 ${counts.sent} ${unit} · 线路确认播放 ${counts.playback_confirmed} ${unit}${counts.unconfirmed ? ` · 未确认 ${counts.unconfirmed} ${unit}` : ''}${counts.silent ? ` · ${counts.silent} ${unit}未生成声音` : ''}`;
       const timing = translationTiming.get(role);
       const seconds = value => `${(value / 1000).toFixed(2)} 秒`;
-      $(`translation-timing-${role}`).textContent = continuous ? `${target}：连续翻译，不使用旧版逐句停说计时` : !timing ? `${target}：尚无服务端计时` :
+      $(`translation-timing-${role}`).textContent = ownVoice && role === 'local'
+        ? `${target}：${timing ? `最近一次本人声线合成 ${seconds(timing.value)}（含合成排队）` : '等待完整译文句子后合成本人声线，尚无合成计时'}`
+        : continuous ? `${target}：${ownVoice ? '连续翻译原声' : '连续翻译'}，不使用旧版逐句停说计时` : !timing ? `${target}：尚无服务端计时` :
         `${target}最近一句：服务端停说事件 → 首个译音数据 ${seconds(timing.value)}` +
         (timing.parts ? `（等待转写 ${seconds(timing.parts[0])} · 等待发起 ${seconds(timing.parts[1])} · 生成首音 ${seconds(timing.parts[2])}）` : '（分项时间不可用）');
     }
@@ -484,12 +515,15 @@
   function applyTranslationTiming(value) {
     if (!value || !activeSession || value.sessionId !== activeSession.id || terminal(activeSession.status) || activeSession.status === 'ending') return;
     if (activeSession.translationEngine === 'continuous') return;
-    if (!['local', 'remote'].includes(value.role) || value.name !== 'speech_stop_to_first_audio_ms' || value.scope !== 'provider_generation') return;
+    const ownVoice = activeSession.translationEngine === 'continuous-nano';
+    if (ownVoice) {
+      if (value.role !== 'local' || value.name !== 'nano_text_to_audio_ms' || value.scope !== 'local_synthesis') return;
+    } else if (!['local', 'remote'].includes(value.role) || value.name !== 'speech_stop_to_first_audio_ms' || value.scope !== 'provider_generation') return;
     if (!Number.isFinite(value.value) || value.value < 0 || !Number.isFinite(value.at)) return;
     const previous = translationTiming.get(value.role);
     if (previous && value.at < previous.at) return;
     const parts = [value.transcriptionMs, value.queueMs, value.generationMs];
-    const complete = parts.every(part => Number.isFinite(part) && part >= 0) && Math.abs(parts.reduce((sum, part) => sum + part, 0) - value.value) < 1;
+    const complete = !ownVoice && parts.every(part => Number.isFinite(part) && part >= 0) && Math.abs(parts.reduce((sum, part) => sum + part, 0) - value.value) < 1;
     translationTiming.set(value.role, { value: value.value, at: value.at, parts: complete ? parts : null });
     renderAudioDelivery();
   }
@@ -703,7 +737,7 @@
       if (!callLifecycle.isCurrent(attempt)) return;
       audioOutput.refresh();
       callLifecycle.update(attempt, { phase: 'checking' });
-      const created = await post('/api/calls', { to, translationEngine: chosenEngine }); createdId = created.id;
+      const created = await post('/api/calls', { to, translationEngine: chosenEngine }, chosenEngine === 'continuous-nano' ? 150000 : undefined); createdId = created.id;
       if (!createdId || !created.connectionParams) throw new Error('电话服务未返回有效连接信息。');
       if (!callLifecycle.isCurrent(attempt)) { await post(`/api/calls/${encodeURIComponent(createdId)}/hangup`).catch(() => {}); return; }
       callLifecycle.update(attempt, { sessionId: createdId });
@@ -768,7 +802,10 @@
   }
   function exportRecord(item) {
     if (!item?.lines.length) return;
-    const text = ['AI 电话 — 通话文字记录', `翻译版本：${translationEngineLabel(item.translationEngine)}`, `方向：${item.direction === 'inbound' ? '来电' : '拨出'}`, `号码：${item.number}`, `时间：${dateText(item.startedAt)}`, `页面观察时长：${timeText(duration(item))}`, '文字仅用于辅助排查；以双方实际听到的译音为准。', ...(item.translationEngine === 'continuous' ? ['连续版未开启原文转写，此记录仅包含服务返回的译文。'] : []), '', ...orderedTranscriptLines(item.lines).map(line => `[${line.role === 'local' ? '你' : '对方'} · ${line.kind === 'original' ? '原文' : '译文'}${line.final ? '' : ' · 未定稿'}] ${line.text}`)].join('\r\n');
+    const engineNotes = item.translationEngine === 'continuous-nano'
+      ? ['本人声线版未开启原文转写，此记录仅包含服务返回的译文。', '电脑中文 → 手机英文使用本机本人声线；对方英文 → 电脑中文保留连续翻译原声。分句合成会增加等待。']
+      : item.translationEngine === 'continuous' ? ['连续版未开启原文转写，此记录仅包含服务返回的译文。'] : [];
+    const text = ['AI 电话 — 通话文字记录', `翻译版本：${translationEngineLabel(item.translationEngine)}`, `方向：${item.direction === 'inbound' ? '来电' : '拨出'}`, `号码：${item.number}`, `时间：${dateText(item.startedAt)}`, `页面观察时长：${timeText(duration(item))}`, '文字仅用于辅助排查；以双方实际听到的译音为准。', ...engineNotes, '', ...orderedTranscriptLines(item.lines).map(line => `[${line.role === 'local' ? '你' : '对方'} · ${line.kind === 'original' ? '原文' : '译文'}${line.final ? '' : ' · 未定稿'}] ${line.text}`)].join('\r\n');
     const url = URL.createObjectURL(new Blob(['\uFEFF', text], { type: 'text/plain;charset=utf-8' }));
     const link = element('a'); link.href = url; link.download = `AI电话-通话记录-${new Date(item.startedAt).toISOString().replace(/[:.]/g, '-')}.txt`; document.body.append(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 5000);
   }
@@ -814,18 +851,22 @@
   async function verifyConnections() {
     if (verifying || busy() || saving || !state?.configured) return;
     const chosenEngine = translationEngine.snapshot.selected;
-    verifying = true; $('verification-results').replaceChildren(element('p', 'form-intro', `正在验证${translationEngineLabel(chosenEngine)}的账户、号码、电话应用与翻译连接…`)); renderStatus();
+    verifying = true; $('verification-results').replaceChildren(element('p', 'form-intro', chosenEngine === 'continuous-nano'
+      ? '正在验证本人声线实验版的电话配置、双向翻译连接和本机声线；首次预热可能需要约 2 分钟，请等待。'
+      : `正在验证${translationEngineLabel(chosenEngine)}的账户、号码、电话应用与翻译连接…`)); renderStatus();
     try {
-      const result = await post('/api/verify', { translationEngine: chosenEngine });
+      const result = await post('/api/verify', { translationEngine: chosenEngine }, chosenEngine === 'continuous-nano' ? 150000 : undefined);
       const verifiedEngine = result.translationEngine || 'legacy';
       $('verification-results').replaceChildren(element('p', 'form-intro', `本次验证结果：${translationEngineLabel(verifiedEngine)}`));
       if (verifiedEngine !== chosenEngine) $('verification-results').append(element('p', 'field-error', '服务返回的版本与本次选择不同，所选版本尚未确认；请刷新并重新验证。'));
-      const labels = { twilioAccount: 'Twilio 账户', twilioNumber: 'Twilio 号码', twilioApplication: '电话应用', openaiRealtime: '当前版翻译连接', openaiContinuous: '连续翻译连接（双向）' };
+      const labels = { twilioAccount: 'Twilio 账户', twilioNumber: 'Twilio 号码', twilioApplication: '电话应用', openaiRealtime: '当前版翻译连接', openaiContinuous: '连续翻译连接（双向）', nanoTranslation: '本人声线与双向连续翻译', nanoVoice: '本机本人声线' };
       for (const check of result.checks || []) {
         const row = element('div', 'config-check'); row.append(element('span', '', labels[check.name] || check.name), element('span', `check-state ${check.status === 'passed' ? 'ready' : 'needs-attention'}`, { passed: '连接验证通过', failed: '验证未通过', missing: '缺少配置' }[check.status] || '待检查'));
         if (check.code) row.title = cleanMessage(String(check.code)); $('verification-results').append(row);
       }
-      $('verification-results').append(element('p', 'form-intro', '本次仅验证 API 连接。仍需真实电话确认两个语言方向、听感与端到端延迟。'));
+      $('verification-results').append(element('p', 'form-intro', verifiedEngine === 'continuous-nano'
+        ? '本次仅验证翻译连接和本机声线就绪。仍需真实电话确认两个语言方向、本人声线听感与端到端延迟。'
+        : '本次仅验证 API 连接。仍需真实电话确认两个语言方向、听感与端到端延迟。'));
     } catch (error) { $('verification-results').replaceChildren(element('p', 'field-error', cleanMessage(error.message))); }
     finally { verifying = false; renderStatus(); }
   }

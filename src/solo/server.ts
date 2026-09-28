@@ -17,6 +17,7 @@ import {
 import { SessionError, SessionManager, type Role } from './session-manager';
 import { verifyProviders, checkTranslationEngine } from './provider-checks';
 import { checkPublicReadiness } from './public-readiness';
+import { closeNanoVoiceWorker, nanoVoiceStatus } from './nano-runtime';
 import {
   isTranslationEngine,
   TRANSLATION_ENGINES,
@@ -68,6 +69,7 @@ export async function buildSoloServer(
     lastVerification,
     translationEngines: TRANSLATION_ENGINES,
     defaultTranslationEngine: 'legacy',
+    nanoVoice: nanoVoiceStatus(),
   });
   function requestedEngine(body: unknown): TranslationEngine {
     if (
@@ -221,7 +223,7 @@ export async function buildSoloServer(
           throw new SessionError(readiness.code, 503);
         // Check both candidate language sessions before a real call is created.
         // A successful legacy probe cannot authorize a different endpoint/model.
-        if (engine === 'continuous') {
+        if (engine === 'continuous' || engine === 'continuous-nano') {
           const translation = await (
             options.translationReadinessChecker || checkTranslationEngine
           )(configStore.value, engine);
@@ -392,6 +394,7 @@ export async function buildSoloServer(
   });
   app.addHook('onClose', async () => {
     manager.off('event', broadcast);
+    closeNanoVoiceWorker();
   });
   return app;
 }

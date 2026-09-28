@@ -217,6 +217,111 @@ class PrivateFixtureTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Exactly one"):
             sample.synthetic_source(path, manifest)
 
+    def controlled_fixture(self, translations=None):
+        translations = translations or ["不，我明天有空。"]
+        path = self.directory / "legacy.wav"
+        info = self.write_wave(path, 24000)
+        fixture = self.directory / "06.pcmu"
+        fixture.write_bytes(b"\xff" * 800)
+        fixture_manifest = self.directory / "fixture.json"
+        fixture_manifest.write_text(json.dumps({
+            "version": "phone-quality-inputs/1", "kind": "human",
+            "consentForProjectEvaluation": True, "format": "PCMU_8000_mono",
+            "cases": [{"inputFile": fixture.name, "inputSha256": sample.sha256(fixture),
+                       "role": "remote", "targetLanguage": "zh"}]}), encoding="utf-8")
+        result = {"failure": None, "role": "remote", "realPhone": False,
+                  "format": "PCMU_8000_mono", "model": "gpt-realtime-1.5",
+                  "inputSha256": sample.sha256(fixture), "inputBytes": 800,
+                  "oldCompletedResponses": len(translations),
+                  "legacy": {"outputBytes": info["frames"] // 3 - 80, "outputDurationMs": 90,
+                             "transcripts": [{"kind": "translation", "final": False,
+                                              "text": "ignored partial"}] + [
+                                 {"kind": "translation", "final": True, "text": text}
+                                 for text in translations]}}
+        result_path = self.directory / "result.json"
+        result_path.write_text(json.dumps(result), encoding="utf-8")
+        data = {"version": "own-voice-openai-controlled-source/1", "provider": "OpenAI",
+                "language": "zh-CN", "personalVoice": False, "conversionOffline": True,
+                "outputRole": "legacy", "requestedVoice": "marin",
+                "voiceEvidence": "configuration-declaration-not-session-observed",
+                "model": result["model"], "actualReturnedTranslation": "\n".join(translations)}
+        for key, bound in (("sourceWav", path), ("comparisonResult", result_path),
+                           ("sourceFixture", fixture), ("sourceFixtureManifest", fixture_manifest)):
+            data[key] = {"path": bound.name, "sha256": sample.sha256(bound)}
+        manifest = self.directory / "controlled-source.json"
+        manifest.write_text(json.dumps(data), encoding="utf-8")
+        return path, manifest, data, result
+
+    def test_controlled_source_binds_existing_api_audio_without_claiming_observed_voice(self):
+        path, manifest, data, _ = self.controlled_fixture()
+        result = sample.synthetic_source(path, manifest)
+        self.assertEqual(result["kind"], "HASH_BOUND_OPENAI_CONTROLLED_SYNTHETIC")
+        self.assertEqual(result["text"], data["actualReturnedTranslation"])
+        self.assertEqual(result["voice_evidence"], data["voiceEvidence"])
+        self.assertEqual(result["source_fixture_sha256"], data["sourceFixture"]["sha256"])
+        self.assertTrue(result["narrowband_source"])
+
+    def test_controlled_source_preserves_every_completed_translation_in_order(self):
+        texts = ["你好，我叫汤姆。", "我明天下午三点需要帮助。", "请先告诉我总价。"]
+        path, manifest, _, _ = self.controlled_fixture(texts)
+        self.assertEqual(sample.synthetic_source(path, manifest)["text"], "\n".join(texts))
+
+    def test_controlled_source_rejects_each_changed_bound_file(self):
+        for key in ("sourceWav", "comparisonResult", "sourceFixture", "sourceFixtureManifest"):
+            with self.subTest(key=key):
+                path, manifest, data, _ = self.controlled_fixture()
+                bound = self.directory / data[key]["path"]
+                bound.write_bytes(bound.read_bytes() + b"changed")
+                with self.assertRaisesRegex(ValueError, "changed since"):
+                    sample.synthetic_source(path, manifest)
+
+    def test_controlled_source_rejects_wrong_text_model_voice_and_provenance_flags(self):
+        invalid = {"actualReturnedTranslation": "错误译文", "model": "another-model",
+                   "requestedVoice": "my-clone", "voiceEvidence": "session-observed",
+                   "conversionOffline": False, "personalVoice": True, "outputRole": "continuous"}
+        for key, value in invalid.items():
+            with self.subTest(key=key):
+                path, manifest, data, _ = self.controlled_fixture()
+                data[key] = value
+                manifest.write_text(json.dumps(data), encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    sample.synthetic_source(path, manifest)
+
+    def test_controlled_source_rejects_invalid_comparison_even_when_rebound(self):
+        for key, value in (("failure", "FAILED"), ("realPhone", True), ("role", "local"),
+                           ("inputSha256", "0" * 64), ("inputBytes", 1),
+                           ("oldCompletedResponses", 2)):
+            with self.subTest(key=key):
+                path, manifest, data, result = self.controlled_fixture()
+                result[key] = value
+                result_path = self.directory / "result.json"
+                result_path.write_text(json.dumps(result), encoding="utf-8")
+                data["comparisonResult"]["sha256"] = sample.sha256(result_path)
+                manifest.write_text(json.dumps(data), encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    sample.synthetic_source(path, manifest)
+
+    def test_controlled_source_rejects_unconsented_fixture_even_when_rebound(self):
+        path, manifest, data, _ = self.controlled_fixture()
+        bound = self.directory / "fixture.json"
+        fixture = json.loads(bound.read_text(encoding="utf-8"))
+        fixture["consentForProjectEvaluation"] = False
+        bound.write_text(json.dumps(fixture), encoding="utf-8")
+        data["sourceFixtureManifest"]["sha256"] = sample.sha256(bound)
+        manifest.write_text(json.dumps(data), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "authorized"):
+            sample.synthetic_source(path, manifest)
+
+    def test_controlled_source_rejects_wrong_wave_duration_even_when_rebound(self):
+        path, manifest, data, result = self.controlled_fixture()
+        result["legacy"]["outputDurationMs"] = 200
+        result_path = self.directory / "result.json"
+        result_path.write_text(json.dumps(result), encoding="utf-8")
+        data["comparisonResult"]["sha256"] = sample.sha256(result_path)
+        manifest.write_text(json.dumps(data), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "duration"):
+            sample.synthetic_source(path, manifest)
+
     def candidate_fixture(self):
         report = {"schema": "own-voice-offline-sample/1.0", "status": "completed",
                   "scope": "LOCAL_FULL_FILE_SAMPLE_NOT_PHONE_OR_STREAMING_ACCEPTANCE",

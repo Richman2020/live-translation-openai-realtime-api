@@ -14,6 +14,7 @@ import {
   type ContinuousTranslationClient,
 } from './continuous-translation-client';
 import type { TranslationEngine } from './translation-engine';
+import { checkNanoVoice } from './nano-runtime';
 
 type Check = {
   name: string;
@@ -183,12 +184,28 @@ export function checkRealtime(
   });
 }
 
-export function checkTranslationEngine(
+export async function checkTranslationEngine(
   config: SoloConfig,
   engine: TranslationEngine,
   createSocket?: CreateSocket,
   timeoutMs = 15000,
 ): Promise<Check> {
+  if (engine === 'continuous-nano') {
+    const local = await checkNanoVoice();
+    if (local.status !== 'passed') return local;
+    const translation = await checkContinuousRealtime(
+      config,
+      createSocket,
+      timeoutMs,
+    );
+    return translation.status === 'passed'
+      ? {
+          name: 'nanoTranslation',
+          status: 'passed',
+          code: 'NANO_AND_CONTINUOUS_READY',
+        }
+      : translation;
+  }
   if (engine === 'continuous')
     return checkContinuousRealtime(config, createSocket, timeoutMs);
   if (engine === 'legacy')
@@ -310,7 +327,7 @@ export async function verifyProviders(
   }
   checks.push(
     (
-      engine === 'continuous'
+      engine !== 'legacy'
         ? has('OPENAI_API_KEY')
         : has(
             'OPENAI_API_KEY',
@@ -320,7 +337,11 @@ export async function verifyProviders(
     )
       ? await checkEngine(config, engine)
       : {
-          name: engine === 'continuous' ? 'openaiContinuous' : 'openaiRealtime',
+          name: {
+            'continuous-nano': 'nanoTranslation',
+            continuous: 'openaiContinuous',
+            legacy: 'openaiRealtime',
+          }[engine],
           status: 'missing',
           code: 'CONFIGURATION_REQUIRED',
         },
