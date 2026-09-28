@@ -15,6 +15,7 @@ import {
 } from './continuous-translation-client';
 import type { TranslationEngine } from './translation-engine';
 import { checkNanoVoice } from './nano-runtime';
+import { checkRemoteCaption } from './remote-caption-client';
 
 type Check = {
   name: string;
@@ -51,10 +52,11 @@ export async function checkContinuousRealtime(
   config: SoloConfig,
   createSocket: CreateSocket = (url, options) => new WebSocket(url, options),
   timeoutMs = 15000,
+  targetLanguages: ('en' | 'zh')[] = ['en', 'zh'],
 ): Promise<Check> {
   const clients: ContinuousTranslationClient[] = [];
   try {
-    for (const targetLanguage of ['en', 'zh'] as const)
+    for (const targetLanguage of targetLanguages)
       clients.push(
         createContinuousTranslationClient({
           apiKey: config.OPENAI_API_KEY,
@@ -69,7 +71,10 @@ export async function checkContinuousRealtime(
     return {
       name: 'openaiContinuous',
       status: 'passed',
-      code: 'SESSION_UPDATED_BOTH_LANGUAGES',
+      code:
+        targetLanguages.length === 2
+          ? 'SESSION_UPDATED_BOTH_LANGUAGES'
+          : 'SESSION_UPDATED_ENGLISH',
     };
   } catch (error) {
     // Never surface provider payloads, credential-bearing transport errors,
@@ -190,6 +195,21 @@ export async function checkTranslationEngine(
   createSocket?: CreateSocket,
   timeoutMs = 15000,
 ): Promise<Check> {
+  if (engine === 'nano-captions') {
+    const local = await checkNanoVoice();
+    if (local.status !== 'passed') return local;
+    const [translation, caption] = await Promise.all([
+      checkContinuousRealtime(config, createSocket, timeoutMs, ['en']),
+      checkRemoteCaption(config, createSocket, timeoutMs),
+    ]);
+    if (translation.status !== 'passed') return translation;
+    if (caption.status !== 'passed') return caption;
+    return {
+      name: 'nanoCaptions',
+      status: 'passed',
+      code: 'NANO_CAPTIONS_READY',
+    };
+  }
   if (engine === 'continuous-nano') {
     const local = await checkNanoVoice();
     if (local.status !== 'passed') return local;
@@ -338,6 +358,7 @@ export async function verifyProviders(
       ? await checkEngine(config, engine)
       : {
           name: {
+            'nano-captions': 'nanoCaptions',
             'continuous-nano': 'nanoTranslation',
             continuous: 'openaiContinuous',
             legacy: 'openaiRealtime',

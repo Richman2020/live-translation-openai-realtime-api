@@ -223,6 +223,36 @@ test('continuous success snapshots the chosen engine and a busy request cannot c
   assert.equal(manager.activeSession?.translationEngine, 'continuous');
 });
 
+test('caption candidate must pass its selected provider check before any phone session', async (t) => {
+  let passed = false;
+  const engines: string[] = [];
+  const { app, manager, calls } = await fixture(
+    t,
+    async () => ready,
+    async (_config, engine) => {
+      engines.push(engine);
+      return {
+        name: 'nanoCaptions',
+        status: passed ? 'passed' : 'failed',
+        code: passed ? 'NANO_CAPTIONS_READY' : 'CAPTION_UNAVAILABLE',
+      };
+    },
+  );
+  const chosenRequest = {
+    ...request,
+    payload: { ...request.payload, translationEngine: 'nano-captions' },
+  };
+  const failed = await app.inject(chosenRequest);
+  assert.equal(failed.statusCode, 503);
+  assert.equal(manager.activeSession, null);
+  assert.equal(calls.factory, 0);
+  passed = true;
+  const success = await app.inject(chosenRequest);
+  assert.equal(success.statusCode, 200);
+  assert.equal(manager.activeSession?.translationEngine, 'nano-captions');
+  assert.deepEqual(engines, ['nano-captions', 'nano-captions']);
+});
+
 test('continuous-nano failed preflight creates no phone session and never silently selects another engine', async (t) => {
   const engines: string[] = [];
   const { app, calls, manager, events } = await fixture(
@@ -382,6 +412,7 @@ test('provider verification records the selected engine separately from the defa
     'legacy',
     'continuous',
     'continuous-nano',
+    'nano-captions',
   ]);
   assert.equal(status.json().lastVerification.translationEngine, 'continuous');
 });

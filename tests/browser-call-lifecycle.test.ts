@@ -567,7 +567,7 @@ async function pageFixture(requestMedia: (constraints: unknown) => Promise<unkno
       if (failure === 'timeout') throw Object.assign(new Error('private timeout details'), { name: 'AbortError' });
       if (failure) return { ok: false, status: failure.status, json: async () => ({ error: failure.error }) };
       let payload: any = { ok: true };
-      if (path === '/api/status') payload = { configured: true, activeSession, checks: [], translationEngines: ['legacy', 'continuous', 'continuous-nano'], defaultTranslationEngine: 'legacy' };
+      if (path === '/api/status') payload = { configured: true, activeSession, checks: [], translationEngines: ['legacy', 'continuous', 'continuous-nano', 'nano-captions'], defaultTranslationEngine: 'legacy' };
       if (path === '/api/token') payload = { token: 'offline-sdk-token' };
       if (path === '/api/calls') {
         activeSession = { id: `session-${++sessionCounter}`, status: 'connecting', direction: 'outbound', to: '+12125551234', translationEngine: JSON.parse(options.body).translationEngine || 'legacy', translationReady: false };
@@ -575,7 +575,7 @@ async function pageFixture(requestMedia: (constraints: unknown) => Promise<unkno
       }
       if (path === '/api/verify') {
         const translationEngine = JSON.parse(options.body).translationEngine || 'legacy';
-        payload = { translationEngine, checks: [{ name: translationEngine === 'continuous-nano' ? 'nanoTranslation' : translationEngine === 'continuous' ? 'openaiContinuous' : 'openaiRealtime', status: 'passed', code: translationEngine === 'continuous-nano' ? 'NANO_AND_CONTINUOUS_READY' : translationEngine === 'continuous' ? 'SESSION_UPDATED_BOTH_LANGUAGES' : 'SESSION_UPDATED' }] };
+        payload = { translationEngine, checks: [{ name: translationEngine === 'nano-captions' ? 'nanoCaptions' : translationEngine === 'continuous-nano' ? 'nanoTranslation' : translationEngine === 'continuous' ? 'openaiContinuous' : 'openaiRealtime', status: 'passed', code: translationEngine === 'nano-captions' ? 'NANO_CAPTIONS_READY' : translationEngine === 'continuous-nano' ? 'NANO_AND_CONTINUOUS_READY' : translationEngine === 'continuous' ? 'SESSION_UPDATED_BOTH_LANGUAGES' : 'SESSION_UPDATED' }] };
       }
       if (path.endsWith('/hangup')) activeSession = null;
       return { ok: true, json: async () => payload };
@@ -610,6 +610,9 @@ async function pageFixture(requestMedia: (constraints: unknown) => Promise<unkno
     inputChanged() { mediaDevices.emit('devicechange'); },
     transcriptEvent(value: Record<string, unknown>) {
       sources[0].handlers.get('transcript')({ data: JSON.stringify({ sessionId: activeSession?.id, at: '2026-09-26T01:00:00.000Z', ...value }) });
+    },
+    captionEvent(value: Record<string, unknown>) {
+      sources[0].handlers.get('caption-status')({ data: JSON.stringify({ sessionId: activeSession?.id, ...value }) });
     },
     translationEvent(value: Record<string, unknown>) {
       sources[0].handlers.get('translation-connection')({ data: JSON.stringify(value) });
@@ -812,13 +815,13 @@ test('own voice page requests, readiness, records and exports preserve its disti
   assert.match(f.element('history-list').children[0].children[1].textContent, /本人声线实验版/);
 });
 
-test('own voice warmup keeps selection locked and late preflight cannot revive a cancelled call', async () => {
+for (const engine of ['continuous-nano', 'nano-captions']) test(`${engine} warmup keeps selection locked and late preflight cannot revive a cancelled call`, async () => {
   const pending = deferred<void>();
   const stream = streamFixture();
   const f = await pageFixture(async () => stream.stream, undefined, {
     beforeResponse: async path => { if (path === '/api/calls') await pending.promise; },
   });
-  f.element('translation-engine').value = 'continuous-nano';
+  f.element('translation-engine').value = engine;
   f.element('translation-engine').events.change();
   const dialing = f.element('start-call').events.click();
   await new Promise(resolve => setImmediate(resolve));
@@ -838,6 +841,177 @@ test('own voice warmup keeps selection locked and late preflight cannot revive a
   assert.ok(hangup);
   assert.equal(f.requestTimeout(hangup.slice(5)).delay, 20000);
   assert.equal(f.element('start-call').disabled, false);
+});
+
+test('caption mode sends its engine, verifies it and reports original audio separately from text', async () => {
+  const f = await pageFixture(async () => streamFixture().stream);
+  assert.equal(f.element('translation-engine').value, 'legacy');
+  f.element('translation-engine').value = 'nano-captions';
+  f.element('translation-engine').events.change();
+  assert.match(f.element('translation-engine-help').textContent, /英文原声直接送到电脑.*不生成中文声音/);
+  assert.equal(f.element('return-audio-label').textContent, 'English 原声 ＋ 中文字幕');
+  assert.equal(f.element('connection-mode-label').textContent, '本人英文本音 · 原声与字幕');
+  assert.match(f.element('transcript-subtitle').textContent, /直接听英文原声/);
+  await f.element('verify-connections').events.click();
+  assert.equal(f.requestBodies.find(entry => entry.path === '/api/verify')?.body.translationEngine, 'nano-captions');
+  assert.equal(f.requestTimeout('/api/verify').delay, 150000);
+  assert.match(f.element('verification-results').children[0].textContent, /英文原声＋中文字幕/);
+  assert.equal(f.element('verification-results').children[1].children[0].textContent, '本人声线、出程翻译与回程字幕');
+  assert.match(f.element('verification-results').children[1].title, /本人声线.*回程字幕连接已就绪/);
+  await f.element('start-call').events.click();
+  assert.equal(f.requestBodies.find(entry => entry.path === '/api/calls')?.body.translationEngine, 'nano-captions');
+  assert.equal(f.requestTimeout('/api/calls').delay, 150000);
+  f.callEvent({ status: 'active', translationReady: true });
+  assert.equal(f.element('connection-text').textContent, '本人声线与英文原声已就绪');
+  assert.equal(f.element('audio-delivery-heading').textContent, '声音传送与字幕处理状态');
+  assert.match(f.element('audio-delivery-remote').textContent, /英文原声.*直接转发.*不生成中文声音/);
+  assert.doesNotMatch(f.element('audio-delivery-remote').textContent, /中文 → 电脑|生成 \d/);
+  f.metricEvent({ role: 'local', name: 'nano_text_to_audio_ms', scope: 'local_synthesis', value: 1234 });
+  assert.match(f.element('translation-timing-local').textContent, /本人声线合成 1\.23 秒/);
+  f.metricEvent({ role: 'remote', name: 'nano_text_to_audio_ms', scope: 'local_synthesis', value: 4567 });
+  assert.match(f.element('translation-timing-remote').textContent, /尚无字幕延迟测量/);
+  f.audioEvent({ role: 'remote', recipientRole: 'local', generatedBytes: 0, sentBytes: 160, stage: 'sent' });
+  assert.doesNotMatch(f.element('audio-delivery-remote').textContent, /已送出 1|生成 1/);
+  await f.element('end-call').events.click();
+});
+
+test('caption status is separate, safe, session-scoped and recovered from a status snapshot', async () => {
+  const f = await pageFixture(async () => streamFixture().stream);
+  f.element('translation-engine').value = 'nano-captions';
+  f.element('translation-engine').events.change();
+  await f.element('start-call').events.click();
+  f.callEvent({ status: 'active', translationReady: true, captionState: 'connecting' });
+  assert.equal(f.element('caption-status').hidden, false);
+  assert.match(f.element('caption-status').textContent, /字幕连接准备中/);
+  f.captionEvent({ state: 'ready', sessionId: 'old-session' });
+  assert.match(f.element('caption-status').textContent, /字幕连接准备中/);
+  f.captionEvent({ state: 'invented', code: 'private-provider-detail' });
+  assert.match(f.element('caption-status').textContent, /字幕连接准备中/);
+  f.captionEvent({ state: 'ready' });
+  assert.match(f.element('caption-status').textContent, /字幕连接已就绪/);
+  f.captionEvent({ state: 'failed', code: 'private-provider-detail' });
+  assert.match(f.element('caption-status').textContent, /字幕暂不可用.*英文原声继续传送.*通话仍可继续/);
+  assert.doesNotMatch(f.element('caption-status').textContent, /private-provider-detail/);
+  assert.equal(f.element('connection-text').textContent, '本人声线与英文原声已就绪');
+  assert.equal(f.element('end-call').disabled, false);
+  assert.equal(f.requests.some(path => path.endsWith('/hangup')), false);
+  f.translationEvent({ sessionId: 'session-1', role: 'remote', state: 'disconnected' });
+  assert.equal(f.element('connection-text').textContent, '本人声线与英文原声已就绪');
+  f.translationEvent({ sessionId: 'session-1', role: 'local', state: 'disconnected' });
+  assert.equal(f.element('connection-text').textContent, '正在恢复翻译连接');
+  f.translationEvent({ sessionId: 'session-1', role: 'local', state: 'ready' });
+  assert.match(f.element('bridge-caption').textContent, /请重说/);
+  f.transcriptEvent({ id: 'remote:translation:recovery_caption:0', role: 'remote', kind: 'translation', text: '回程字幕。', final: true });
+  assert.match(f.element('bridge-caption').textContent, /请重说/);
+  f.transcriptEvent({ id: 'local:translation:recovery_voice:0', role: 'local', kind: 'translation', text: 'Please repeat.', final: true });
+  assert.doesNotMatch(f.element('bridge-caption').textContent, /请重说/);
+  f.callEvent({ captionState: 'ready' });
+  await f.pollStatus();
+  assert.match(f.element('caption-status').textContent, /字幕连接已就绪/);
+  f.callEvent({ status: 'completed' });
+  f.captionEvent({ state: 'failed', sessionId: 'session-1' });
+  assert.match(f.element('caption-status').textContent, /通话已结束/);
+  await f.element('start-call').events.click();
+  assert.match(f.element('caption-status').textContent, /字幕连接准备中/);
+  await f.element('end-call').events.click();
+});
+
+test('caption drafts pair English with Chinese even with original preference off, including history and export', async () => {
+  const f = await pageFixture(async () => streamFixture().stream);
+  f.element('save-history-toggle').events.click();
+  f.element('show-original-toggle').events.click();
+  f.element('translation-engine').value = 'nano-captions';
+  f.element('translation-engine').events.change();
+  await f.element('start-call').events.click();
+  const original = { id: 'remote:original:caption_a:0', role: 'remote', kind: 'original' };
+  const translation = { id: 'remote:translation:caption_a:0', role: 'remote', kind: 'translation' };
+  f.transcriptEvent({ ...translation, text: '五点', final: false });
+  f.transcriptEvent({ ...original, text: 'Not five.', final: true });
+  const rows = () => f.element('transcript').children;
+  assert.equal(rows().length, 2);
+  assert.equal(rows()[0].dataset.transcriptId, original.id);
+  assert.equal(rows()[0].className.split(/\s+/).includes('original-entry'), false);
+  assert.equal(rows()[0].className.split(/\s+/).includes('caption-original-entry'), true);
+  assert.equal(rows()[1].children[0].children[2].textContent, '更新中');
+  f.transcriptEvent({ ...translation, text: '不是五点。', final: true });
+  assert.equal(rows().length, 2);
+  assert.equal(rows()[1].children[0].children[2].textContent, '');
+  f.element('export-current').events.click();
+  const text = await f.exports[0].text();
+  assert.match(text, /翻译版本：英文原声＋中文字幕/);
+  assert.match(text, /电脑听英文原声，手机听本人英文本音/);
+  assert.match(text, /对方英文原声直接送到电脑，不生成中文声音/);
+  assert.match(text, /\[对方 · 原文\] Not five\.\r\n\[对方 · 译文\] 不是五点。/);
+  assert.doesNotMatch(text, /以双方实际听到的译音为准|未开启原文转写|未定稿\]/);
+  f.callEvent({ status: 'completed' });
+  assert.equal(f.history()[0].translationEngine, 'nano-captions');
+  const historyRows = f.element('history-detail').children.slice(1);
+  assert.equal(historyRows[0].dataset.transcriptId, original.id);
+  assert.equal(historyRows[0].className.split(/\s+/).includes('original-entry'), false);
+  assert.equal(historyRows[1].children[1].children[0].textContent, '不是五点。');
+});
+
+test('caption ASR turns use stable source time across late completions, paired translations, history and export', async () => {
+  const f = await pageFixture(async () => streamFixture().stream);
+  f.element('save-history-toggle').events.click();
+  f.element('translation-engine').value = 'nano-captions';
+  f.element('translation-engine').events.change();
+  await f.element('start-call').events.click();
+  const emit = (id: string, kind: string, at: number, text: string) => f.transcriptEvent({ id: `remote:${kind}:${id}:0`, role: 'remote', kind, at, text, final: true });
+  const ids = () => f.element('transcript').children.map((row: any) => row.dataset.transcriptId);
+  emit('second', 'original', 2000, 'Second statement.');
+  f.transcriptEvent({ id: 'continuous_local_0', role: 'local', kind: 'translation', at: 1500, text: 'Local response.', final: false });
+  const local = f.element('transcript').children[1];
+  emit('first', 'original', 1000, 'First statement.');
+  assert.deepEqual(ids(), ['remote:original:first:0', 'continuous_local_0', 'remote:original:second:0']);
+  emit('second', 'translation', 2000, '第二句。');
+  emit('first', 'translation', 1000, '第一句。');
+  const expected = ['remote:original:first:0', 'remote:translation:first:0', 'continuous_local_0', 'remote:original:second:0', 'remote:translation:second:0'];
+  assert.deepEqual(ids(), expected);
+  assert.equal(f.element('transcript').children[2], local, 'unchanged local row is reused');
+  f.element('export-current').events.click();
+  const text = await f.exports[0].text();
+  assert.match(text, /\[对方 · 原文\] First statement\.\r\n\[对方 · 译文\] 第一句。\r\n\[你 · 译文 · 未定稿\] Local response\.\r\n\[对方 · 原文\] Second statement\.\r\n\[对方 · 译文\] 第二句。/);
+  f.callEvent({ status: 'completed' });
+  assert.deepEqual(f.element('history-detail').children.slice(1).map((row: any) => row.dataset.transcriptId), expected);
+});
+
+test('caption timestamp updates reorder an existing paired DOM group without duplicate rows', async () => {
+  const f = await pageFixture(async () => streamFixture().stream);
+  f.element('translation-engine').value = 'nano-captions';
+  f.element('translation-engine').events.change();
+  await f.element('start-call').events.click();
+  f.transcriptEvent({ id: 'remote:original:second:0', role: 'remote', kind: 'original', at: 2000, text: 'Second.', final: true });
+  f.transcriptEvent({ id: 'remote:translation:first:0', role: 'remote', kind: 'translation', at: 3000, text: '第一', final: false });
+  f.transcriptEvent({ id: 'remote:translation:first:0', role: 'remote', kind: 'translation', at: 1000, text: '第一句。', final: true });
+  assert.deepEqual(f.element('transcript').children.map((row: any) => row.dataset.transcriptId), ['remote:translation:first:0', 'remote:original:second:0']);
+  f.transcriptEvent({ id: 'remote:original:first:0', role: 'remote', kind: 'original', at: 1000, text: 'First.', final: true });
+  assert.deepEqual(f.element('transcript').children.map((row: any) => row.dataset.transcriptId), ['remote:original:first:0', 'remote:translation:first:0', 'remote:original:second:0']);
+  await f.element('end-call').events.click();
+});
+
+test('legacy transcript turns retain first arrival when timestamps arrive out of order', async () => {
+  const f = await pageFixture(async () => streamFixture().stream);
+  await f.element('start-call').events.click();
+  for (const [id, at] of [['second', 2000], ['first', 1000]]) {
+    f.transcriptEvent({ id: `remote:original:${id}:0`, role: 'remote', kind: 'original', at, text: String(id), final: true });
+  }
+  assert.deepEqual(f.element('transcript').children.map((row: any) => row.dataset.transcriptId), ['remote:original:second:0', 'remote:original:first:0']);
+  await f.element('end-call').events.click();
+});
+
+test('incoming legacy calls ignore caption events and retain the next outgoing caption choice', async () => {
+  const f = await pageFixture(async () => streamFixture().stream);
+  f.element('translation-engine').value = 'nano-captions';
+  f.element('translation-engine').events.change();
+  f.incoming();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.element('translation-engine').value, 'legacy');
+  f.captionEvent({ state: 'failed' });
+  assert.equal(f.element('caption-status').hidden, true);
+  assert.equal(f.element('return-audio-label').textContent, 'English → 中文');
+  f.callEvent({ status: 'completed' });
+  assert.equal(f.element('translation-engine').value, 'nano-captions');
 });
 
 test('own voice timing accepts only local synthesis metrics and never presents legacy turn latency', async () => {

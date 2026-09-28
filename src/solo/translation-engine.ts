@@ -2,6 +2,7 @@ export const TRANSLATION_ENGINES = [
   'legacy',
   'continuous',
   'continuous-nano',
+  'nano-captions',
 ] as const;
 export type TranslationEngine = (typeof TRANSLATION_ENGINES)[number];
 

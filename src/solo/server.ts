@@ -223,7 +223,7 @@ export async function buildSoloServer(
           throw new SessionError(readiness.code, 503);
         // Check both candidate language sessions before a real call is created.
         // A successful legacy probe cannot authorize a different endpoint/model.
-        if (engine === 'continuous' || engine === 'continuous-nano') {
+        if (engine !== 'legacy') {
           const translation = await (
             options.translationReadinessChecker || checkTranslationEngine
           )(configStore.value, engine);

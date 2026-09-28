@@ -7,6 +7,11 @@ import {
 } from './continuous-translation-client';
 import { Pcm24kToPcmu, PcmuToPcm24k } from './translation-pcm';
 import { createNanoTextCommitter } from './nano-text-committer';
+import {
+  createRemoteCaptionClient,
+  type RemoteCaptionClient,
+  type RemoteCaptionOptions,
+} from './remote-caption-client';
 import type {
   TranscriptEvent,
   TranslationAudioDiagnostic,
@@ -33,6 +38,9 @@ export type ContinuousTranslationBridgeOptions = TranslationBridgeOptions & {
   /** Explicit one-way candidate. The local provider audio is never forwarded. */
   localVoice?: LocalVoiceSynthesizer;
   sentenceBoundaryDelayMs?: number;
+  /** Remote PCMU goes straight to the headset; ASR/text is an independent branch. */
+  remoteCaptions?: boolean;
+  createCaptionClient?: (options: RemoteCaptionOptions) => RemoteCaptionClient;
 };
 
 type Phone = {
@@ -61,6 +69,7 @@ type Delivery = {
   pendingWrites: number;
   sentReported: boolean;
   acknowledged: boolean;
+  sealed: boolean;
   timer: ReturnType<typeof setTimeout>;
 };
 
@@ -148,6 +157,22 @@ export class ContinuousTranslationBridge {
 
   private readonly nanoCommitter?: ReturnType<typeof createNanoTextCommitter>;
 
+  private captionClient?: RemoteCaptionClient;
+
+  private captionReady = false;
+
+  private captionFailed = false;
+
+  private readonly captionInput = new PcmuToPcm24k();
+
+  private captionPending: Buffer[] = [];
+
+  private captionPendingBytes = 0;
+
+  private directDelivery?: Delivery;
+
+  private directMarkTimer?: ReturnType<typeof setTimeout>;
+
   constructor(private readonly options: ContinuousTranslationBridgeOptions) {
     const timeout = options.playbackTimeoutMs ?? 20000;
     if (!Number.isFinite(timeout) || timeout < 1 || timeout > 120000)
@@ -210,7 +235,9 @@ export class ContinuousTranslationBridge {
       this.started = true;
       for (const source of ROLES) {
         if (this.closed) break;
-        this.startProvider(source);
+        if (source === 'remote' && this.options.remoteCaptions)
+          this.startCaptions();
+        else this.startProvider(source);
       }
     }
   }
@@ -296,6 +323,96 @@ export class ContinuousTranslationBridge {
     }
   }
 
+  private captionState(state: 'connecting' | 'ready' | 'failed'): void {
+    try {
+      this.options.onCaptionState?.({ state });
+    } catch {
+      // Display failure must not affect original audio.
+    }
+  }
+
+  private failCaptions(): void {
+    if (this.closed || this.captionFailed) return;
+    this.captionFailed = true;
+    this.captionReady = false;
+    this.captionPending = [];
+    this.captionPendingBytes = 0;
+    this.captionInput.reset();
+    try {
+      this.captionClient?.abort();
+    } catch {
+      /* Caption teardown cannot interrupt original audio. */
+    }
+    this.captionState('failed');
+  }
+
+  private startCaptions(): void {
+    this.captionState('connecting');
+    try {
+      const client = (
+        this.options.createCaptionClient || createRemoteCaptionClient
+      )({
+        apiKey: this.options.apiKey,
+        proxyUrl: this.options.proxyUrl,
+        textModel: this.options.model,
+        timeoutMs: this.options.sessionTimeoutMs,
+        createWebSocket: this.options.createWebSocket,
+        now: this.options.now,
+        onTranscript: (event) => {
+          if (!this.closed && !this.captionFailed) {
+            try {
+              this.options.onTranscript(event);
+            } catch {
+              /* UI only. */
+            }
+          }
+        },
+        onError: () => this.failCaptions(),
+      });
+      this.captionClient = client;
+      if (this.closed || this.captionFailed) {
+        client.abort();
+        return;
+      }
+      client.ready
+        .then(() => {
+          if (this.closed || this.captionFailed) return;
+          this.captionReady = true;
+          this.captionState('ready');
+          const pending = this.captionPending;
+          this.captionPending = [];
+          this.captionPendingBytes = 0;
+          for (const audio of pending) this.appendCaption(audio);
+        })
+        .catch(() => this.failCaptions());
+    } catch {
+      this.failCaptions();
+    }
+  }
+
+  private appendCaption(audio: Buffer): void {
+    if (this.closed || this.captionFailed) return;
+    if (!this.captionReady) {
+      if (this.captionPendingBytes + audio.length > MAX_PENDING_BYTES) {
+        this.failCaptions();
+        return;
+      }
+      this.captionPending.push(Buffer.from(audio));
+      this.captionPendingBytes += audio.length;
+      return;
+    }
+    try {
+      for (let offset = 0; offset < audio.length; offset += MAX_APPEND_BYTES)
+        this.captionClient.append(
+          this.captionInput.push(
+            audio.subarray(offset, offset + MAX_APPEND_BYTES),
+          ),
+        );
+    } catch {
+      this.failCaptions();
+    }
+  }
+
   private onPhoneEvent(
     role: TranslationRole,
     event: Record<string, any>,
@@ -337,6 +454,12 @@ export class ContinuousTranslationBridge {
     // microphone stream is not a connected conversation and must not fill a
     // queue or be replayed once the other party eventually answers.
     if (!this.started) return;
+    if (role === 'remote' && this.options.remoteCaptions) {
+      // Forward first: no model handshake, endpointing, ASR or TTS on this path.
+      this.forwardOriginal(audio);
+      this.appendCaption(audio);
+      return;
+    }
     const provider = this.providers.get(role);
     if (!provider?.ready) {
       if (phone.pendingBytes + audio.length > MAX_PENDING_BYTES) {
@@ -474,6 +597,91 @@ export class ContinuousTranslationBridge {
     waiters.forEach((resolve) => resolve());
   }
 
+  private forwardOriginal(audio: Buffer): void {
+    if (this.closed || !audio.length) return;
+    const phone = this.phones.get('local');
+    if (
+      !phone ||
+      phone.outstandingBytes + audio.length > MAX_OUTSTANDING_BYTES
+    ) {
+      this.shutdown('continuous_playback_overflow:local');
+      return;
+    }
+    if (!this.directDelivery) {
+      if (this.deliveries.size >= MAX_PENDING_MARKS) {
+        this.shutdown('continuous_playback_overflow:local');
+        return;
+      }
+      this.sequence += 1;
+      const name = `original_${this.sequence}`;
+      const delivery: Delivery = {
+        role: 'remote',
+        recipientRole: 'local',
+        streamSid: phone.streamSid,
+        name,
+        generatedBytes: 0,
+        sentBytes: 0,
+        pendingWrites: 1,
+        sentReported: false,
+        acknowledged: false,
+        sealed: false,
+        timer: setTimeout(
+          () => this.shutdown('continuous_playback_timeout:local'),
+          this.options.playbackTimeoutMs ?? 20000,
+        ),
+      };
+      delivery.timer.unref?.();
+      this.deliveries.set(name, delivery);
+      this.directDelivery = delivery;
+      // Batch only playback markers, never hold or re-encode original audio.
+      this.directMarkTimer = setTimeout(() => this.flushOriginalMark(), 200);
+      this.directMarkTimer.unref?.();
+    }
+    const delivery = this.directDelivery;
+    delivery.generatedBytes += audio.length;
+    delivery.pendingWrites += 1;
+    phone.outstandingBytes += audio.length;
+    this.send(
+      phone,
+      {
+        event: 'media',
+        streamSid: phone.streamSid,
+        media: { payload: audio.toString('base64') },
+      },
+      'local',
+      () => {
+        delivery.sentBytes += audio.length;
+        delivery.pendingWrites -= 1;
+        this.progress(delivery);
+      },
+    );
+    if (delivery.generatedBytes >= DELIVERY_BYTES) this.flushOriginalMark();
+  }
+
+  private flushOriginalMark(): void {
+    clearTimeout(this.directMarkTimer);
+    this.directMarkTimer = undefined;
+    const delivery = this.directDelivery;
+    this.directDelivery = undefined;
+    if (this.closed || !delivery) return;
+    delivery.sealed = true;
+    this.diagnostic(delivery, 'generated');
+    const phone = this.phones.get('local');
+    this.send(
+      phone,
+      {
+        event: 'mark',
+        streamSid: phone.streamSid,
+        mark: { name: delivery.name },
+      },
+      'local',
+      () => {
+        delivery.pendingWrites -= 1;
+        this.progress(delivery);
+      },
+    );
+  }
+
   private forward(role: TranslationRole, audio: Buffer): void {
     if (this.closed || !audio.length) return;
     const recipientRole = opposite(role);
@@ -507,6 +715,7 @@ export class ContinuousTranslationBridge {
         pendingWrites: 2,
         sentReported: false,
         acknowledged: false,
+        sealed: true,
         timer: setTimeout(
           () => this.shutdown(`continuous_playback_timeout:${recipientRole}`),
           this.options.playbackTimeoutMs ?? 20000,
@@ -579,6 +788,9 @@ export class ContinuousTranslationBridge {
   ): void {
     try {
       this.options.onAudioDiagnostic?.({
+        ...(this.options.remoteCaptions && delivery.role === 'remote'
+          ? { audioKind: 'original' as const }
+          : {}),
         role: delivery.role,
         recipientRole: delivery.recipientRole,
         stage,
@@ -594,6 +806,7 @@ export class ContinuousTranslationBridge {
     if (
       this.closed ||
       !this.deliveries.has(delivery.name) ||
+      !delivery.sealed ||
       delivery.pendingWrites
     )
       return;
@@ -651,6 +864,16 @@ export class ContinuousTranslationBridge {
   private shutdown(reason?: string): void {
     if (this.closed) return;
     this.closed = true;
+    clearTimeout(this.directMarkTimer);
+    this.directDelivery = undefined;
+    try {
+      this.captionClient?.abort();
+    } catch {
+      /* Continue phone and provider cleanup. */
+    }
+    this.captionPending = [];
+    this.captionPendingBytes = 0;
+    this.captionInput.reset();
     this.nanoCommitter?.close();
     this.nanoAbort.abort();
     this.nanoQueue.length = 0;

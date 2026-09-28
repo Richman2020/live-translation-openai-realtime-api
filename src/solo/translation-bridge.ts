@@ -31,7 +31,13 @@ export type TranslationConnection = {
   closeCode?: number;
 };
 
+export type CaptionState = {
+  state: 'connecting' | 'ready' | 'failed';
+  code?: string;
+};
+
 export type TranslationAudioDiagnostic = {
+  audioKind?: 'original' | 'translation';
   role: TranslationRole;
   recipientRole: TranslationRole;
   stage: 'generated' | 'sent' | 'playback_confirmed' | 'unconfirmed';
@@ -49,6 +55,7 @@ export type TranslationBridgeOptions = {
   onMetric?: (metric: TranslationMetric) => void;
   onConnection?: (event: TranslationConnection) => void;
   onAudioDiagnostic?: (event: TranslationAudioDiagnostic) => void;
+  onCaptionState?: (event: CaptionState) => void;
   createWebSocket?: (
     url: string,
     options: {

@@ -4,7 +4,7 @@
   const { createCallLifecycle, createDeviceMediaOwner, microphoneMessages } = await import('./call-lifecycle.js');
   const { createAudioOutput } = await import('./audio-output.js');
   const { createMicrophoneInput } = await import('./microphone-input.js');
-  const { createTranslationEngineSelection, translationEngineLabel, translationReadiness } = await import('./translation-engine.js');
+  const { createTranslationEngineSelection, translationEngineLabel, translationReadiness, usesNanoVoice } = await import('./translation-engine.js');
   const $ = id => document.getElementById(id);
   const tokenKey = 'ai-phone-local-token';
   const historyKey = 'ai-phone-calls-v1';
@@ -67,6 +67,7 @@
     SESSION_UPDATED: '实时翻译会话已确认配置。',
     SESSION_UPDATED_BOTH_LANGUAGES: '中英双向连续翻译会话已确认配置。',
     NANO_AND_CONTINUOUS_READY: '本机本人声线已预热，中英双向连续翻译连接已就绪。',
+    NANO_CAPTIONS_READY: '本机本人声线、出程翻译和回程字幕连接已就绪。',
     NANO_READY: '本机本人声线已完成预热。',
     VERIFIED_RESOURCE: '账户资源与配置验证通过。'
   };
@@ -110,6 +111,7 @@
   let disposed = false;
   const recoveringTranslationRoles = new Set();
   let translationRecoveryHint = false;
+  let captionStatus = null;
   const audioDelivery = new Map();
   const translationTiming = new Map();
   const translationEngine = createTranslationEngineSelection();
@@ -146,6 +148,7 @@
   function cleanMessage(value, fallback = '操作未完成，请检查连接后重试。') {
     if (typeof value !== 'string' || !value.trim()) return fallback;
     if (errorMessages[value]) return errorMessages[value];
+    if (/^CAPTION_[A-Z_]+$/.test(value)) return '回程字幕连接未通过验证，请检查语音识别和文字翻译的模型权限与网络后重试。';
     if (/^(?:NANOVOICE_|nano_)/i.test(value)) {
       if (/text_boundary_failed/i.test(value)) return '本人声线译文过长或句子边界无法确认，通话已请求结束。请用较短的完整句子重新测试。';
       if (/text_too_long|sentence_too_long|unterminated|text_length|max_chars/i.test(value)) return '本人声线等待完整句子时文字过长，通话已请求结束。请用较短的完整句子重新测试。';
@@ -272,7 +275,7 @@
     renderTranslationEngine();
     $('start-call').disabled = !configured || !registered || !eventsOnline || busy() || saving || verifying || audioOutput.snapshot.status !== 'idle';
     $('start-call').querySelector('span').textContent = dialing
-      ? (translationEngine.snapshot.value === 'continuous-nano' && callLifecycle.current?.phase === 'checking' ? '正在准备本人声线…' : '正在拨号…')
+      ? (usesNanoVoice(translationEngine.snapshot.value) && callLifecycle.current?.phase === 'checking' ? '正在准备本人声线…' : '正在拨号…')
       : busy() ? '通话进行中' : '拨打电话';
     $('phone-number').disabled = busy(); $('erase-number').disabled = busy();
     document.querySelectorAll('.dial-key').forEach(button => { button.disabled = busy(); });
@@ -298,7 +301,7 @@
     $('export-current').disabled = !record?.lines.length;
     const currentState = activeSession?.status || (record?.endedAt ? record.status : '');
     const phase = callLifecycle.current?.phase;
-    const phaseInstruction = phase === 'checking' && translationEngine.snapshot.value === 'continuous-nano'
+    const phaseInstruction = phase === 'checking' && usesNanoVoice(translationEngine.snapshot.value)
       ? '正在准备本人声线，首次可能需要约 2 分钟；准备好后才拨号'
       : callPhases[phase];
     const readiness = translationReadiness(activeSession);
@@ -332,24 +335,47 @@
     const select = $('translation-engine');
     for (const option of select.options) option.disabled = !snapshot.available.includes(option.value) && option.value !== snapshot.sessionEngine;
     select.value = snapshot.value; select.disabled = snapshot.locked;
-    const preparingOwnVoice = snapshot.value === 'continuous-nano' && !activeSession && (verifying || (dialing && callLifecycle.current?.phase === 'checking'));
+    const preparingOwnVoice = usesNanoVoice(snapshot.value) && !activeSession && (verifying || (dialing && callLifecycle.current?.phase === 'checking'));
     $('translation-engine-status').textContent = preparingOwnVoice
       ? '正在检查翻译与本机本人声线，首次准备可能需要约 2 分钟；尚未拨出，请等待。'
       : snapshot.sessionEngine
       ? `本通电话使用：${translationEngineLabel(snapshot.sessionEngine)}。通话结束后才能换版本。`
+      : snapshot.selected === 'nano-captions' ? '下一通直接听英文原声，同时查看中英字幕；你说中文时，对方仍听本人英文本音。'
       : snapshot.selected === 'continuous-nano' ? '下一通使用本人声线实验版。分句合成会增加等待，请用完整短句测试。'
       : snapshot.selected === 'continuous' ? '下一通使用连续翻译实验版。请与当前版本分两次通话比较效果。' : '下一通使用当前版本。';
-    $('translation-engine-help').textContent = snapshot.value === 'continuous-nano'
+    $('translation-engine-help').textContent = snapshot.value === 'nano-captions'
+      ? '电脑中文 → 手机英文使用本机本人声线；对方英文原声直接送到电脑，另行识别英文并翻译为中文字幕，不生成中文声音。字幕可能修订或晚于原声，字幕故障不阻断原声。拨号前选择，来电保持当前版本。'
+      : snapshot.value === 'continuous-nano'
       ? '电脑中文 → 手机英文使用本机本人声线；对方英文 → 电脑中文保留连续翻译原声。等待完整译文句子后合成，会增加等待；无完整句尾时继续等候。拨号前选择，通话中不能切换；来电保持当前版本。'
       : '拨号前选择，通话中不能切换。用相同内容分两次拨打，比较实际听到的译音和等待。来电保持当前版本。';
     $('verification-engine').textContent = `验证版本：${translationEngineLabel(snapshot.value)}。在工作台的「本次翻译版本」中选择。`;
     const displayEngine = activeSession?.translationEngine || record?.translationEngine || snapshot.value;
-    $('transcript-engine-note').textContent = displayEngine === 'continuous-nano'
+    if (!record) $('transcript-subtitle').textContent = displayEngine === 'nano-captions' ? '直接听英文原声，字幕用于辅助理解与排查' : '以双方实际听到的译音为准，文字仅用于辅助排查';
+    $('transcript-engine-note').textContent = displayEngine === 'nano-captions'
+      ? '回程同时显示英文识别与中文字幕，草稿标为“更新中”；本模式始终显示英文原文。字幕辅助理解，可能修订或有误；听到的是对方英文原声，不是中文译音。'
+      : displayEngine === 'continuous-nano'
       ? '本人声线版仅提供译文记录，不显示原文；手机英文由本机合成本人声线，电脑中文保留连续翻译原声。文字不代表声音已播放。'
       : displayEngine === 'continuous'
       ? '连续版目前仅提供译文记录，不显示原文；译音效果请双方实际听取。'
       : '当前版本可显示原文与译文；文字不能代替实际听感。';
+    $('return-audio-label').textContent = snapshot.value === 'nano-captions' ? 'English 原声 ＋ 中文字幕' : 'English → 中文';
+    $('connection-mode-label').textContent = snapshot.value === 'nano-captions' ? '本人英文本音 · 原声与字幕' : '双向语音翻译';
+    $('audio-delivery-heading').textContent = displayEngine === 'nano-captions' ? '声音传送与字幕处理状态' : '译音传送状态与用时';
+    renderCaptionStatus();
     renderAudioDelivery();
+  }
+  function renderCaptionStatus() {
+    const visible = (activeSession?.translationEngine || record?.translationEngine || translationEngine.snapshot.value) === 'nano-captions';
+    const node = $('caption-status');
+    node.hidden = !visible;
+    if (!visible) { node.textContent = ''; return; }
+    if (!activeSession) { node.textContent = record?.endedAt ? '通话已结束；以上字幕可能包含未定稿内容。' : '接通后单独显示字幕连接状态；英文原声无需等待字幕。'; return; }
+    if (!eventsOnline) { node.textContent = '字幕状态连接恢复中；电话音频使用独立连接。'; return; }
+    node.textContent = captionStatus?.state === 'failed'
+      ? '中文字幕暂不可用；英文原声继续传送，通话仍可继续。'
+      : captionStatus?.state === 'ready'
+      ? '字幕连接已就绪 · 正在识别英文并翻译中文；“更新中”为未定稿。'
+      : '字幕连接准备中 · 英文原声无需等待字幕。';
   }
   function renderAudioOutput(snapshot = audioOutput.snapshot) {
     const select = $('audio-output');
@@ -421,6 +447,10 @@
   }
   function applySession(session) {
     if (session && (typeof session.id !== 'string' || typeof session.status !== 'string')) return;
+    if (session && !terminal(session.status)) {
+      if (session.id !== captionStatus?.sessionId) captionStatus = { sessionId: session.id, state: 'connecting' };
+      if (session.translationEngine === 'nano-captions' && ['connecting', 'ready', 'failed'].includes(session.captionState)) captionStatus.state = session.captionState;
+    }
     if (!session || !terminal(session.status) && session.id !== activeSession?.id) {
       recoveringTranslationRoles.clear(); translationRecoveryHint = false;
     }
@@ -468,15 +498,23 @@
     receive('snapshot', value => applySession(value.activeSession || null));
     receive('call', applySession);
     receive('transcript', appendTranscript);
+    receive('caption-status', applyCaptionStatus);
     receive('translation-connection', applyTranslationConnection);
     receive('translation-audio', applyAudioDelivery);
     receive('translation-metric', applyTranslationTiming);
     receive('error', value => showError(cleanMessage(value.message || value.error, '通话服务报告错误，请检查连接状态。')));
     eventSource.onerror = () => { eventsOnline = false; renderStatus(); };
   }
+  function applyCaptionStatus(value) {
+    if (!value || !activeSession || activeSession.translationEngine !== 'nano-captions' || value.sessionId !== activeSession.id || terminal(activeSession.status) || activeSession.status === 'ending') return;
+    if (!['connecting', 'ready', 'failed'].includes(value.state)) return;
+    captionStatus = { sessionId: value.sessionId, state: value.state };
+    renderCaptionStatus();
+  }
   function applyTranslationConnection(value) {
     if (!value || !activeSession || value.sessionId !== activeSession.id || terminal(activeSession.status) || activeSession.status === 'ending') return;
     if (!['local', 'remote'].includes(value.role) || !['disconnected', 'reconnecting', 'ready'].includes(value.state)) return;
+    if (activeSession.translationEngine === 'nano-captions' && value.role !== 'local') return;
     const diagnostic = { role: value.role, state: value.state };
     if (Number.isInteger(value.closeCode) && value.closeCode >= 1000 && value.closeCode <= 4999) diagnostic.closeCode = value.closeCode;
     console.info('[AI Phone Translation]', JSON.stringify(diagnostic));
@@ -490,14 +528,22 @@
   }
   function renderAudioDelivery() {
     const engine = activeSession?.translationEngine || record?.translationEngine || translationEngine.snapshot.value;
-    const ownVoice = engine === 'continuous-nano';
+    const captions = engine === 'nano-captions';
+    const ownVoice = usesNanoVoice(engine);
     const continuous = ownVoice || engine === 'continuous';
-    $('translation-timing-note').textContent = ownVoice
+    $('translation-timing-note').textContent = captions
+      ? '出程本人声线等待完整译文句子后合成；合成计时含排队，不含等待分句、线路传输及播放。回程直接传送英文原声，中文仅为文字字幕；字幕处理耗时不等于原声延迟。'
+      : ownVoice
       ? '本人声线等待完整译文句子后合成。合成耗时从句子提交到本机声音生成完成，含合成排队；不含此前等待分句、线路传输及播放，不等于实际电话延迟。回程中文使用连续翻译原声。'
       : continuous
       ? '连续版会边听边翻译，旧版逐句停说计时不适用。请比较实际开始出声、持续讲话落后和说完后的等待；数据块数不是句数，也不代表双方已经听清。'
       : '计时不含停顿判断、线路传输及设备播放，不等于实际听见的等待时间。线路确认播放后仍需双方检查实际听感。';
     for (const role of ['local', 'remote']) {
+      if (captions && role === 'remote') {
+        $('audio-delivery-remote').textContent = '英文原声 → 电脑：直接转发，不生成中文声音；实际接收声音请查看浏览器播放状态。';
+        $('translation-timing-remote').textContent = '中文字幕：独立识别与翻译，不代表原声已经播放；本页尚无字幕延迟测量。';
+        continue;
+      }
       const counts = audioDelivery.get(role);
       const target = role === 'local' ? '英语 → 手机' : '中文 → 电脑';
       const unit = continuous ? '块' : '段';
@@ -515,7 +561,7 @@
   function applyTranslationTiming(value) {
     if (!value || !activeSession || value.sessionId !== activeSession.id || terminal(activeSession.status) || activeSession.status === 'ending') return;
     if (activeSession.translationEngine === 'continuous') return;
-    const ownVoice = activeSession.translationEngine === 'continuous-nano';
+    const ownVoice = usesNanoVoice(activeSession.translationEngine);
     if (ownVoice) {
       if (value.role !== 'local' || value.name !== 'nano_text_to_audio_ms' || value.scope !== 'local_synthesis') return;
     } else if (!['local', 'remote'].includes(value.role) || value.name !== 'speech_stop_to_first_audio_ms' || value.scope !== 'provider_generation') return;
@@ -538,15 +584,17 @@
     audioDelivery.set(value.role, counts);
     renderAudioDelivery();
   }
-  function renderLine(line) {
-    const article = element('article', `utterance ${line.role === 'remote' ? 'their' : 'mine'} ${line.kind === 'original' ? 'original-entry' : ''}`);
+  function renderLine(line, engine = record?.translationEngine) {
+    const captionOriginal = engine === 'nano-captions' && line.role === 'remote' && line.kind === 'original';
+    // Keep paired English captions visible even when the general original-text preference is off.
+    const article = element('article', `utterance ${line.role === 'remote' ? 'their' : 'mine'} ${line.kind === 'original' ? (captionOriginal ? 'caption-original-entry' : 'original-entry') : ''}`);
     article.dataset.transcriptId = line.id;
     const meta = element('div', 'utterance-meta');
     meta.append(element('strong', '', line.role === 'local' ? '你' : '对方'), element('span', '', line.kind === 'original' ? '原文' : '译文'), element('span', 'draft-label', line.final ? '' : '更新中'));
     const at = new Date(line.at); if (!Number.isNaN(at.getTime())) meta.append(element('time', '', at.toLocaleTimeString('zh-CN', { hour12: false })));
     const bubble = element('div', 'speech-bubble'); bubble.append(element('p', 'transcript-text', line.text)); article.append(meta, bubble); return article;
   }
-  function orderedTranscriptLines(lines) {
+  function orderedTranscriptLines(lines, engine) {
     const groups = new Map();
     for (const line of lines) {
       const match = /^(local|remote):(original|translation):([A-Za-z0-9_-]{1,256}):(0|[1-9]\d*)$/.exec(line.id);
@@ -554,21 +602,39 @@
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key).push(line);
     }
-    // Map insertion order retains each turn's first arrival, including translation-before-ASR.
-    return [...groups.values()].flatMap(group => group.sort((a, b) => Number(a.kind !== 'original') - Number(b.kind !== 'original')));
+    const ordered = [...groups.entries()];
+    if (engine === 'nano-captions') {
+      const turnTime = group => Math.min(...group.map(line => new Date(line.at).getTime()).filter(Number.isFinite));
+      const isCaption = ([key, group]) => key.startsWith('turn:remote:') && Number.isFinite(turnTime(group));
+      const captions = ordered.filter(isCaption).sort((a, b) => turnTime(a[1]) - turnTime(b[1]));
+      let captionIndex = 0;
+      // ASR completions can arrive out of order. Reorder remote turn slots using
+      // their stable source time while keeping local rows in their existing order.
+      for (let index = 0; index < ordered.length; index += 1) {
+        if (isCaption(ordered[index])) ordered[index] = captions[captionIndex++];
+      }
+    }
+    // Other engines retain first-arrival order, including translation-before-ASR.
+    return ordered.flatMap(([, group]) => group.sort((a, b) => Number(a.kind !== 'original') - Number(b.kind !== 'original')));
   }
   function appendTranscript(value) {
     if (!value || typeof value.id !== 'string' || typeof value.text !== 'string' || !['local', 'remote'].includes(value.role) || !['original', 'translation'].includes(value.kind)) return;
     if (!record || (value.sessionId && value.sessionId !== record.id)) return;
-    if (translationRecoveryHint && value.kind === 'translation' && value.final === true) { translationRecoveryHint = false; renderStatus(); }
+    if (translationRecoveryHint && value.kind === 'translation' && value.final === true && (activeSession?.translationEngine !== 'nano-captions' || value.role === 'local')) { translationRecoveryHint = false; renderStatus(); }
     const line = { id: value.id, role: value.role, kind: value.kind, text: value.text.slice(0, 20000), final: value.final === true, at: value.at || new Date().toISOString() };
     const index = record.lines.findIndex(old => old.id === line.id);
     if (index >= 0) record.lines[index] = line; else record.lines.push(line);
     const oldNode = [...$('transcript').children].find(node => node.dataset.transcriptId === line.id);
     const scroll = $('transcript-scroll'); const nearBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 100;
-    if (oldNode) oldNode.replaceWith(renderLine(line));
+    if (record.translationEngine === 'nano-captions') {
+      if (oldNode) oldNode.replaceWith(renderLine(line)); else $('transcript').append(renderLine(line));
+      const children = [...$('transcript').children];
+      const byId = new Map(children.map(node => [node.dataset.transcriptId, node]));
+      const ordered = orderedTranscriptLines(record.lines, record.translationEngine).map(item => byId.get(item.id));
+      if (ordered.some((node, index) => node !== children[index])) $('transcript').replaceChildren(...ordered);
+    } else if (oldNode) oldNode.replaceWith(renderLine(line));
     else {
-      const ordered = orderedTranscriptLines(record.lines);
+      const ordered = orderedTranscriptLines(record.lines, record.translationEngine);
       const next = ordered[ordered.findIndex(item => item.id === line.id) + 1];
       const nextNode = next && [...$('transcript').children].find(node => node.dataset.transcriptId === next.id);
       $('transcript').insertBefore(renderLine(line), nextNode || null);
@@ -737,7 +803,7 @@
       if (!callLifecycle.isCurrent(attempt)) return;
       audioOutput.refresh();
       callLifecycle.update(attempt, { phase: 'checking' });
-      const created = await post('/api/calls', { to, translationEngine: chosenEngine }, chosenEngine === 'continuous-nano' ? 150000 : undefined); createdId = created.id;
+      const created = await post('/api/calls', { to, translationEngine: chosenEngine }, usesNanoVoice(chosenEngine) ? 150000 : undefined); createdId = created.id;
       if (!createdId || !created.connectionParams) throw new Error('电话服务未返回有效连接信息。');
       if (!callLifecycle.isCurrent(attempt)) { await post(`/api/calls/${encodeURIComponent(createdId)}/hangup`).catch(() => {}); return; }
       callLifecycle.update(attempt, { sessionId: createdId });
@@ -802,10 +868,13 @@
   }
   function exportRecord(item) {
     if (!item?.lines.length) return;
-    const engineNotes = item.translationEngine === 'continuous-nano'
+    const engineNotes = item.translationEngine === 'nano-captions'
+      ? ['电脑中文 → 手机英文使用本机本人声线；对方英文原声直接送到电脑，不生成中文声音。', '回程英文识别与中文字幕由独立字幕分支生成；未定稿内容可能修订，字幕可能晚于原声或存在错误。']
+      : item.translationEngine === 'continuous-nano'
       ? ['本人声线版未开启原文转写，此记录仅包含服务返回的译文。', '电脑中文 → 手机英文使用本机本人声线；对方英文 → 电脑中文保留连续翻译原声。分句合成会增加等待。']
       : item.translationEngine === 'continuous' ? ['连续版未开启原文转写，此记录仅包含服务返回的译文。'] : [];
-    const text = ['AI 电话 — 通话文字记录', `翻译版本：${translationEngineLabel(item.translationEngine)}`, `方向：${item.direction === 'inbound' ? '来电' : '拨出'}`, `号码：${item.number}`, `时间：${dateText(item.startedAt)}`, `页面观察时长：${timeText(duration(item))}`, '文字仅用于辅助排查；以双方实际听到的译音为准。', ...engineNotes, '', ...orderedTranscriptLines(item.lines).map(line => `[${line.role === 'local' ? '你' : '对方'} · ${line.kind === 'original' ? '原文' : '译文'}${line.final ? '' : ' · 未定稿'}] ${line.text}`)].join('\r\n');
+    const audioNote = item.translationEngine === 'nano-captions' ? '文字用于辅助理解与排查，不代表声音已播放；电脑听英文原声，手机听本人英文本音。' : '文字仅用于辅助排查；以双方实际听到的译音为准。';
+    const text = ['AI 电话 — 通话文字记录', `翻译版本：${translationEngineLabel(item.translationEngine)}`, `方向：${item.direction === 'inbound' ? '来电' : '拨出'}`, `号码：${item.number}`, `时间：${dateText(item.startedAt)}`, `页面观察时长：${timeText(duration(item))}`, audioNote, ...engineNotes, '', ...orderedTranscriptLines(item.lines, item.translationEngine).map(line => `[${line.role === 'local' ? '你' : '对方'} · ${line.kind === 'original' ? '原文' : '译文'}${line.final ? '' : ' · 未定稿'}] ${line.text}`)].join('\r\n');
     const url = URL.createObjectURL(new Blob(['\uFEFF', text], { type: 'text/plain;charset=utf-8' }));
     const link = element('a'); link.href = url; link.download = `AI电话-通话记录-${new Date(item.startedAt).toISOString().replace(/[:.]/g, '-')}.txt`; document.body.append(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 5000);
   }
@@ -822,7 +891,7 @@
     if (!item) { const empty = element('div', 'empty-conversation'); empty.append(icon('clock'), element('h3', '', '还没有保存的通话'), element('p', '', '可在连接设置中开启「保存通话文字」。')); $('history-detail').append(empty); return; }
     const heading = element('div', 'detail-heading'); const title = element('div'); title.append(element('h2', '', item.number), element('p', '', `${dateText(item.startedAt)} · ${translationEngineLabel(item.translationEngine)} · 普通话 ↔ English`));
     const download = element('button', 'secondary-button', '导出文字'); download.disabled = !item.lines.length; download.addEventListener('click', () => exportRecord(item)); heading.append(title, download);
-    $('history-detail').append(heading, ...orderedTranscriptLines(item.lines).map(renderLine));
+    $('history-detail').append(heading, ...orderedTranscriptLines(item.lines, item.translationEngine).map(line => renderLine(line, item.translationEngine)));
   }
   function applyPreferences() {
     document.body.classList.toggle('hide-original', !preferences.showOriginal);
@@ -851,20 +920,24 @@
   async function verifyConnections() {
     if (verifying || busy() || saving || !state?.configured) return;
     const chosenEngine = translationEngine.snapshot.selected;
-    verifying = true; $('verification-results').replaceChildren(element('p', 'form-intro', chosenEngine === 'continuous-nano'
+    verifying = true; $('verification-results').replaceChildren(element('p', 'form-intro', chosenEngine === 'nano-captions'
+      ? '正在验证电话配置、出程翻译、回程字幕和本机声线；首次预热可能需要约 2 分钟，请等待。'
+      : chosenEngine === 'continuous-nano'
       ? '正在验证本人声线实验版的电话配置、双向翻译连接和本机声线；首次预热可能需要约 2 分钟，请等待。'
       : `正在验证${translationEngineLabel(chosenEngine)}的账户、号码、电话应用与翻译连接…`)); renderStatus();
     try {
-      const result = await post('/api/verify', { translationEngine: chosenEngine }, chosenEngine === 'continuous-nano' ? 150000 : undefined);
+      const result = await post('/api/verify', { translationEngine: chosenEngine }, usesNanoVoice(chosenEngine) ? 150000 : undefined);
       const verifiedEngine = result.translationEngine || 'legacy';
       $('verification-results').replaceChildren(element('p', 'form-intro', `本次验证结果：${translationEngineLabel(verifiedEngine)}`));
       if (verifiedEngine !== chosenEngine) $('verification-results').append(element('p', 'field-error', '服务返回的版本与本次选择不同，所选版本尚未确认；请刷新并重新验证。'));
-      const labels = { twilioAccount: 'Twilio 账户', twilioNumber: 'Twilio 号码', twilioApplication: '电话应用', openaiRealtime: '当前版翻译连接', openaiContinuous: '连续翻译连接（双向）', nanoTranslation: '本人声线与双向连续翻译', nanoVoice: '本机本人声线' };
+      const labels = { twilioAccount: 'Twilio 账户', twilioNumber: 'Twilio 号码', twilioApplication: '电话应用', openaiRealtime: '当前版翻译连接', openaiContinuous: '连续翻译连接（双向）', nanoTranslation: '本人声线与双向连续翻译', nanoVoice: '本机本人声线', nanoCaptions: '本人声线、出程翻译与回程字幕', openaiRemoteCaption: '回程英文识别与中文字幕', openaiTranscription: '英文实时识别', captionTranslation: '中文字幕翻译' };
       for (const check of result.checks || []) {
         const row = element('div', 'config-check'); row.append(element('span', '', labels[check.name] || check.name), element('span', `check-state ${check.status === 'passed' ? 'ready' : 'needs-attention'}`, { passed: '连接验证通过', failed: '验证未通过', missing: '缺少配置' }[check.status] || '待检查'));
         if (check.code) row.title = cleanMessage(String(check.code)); $('verification-results').append(row);
       }
-      $('verification-results').append(element('p', 'form-intro', verifiedEngine === 'continuous-nano'
+      $('verification-results').append(element('p', 'form-intro', verifiedEngine === 'nano-captions'
+        ? '本次仅验证连接与本机声线就绪；仍需真实电话确认英文原声、字幕准确度与延迟，以及出程本人声线听感。'
+        : verifiedEngine === 'continuous-nano'
         ? '本次仅验证翻译连接和本机声线就绪。仍需真实电话确认两个语言方向、本人声线听感与端到端延迟。'
         : '本次仅验证 API 连接。仍需真实电话确认两个语言方向、听感与端到端延迟。'));
     } catch (error) { $('verification-results').replaceChildren(element('p', 'field-error', cleanMessage(error.message))); }

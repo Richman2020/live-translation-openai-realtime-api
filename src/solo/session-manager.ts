@@ -30,6 +30,7 @@ export type CallView = {
   from: string;
   translationEngine: TranslationEngine;
   translationReady: boolean;
+  captionState?: 'connecting' | 'ready' | 'failed';
   error?: string;
   providerErrorCode?: number;
   providerHttpStatus?: number;
@@ -163,6 +164,12 @@ export class SessionManager extends EventEmitter {
     this.bridgeFactory =
       options.bridgeFactory ||
       ((settings) => {
+        if (settings.translationEngine === 'nano-captions')
+          return new ContinuousTranslationBridge({
+            ...settings,
+            localVoice: getNanoVoiceWorker(),
+            remoteCaptions: true,
+          });
         if (settings.translationEngine === 'continuous-nano')
           return new ContinuousTranslationBridge({
             ...settings,
@@ -251,6 +258,9 @@ export class SessionManager extends EventEmitter {
         from,
         translationEngine,
         translationReady: false,
+        ...(translationEngine === 'nano-captions'
+          ? { captionState: 'connecting' as const }
+          : {}),
       },
       readyRoles: new Set(),
       config: { ...config },
@@ -487,7 +497,10 @@ export class SessionManager extends EventEmitter {
               if (connection.state === 'ready')
                 session.readyRoles.add(connection.role);
               else session.readyRoles.delete(connection.role);
-              const translationReady = session.readyRoles.size === 2;
+              const translationReady =
+                session.view.translationEngine === 'nano-captions'
+                  ? session.readyRoles.has('local')
+                  : session.readyRoles.size === 2;
               if (session.view.translationReady !== translationReady) {
                 session.view.translationReady = translationReady;
                 this.publish(session);
@@ -497,6 +510,19 @@ export class SessionManager extends EventEmitter {
                 data: { ...connection, sessionId: session.view.id },
               });
             }
+          },
+          onCaptionState: (caption) => {
+            if (
+              session.ended ||
+              session.view.translationEngine !== 'nano-captions'
+            )
+              return;
+            session.view.captionState = caption.state;
+            this.publish(session);
+            this.emit('event', {
+              event: 'caption-status',
+              data: { state: caption.state, sessionId: session.view.id },
+            });
           },
           onAudioDiagnostic: (audio) => {
             // Keep final unconfirmed playback reports when a call is closing.
