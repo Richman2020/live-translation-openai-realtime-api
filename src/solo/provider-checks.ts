@@ -14,7 +14,7 @@ import {
   type ContinuousTranslationClient,
 } from './continuous-translation-client';
 import type { TranslationEngine } from './translation-engine';
-import { checkNanoVoice } from './nano-runtime';
+import { checkNanoVoice, checkNanoCaptionVoice } from './nano-runtime';
 import { checkRemoteCaption } from './remote-caption-client';
 
 type Check = {
@@ -196,7 +196,7 @@ export async function checkTranslationEngine(
   timeoutMs = 15000,
 ): Promise<Check> {
   if (engine === 'nano-captions') {
-    const local = await checkNanoVoice();
+    const local = await checkNanoCaptionVoice();
     if (local.status !== 'passed') return local;
     const [translation, caption] = await Promise.all([
       checkContinuousRealtime(config, createSocket, timeoutMs, ['en']),

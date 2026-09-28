@@ -21,6 +21,8 @@ import type {
 
 export type LocalVoiceSynthesizer = {
   ready: Promise<void>;
+  /** The B tempo preset can expand a 20-second generated waveform to <22s. */
+  maxOutputSeconds?: 20 | 22;
   synthesize(
     text: string,
     signal?: AbortSignal,
@@ -540,7 +542,8 @@ export class ContinuousTranslationBridge {
           !Buffer.isBuffer(generated.pcm) ||
           !generated.pcm.length ||
           generated.pcm.length % 2 ||
-          generated.pcm.length > 48000 * 20
+          generated.pcm.length >
+            48000 * (this.options.localVoice.maxOutputSeconds ?? 20)
         )
           throw new Error('NANO_INVALID_AUDIO');
         try {

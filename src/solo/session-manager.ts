@@ -9,7 +9,7 @@ import type { SoloConfig } from './config';
 import { safeEqual } from './security';
 import { TranslationBridge } from './translation-bridge';
 import { ContinuousTranslationBridge } from './continuous-translation-bridge';
-import { getNanoVoiceWorker } from './nano-runtime';
+import { getNanoVoiceWorker, getNanoCaptionVoice } from './nano-runtime';
 import {
   isTranslationEngine,
   type TranslationEngine,
@@ -167,7 +167,7 @@ export class SessionManager extends EventEmitter {
         if (settings.translationEngine === 'nano-captions')
           return new ContinuousTranslationBridge({
             ...settings,
-            localVoice: getNanoVoiceWorker(),
+            localVoice: getNanoCaptionVoice(),
             remoteCaptions: true,
           });
         if (settings.translationEngine === 'continuous-nano')

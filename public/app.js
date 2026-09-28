@@ -67,7 +67,7 @@
     SESSION_UPDATED: '实时翻译会话已确认配置。',
     SESSION_UPDATED_BOTH_LANGUAGES: '中英双向连续翻译会话已确认配置。',
     NANO_AND_CONTINUOUS_READY: '本机本人声线已预热，中英双向连续翻译连接已就绪。',
-    NANO_CAPTIONS_READY: '本机本人声线、出程翻译和回程字幕连接已就绪。',
+    NANO_CAPTIONS_READY: '本人声线 B 版（稍慢、音量增强）、出程翻译和回程字幕连接已就绪。',
     NANO_READY: '本机本人声线已完成预热。',
     VERIFIED_RESOURCE: '账户资源与配置验证通过。'
   };
@@ -340,11 +340,11 @@
       ? '正在检查翻译与本机本人声线，首次准备可能需要约 2 分钟；尚未拨出，请等待。'
       : snapshot.sessionEngine
       ? `本通电话使用：${translationEngineLabel(snapshot.sessionEngine)}。通话结束后才能换版本。`
-      : snapshot.selected === 'nano-captions' ? '下一通直接听英文原声，同时查看中英字幕；你说中文时，对方仍听本人英文本音。'
+      : snapshot.selected === 'nano-captions' ? '下一通：你听英文原声、看中英字幕；对方听本人英文 B 版，逐句输出、稍慢且音量增强。'
       : snapshot.selected === 'continuous-nano' ? '下一通使用本人声线实验版。分句合成会增加等待，请用完整短句测试。'
       : snapshot.selected === 'continuous' ? '下一通使用连续翻译实验版。请与当前版本分两次通话比较效果。' : '下一通使用当前版本。';
     $('translation-engine-help').textContent = snapshot.value === 'nano-captions'
-      ? '电脑中文 → 手机英文使用本机本人声线；对方英文原声直接送到电脑，另行识别英文并翻译为中文字幕，不生成中文声音。字幕可能修订或晚于原声，字幕故障不阻断原声。拨号前选择，来电保持当前版本。'
+      ? '你的英文采用 B 版：92% 语速，音量适度增强并限制峰值。完整英文句子形成后逐句合成、按顺序播放，后文继续接收；仍需等待翻译与单句合成。对方英文原声直接送到电脑，同步中英字幕，不生成中文声音。字幕故障不阻断原声。拨号前选择，来电保持当前版本。'
       : snapshot.value === 'continuous-nano'
       ? '电脑中文 → 手机英文使用本机本人声线；对方英文 → 电脑中文保留连续翻译原声。等待完整译文句子后合成，会增加等待；无完整句尾时继续等候。拨号前选择，通话中不能切换；来电保持当前版本。'
       : '拨号前选择，通话中不能切换。用相同内容分两次拨打，比较实际听到的译音和等待。来电保持当前版本。';
@@ -532,7 +532,7 @@
     const ownVoice = usesNanoVoice(engine);
     const continuous = ownVoice || engine === 'continuous';
     $('translation-timing-note').textContent = captions
-      ? '出程本人声线等待完整译文句子后合成；合成计时含排队，不含等待分句、线路传输及播放。回程直接传送英文原声，中文仅为文字字幕；字幕处理耗时不等于原声延迟。'
+      ? '出程本人英文 B 版逐句合成和播放，后文继续翻译；计时含合成排队、变速和音量处理，不含等待分句、线路传输及播放。回程直接传送英文原声，中文仅为文字字幕；字幕处理耗时不等于原声延迟。'
       : ownVoice
       ? '本人声线等待完整译文句子后合成。合成耗时从句子提交到本机声音生成完成，含合成排队；不含此前等待分句、线路传输及播放，不等于实际电话延迟。回程中文使用连续翻译原声。'
       : continuous
