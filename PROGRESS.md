@@ -1,8 +1,16 @@
 # 项目进度与交接
 
-更新日期：2026-09-27。共享仓库：<https://github.com/Richman2020/live-translation-openai-realtime-api>。
+更新日期：2026-09-28。共享仓库：<https://github.com/Richman2020/live-translation-openai-realtime-api>。
 
 需求见 [PROJECT_BRIEF.md](PROJECT_BRIEF.md)，工作规则见 [AGENTS.md](AGENTS.md)，运行步骤见 [LOCAL_SETUP.md](LOCAL_SETUP.md)，后续执行入口见 [LOCAL_CODEX_HANDOFF.md](LOCAL_CODEX_HANDOFF.md)。
+
+## 最新微调：Nano 自然感获认可，连读/吞字候选待试听（2026-09-28）
+
+- 用户认可原版 Nano 三句样本的整体效果，剩余诉求为语速略快、少量连读或吞字，希望小幅改善。该反馈已在本机绑定原音频与报告哈希；未扩展为电话、其它句子或英语母语者理解度验收。
+- 仅将真实参与采样的 temperature 从 0.80 调到 0.75，模型、参考、文字标点、seed、线程及输出处理保持一致；探针默认仍为 0.8，并在报告中保存完整调用参数。Nano 没有直接咬字或语速控制，候选不能预先称作更清楚。
+- 两组各三句已实际生成，控制组 PCM 与昨晚原版逐样本相同。三句／问句／否定时间：原版 6.92／2.20／4.32 秒，候选 7.16／2.24／4.36 秒；三句增加 0.24 秒是实际生成变化，未做时间拉伸，不能仅凭时长判定吞字改善。
+- 新增 `scripts/build-nano-clarity-review.py`，只接收完整显式参数且可比的两份 Nano 报告。9 类参数/输入/来源差异拒绝检查通过；探针有效温度及 5 个非法值检查通过。独立核验 18 输出哈希、6 份 μ-law 回解及控制 PCM 一致性通过；实际 A/B 页 12 段音频与来源一致，元数据加载、静音播放互斥和页面布局检查通过。
+- 试听入口：`.runtime/chatterbox-nano-lab/review-clarity-20260928T082702/index.html`。先比较原版 A 与候选 B 的连贯三句，再核对电话编码、问句和否定时间。候选清晰度、自然感及声线稳定性仍待用户确认；电话默认、收费服务和夜间自动跟进均未改变。详见 [Nano 本机实验](CHATTERBOX_NANO_PILOT_2026-09-27.md)。
 
 ## 最新交付：Nano 本机三组样本与旧新版试听（2026-09-27 晚）
 

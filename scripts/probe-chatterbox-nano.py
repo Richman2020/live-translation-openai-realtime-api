@@ -66,11 +66,15 @@ def arguments(argv=None):
     parser.add_argument("--upstream-dir", required=True, type=private_path)
     parser.add_argument("--threads", type=int, default=4)
     parser.add_argument("--seed", type=int, default=1709)
+    parser.add_argument("--temperature", type=float, default=0.8,
+                        help="T3 sampling temperature; not a speed or articulation control")
     args = parser.parse_args(argv)
     if not 1 <= args.threads <= 16 or not 0 <= args.seed <= 2**32 - 4:
         parser.error("threads must be in [1,16]; seed must be in [0,2^32-4]")
     if args.reference.suffix.lower() != ".wav":
         parser.error("reference must be a WAV")
+    if not math.isfinite(args.temperature) or not 0.1 <= args.temperature <= 1.5:
+        parser.error("temperature must be finite and in [0.1,1.5]")
     return args
 
 
@@ -364,9 +368,14 @@ def run(args, report):
                               "limits": "Official path uses first 10s for decoder, first 15s for T3 prompt, full reference for speaker encoder"}
     persist()
     for index, (fixture_id, text) in enumerate(FIXTURES):
+        invocation = inspect.signature(model.generate).bind(text, temperature=args.temperature)
+        invocation.apply_defaults()
         fixture = {"id": fixture_id, "text": text, "seed": args.seed + index,
                    "status": "generating", "streaming": False,
-                   "quality_accepted": False, "human_listening": "PENDING"}
+                   "quality_accepted": False, "human_listening": "PENDING",
+                   "generation_parameters": {key: value for key, value in invocation.arguments.items()
+                                             if key != "text"},
+                   "parameter_scope": "Sampling settings only; no speed change or post-generation time stretch"}
         report["fixtures"].append(fixture)
         report["stage"] = "generate_" + fixture_id
         persist()
@@ -375,7 +384,7 @@ def run(args, report):
         started = time.perf_counter()
         try:
             with torch.inference_mode():
-                generated = model.generate(text)
+                generated = model.generate(*invocation.args, **invocation.kwargs)
         finally:
             fixture["generate_wall_seconds"] = time.perf_counter() - started
             model.t3.inference_turbo = original
