@@ -14,12 +14,18 @@ import type {
   ContinuousTranslationClient,
   ContinuousTranslationOptions,
 } from '../src/solo/continuous-translation-client';
-import { Pcm24kToPcmu, PcmuToPcm24k } from '../src/solo/translation-pcm';
+import {
+  muLawToPcm16,
+  Pcm24kToPcmu,
+  PcmuToPcm24k,
+} from '../src/solo/translation-pcm';
 import type {
   TranscriptEvent,
   TranslationAudioDiagnostic,
   TranslationConnection,
+  TranslationInputDiagnostic,
   TranslationMetric,
+  TranslationProviderDiagnostic,
   TranslationRole,
 } from '../src/solo/translation-bridge';
 
@@ -147,11 +153,15 @@ function fixture(options: Partial<ContinuousTranslationBridgeOptions> = {}) {
     await ready('local');
     await ready('remote');
   };
-  const media = (role: TranslationRole, bytes = Buffer.alloc(160, 0xff)) =>
+  const media = (
+    role: TranslationRole,
+    bytes = Buffer.alloc(160, 0xff),
+    timestamp?: unknown,
+  ) =>
     phones[role].receive({
       event: 'media',
       streamSid: `MZ_${role}`,
-      media: { track: 'inbound', payload: bytes.toString('base64') },
+      media: { track: 'inbound', payload: bytes.toString('base64'), timestamp },
     });
   const mark = (role: TranslationRole, name: string) =>
     phones[role].receive({
@@ -202,6 +212,384 @@ function mediaBytes(phone: Phone): Buffer {
       .map((event) => Buffer.from(event.media.payload, 'base64')),
   );
 }
+
+test('delivery diagnostics match exact delayed marks with a monotonic clock despite wall-clock jumps', async () => {
+  let monotonic = 1000;
+  let wall = 1900000000000;
+  const f = fixture({ monotonicNow: () => monotonic, now: () => wall });
+  await f.pair();
+  f.phones.remote.deferWrites = true;
+  monotonic = 1010;
+  const pcm = tone();
+  f.provider('local').options.onAudio(pcm, { providerElapsedMs: 1200 });
+  const first = f.phones.remote.sent.find((event) => event.event === 'mark')
+    .mark.name;
+  monotonic = 1020;
+  f.phones.remote.writes.shift()();
+  monotonic = 1025;
+  f.phones.remote.writes.shift()();
+  f.phones.remote.deferWrites = false;
+  monotonic = 1030;
+  wall -= 3600000;
+  f.provider('local').audio(pcm);
+  const second = f.phones.remote.sent.filter(
+    (event) => event.event === 'mark',
+  )[1].mark.name;
+  monotonic = 1050;
+  f.mark('remote', second);
+  monotonic = 1080;
+  wall += 7200000;
+  f.mark('remote', first);
+  const confirmed = f.audio.filter(
+    (event) => event.stage === 'playback_confirmed',
+  );
+  assert.deepEqual(
+    confirmed.map((event) => [
+      event.deliveryId,
+      event.createdAtMs,
+      event.sentAtMs,
+      event.acknowledgedAtMs,
+      event.sentToMarkMs,
+      event.outstandingAudioMs,
+    ]),
+    [
+      [second, 30, 30, 50, 20, 200],
+      [first, 10, 25, 80, 55, 0],
+    ],
+  );
+  assert.match(
+    confirmed[0].pipelineId,
+    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+  );
+  assert.equal(new Set(f.audio.map((event) => event.pipelineId)).size, 1);
+  assert.ok(f.audio.every((event) => event.clock === 'bridge_monotonic'));
+  assert.equal(confirmed[1].providerElapsedMs, 1200);
+  assert.equal(confirmed[0].providerElapsedMs, undefined);
+  assert.equal(confirmed[0].audioDurationMs, 200);
+  assert.ok(confirmed[0].peak > 0 && confirmed[0].rms > 0);
+  const converter = new Pcm24kToPcmu();
+  assert.deepEqual(
+    mediaBytes(f.phones.remote),
+    Buffer.concat([converter.push(pcm), converter.push(pcm)]),
+  );
+  f.mark('remote', first);
+  assert.equal(
+    f.audio.filter((event) => event.stage === 'playback_confirmed').length,
+    2,
+  );
+  f.bridge.close();
+});
+
+test('silence retains all audio bytes and reports zero energy without claiming speech latency', async () => {
+  const f = fixture();
+  await f.pair();
+  f.provider('local').audio(Buffer.alloc(9600));
+  const sent = f.audio.find((event) => event.stage === 'sent');
+  assert.equal(sent.audioDurationMs, 200);
+  assert.equal(sent.rms, 0);
+  assert.equal(sent.peak, 0);
+  assert.equal(sent.sentToMarkMs, undefined);
+  assert.equal(mediaBytes(f.phones.remote).length, 1600);
+  assert.ok(mediaBytes(f.phones.remote).every((sample) => sample === 0xff));
+  f.bridge.close();
+  const closed = f.audio.at(-1);
+  assert.equal(closed.stage, 'unconfirmed');
+  assert.equal(closed.deliveryId, sent.deliveryId);
+  assert.equal(closed.acknowledgedAtMs, undefined);
+});
+
+test('early mark receipt is retained without inventing a negative send-to-mark interval', async () => {
+  let now = 0;
+  const f = fixture({ monotonicNow: () => now });
+  await f.pair();
+  f.phones.remote.deferWrites = true;
+  now = 10;
+  f.provider('local').audio(tone());
+  now = 20;
+  f.mark('remote', f.phones.remote.sent[1].mark.name);
+  now = 30;
+  f.phones.remote.writes.splice(0).forEach((write) => write());
+  const confirmed = f.audio.at(-1);
+  assert.equal(confirmed.sentAtMs, 30);
+  assert.equal(confirmed.acknowledgedAtMs, 20);
+  assert.equal(confirmed.sentToMarkMs, undefined);
+  f.bridge.close();
+});
+
+test('original audio diagnostics cover sealed marks and an unsealed hangup tail without buffering media', async () => {
+  let now = 0;
+  const f = fixture({
+    monotonicNow: () => now,
+    remoteCaptions: true,
+    createCaptionClient: () => ({
+      ready: Promise.resolve(),
+      append() {},
+      async finish() {
+        return undefined;
+      },
+      abort() {},
+    }),
+  });
+  f.attach('local');
+  f.attach('remote');
+  await f.ready('local');
+  for (let i = 0; i < 10; i += 1) {
+    now = 10 + i * 20;
+    f.media('remote');
+    assert.equal(mediaBytes(f.phones.local).length, (i + 1) * 160);
+  }
+  const sent = f.audio.find((event) => event.stage === 'sent');
+  assert.equal(sent.deliveryId, 'original_1');
+  assert.equal(sent.createdAtMs, 10);
+  assert.equal(sent.sentAtMs, 190);
+  now = 250;
+  f.mark('local', sent.deliveryId);
+  assert.equal(f.audio.at(-1).sentToMarkMs, 60);
+  now = 270;
+  f.media('remote');
+  now = 300;
+  f.bridge.close();
+  const tail = f.audio.at(-1);
+  assert.equal(tail.stage, 'unconfirmed');
+  assert.equal(tail.deliveryId, 'original_2');
+  assert.equal(tail.audioDurationMs, 20);
+  assert.equal(tail.outstandingAudioMs, 20);
+  assert.equal(tail.createdAtMs, 270);
+  assert.equal(tail.sentAtMs, undefined);
+  assert.equal(tail.rms, 0);
+  assert.equal(tail.peak, 0);
+});
+
+test('provider metadata shares pipeline clock, never exposes private IDs and stops after cleanup', async () => {
+  let now = 100;
+  const metadata: TranslationProviderDiagnostic[] = [];
+  const f = fixture({
+    monotonicNow: () => now,
+    onProviderDiagnostic: (event) => metadata.push(event),
+  });
+  await f.pair();
+  now = 150;
+  f.provider('local').options.onSessionMetadata({
+    stage: 'session_updated',
+    expiresAtEpochSeconds: 1900000000,
+  });
+  f.provider('local').audio(tone());
+  assert.deepEqual(metadata, [
+    {
+      pipelineId: f.audio[0].pipelineId,
+      role: 'local',
+      stage: 'session_updated',
+      expiresAtEpochSeconds: 1900000000,
+      observedAtMs: 50,
+    },
+  ]);
+  f.bridge.close();
+  f.provider('local').options.onSessionMetadata({
+    stage: 'session_updated',
+    expiresAtEpochSeconds: 1900000000,
+  });
+  assert.equal(metadata.length, 1);
+  const broken = fixture({
+    onProviderDiagnostic() {
+      throw new Error('optional');
+    },
+    monotonicNow() {
+      throw new Error('clock only');
+    },
+  });
+  await broken.pair();
+  broken.provider('local').options.onSessionMetadata({
+    stage: 'session_created',
+    expiresAtEpochSeconds: 1900000000,
+  });
+  broken.provider('local').audio(tone());
+  assert.equal(mediaBytes(broken.phones.remote).length, 1600);
+  assert.equal(broken.audio[0].createdAtMs, 0);
+  assert.deepEqual(broken.failures, []);
+  broken.bridge.close();
+});
+
+test('input energy windows preserve exact local input, silence, partial tails and validated media timestamps', async () => {
+  let now = 0;
+  const inputs: TranslationInputDiagnostic[] = [];
+  const f = fixture({
+    monotonicNow: () => now,
+    onInputDiagnostic: (event) => inputs.push(event),
+  });
+  f.attach('local');
+  f.media('local', Buffer.alloc(1600), '0');
+  assert.equal(
+    inputs.length,
+    0,
+    'ringing audio is not part of the conversation',
+  );
+  f.attach('remote');
+  await f.ready('local');
+  await f.ready('remote');
+  now = 10;
+  const silence = Buffer.alloc(800, 0xff);
+  f.media('local', silence, '0');
+  assert.equal(inputs.length, 0);
+  now = 50;
+  const speech = Buffer.alloc(1120, 0x80);
+  f.media('local', speech, '100');
+  assert.equal(inputs.length, 1);
+  assert.deepEqual(inputs[0], {
+    pipelineId: inputs[0].pipelineId,
+    role: 'local',
+    clock: 'bridge_monotonic',
+    observedAtMs: 50,
+    windowStartedAtMs: 10,
+    windowEndedAtMs: 50,
+    audioDurationMs: 200,
+    rms: Math.round(Math.abs(muLawToPcm16(0x80)) / Math.sqrt(2)),
+    peak: Math.abs(muLawToPcm16(0x80)),
+    mediaTimestampMs: 0,
+  });
+  const expected = new PcmuToPcm24k().push(Buffer.concat([silence, speech]));
+  assert.deepEqual(Buffer.concat(f.provider('local').appended), expected);
+  now = 60;
+  f.media('remote', Buffer.alloc(1600, 0xff), '-20');
+  assert.equal(inputs[1].role, 'remote');
+  assert.equal(inputs[1].rms, 0);
+  assert.equal(inputs[1].mediaTimestampMs, undefined);
+  now = 70;
+  f.bridge.close();
+  const tail = inputs.at(-1);
+  assert.equal(tail.audioDurationMs, 40);
+  assert.equal(tail.windowStartedAtMs, 50);
+  assert.equal(tail.windowEndedAtMs, 50);
+  assert.equal(tail.observedAtMs, 70);
+  assert.equal(tail.mediaTimestampMs, 200);
+  assert.equal(tail.rms, Math.abs(muLawToPcm16(0x80)));
+  const count = inputs.length;
+  f.bridge.close();
+  f.media('local');
+  assert.equal(inputs.length, count);
+});
+
+test('throwing input telemetry and invalid diagnostic clocks cannot suppress speech', async () => {
+  let clock = 100;
+  const f = fixture({
+    monotonicNow: () => clock,
+    onInputDiagnostic() {
+      throw new Error('optional');
+    },
+  });
+  await f.pair();
+  const pcmu = Buffer.alloc(3200, 0x80);
+  clock = 150;
+  f.media('local', pcmu);
+  f.provider('local').audio(tone());
+  clock = 90;
+  f.provider('local').audio(tone());
+  clock = Number.NaN;
+  f.provider('local').audio(tone());
+  assert.deepEqual(
+    Buffer.concat(f.provider('local').appended),
+    new PcmuToPcm24k().push(pcmu),
+  );
+  assert.deepEqual(
+    f.audio
+      .filter((event) => event.stage === 'generated')
+      .map((event) => event.createdAtMs),
+    [50, 50, 50],
+  );
+  assert.deepEqual(f.failures, []);
+  f.bridge.close();
+});
+
+test('65 virtual minutes of native output and direct return keep diagnostics bounded and matching marks drained', async () => {
+  let now = 0;
+  const f = fixture({
+    monotonicNow: () => now,
+    remoteCaptions: true,
+    // Exercise the isolated original-audio path after a caption failure; no ASR.
+    createCaptionClient: () => ({
+      ready: Promise.resolve(),
+      append() {
+        throw new Error('caption unavailable in this offline fixture');
+      },
+      async finish() {
+        return undefined;
+      },
+      abort() {},
+    }),
+  });
+  f.attach('local');
+  f.attach('remote');
+  await f.ready('local');
+  const pcm = Buffer.alloc(9600);
+  const original = Buffer.alloc(1600, 0xff);
+  const waiting: { at: number; role: TranslationRole; name: string }[] = [];
+  let lastSequence = 0;
+  let generatedCount = 0;
+  let confirmedCount = 0;
+  let peakOutstanding = 0;
+  let maximumFixturePending = 0;
+  const inspect = () => {
+    for (const event of f.audio) {
+      peakOutstanding = Math.max(peakOutstanding, event.outstandingAudioMs);
+      if (event.stage === 'generated') {
+        const sequence = Number(event.deliveryId.split('_')[1]);
+        assert.equal(sequence, lastSequence + 1);
+        lastSequence = sequence;
+        generatedCount += 1;
+        assert.equal(event.audioDurationMs, 200);
+      }
+      if (event.stage === 'playback_confirmed') {
+        confirmedCount += 1;
+        assert.equal(event.sentToMarkMs, 600);
+      }
+    }
+    f.audio.length = 0;
+  };
+  const acknowledge = () => {
+    while (waiting.length && waiting[0].at <= now) {
+      const mark = waiting.shift();
+      f.mark(mark.role, mark.name);
+    }
+  };
+  for (let frame = 0; frame < (65 * 60 * 1000) / 200; frame += 1) {
+    now = frame * 200;
+    acknowledge();
+    f.provider('local').audio(pcm);
+    f.media('remote', original);
+    for (const role of ['local', 'remote'] as const) {
+      for (const event of f.phones[role].sent) {
+        if (event.event === 'mark')
+          waiting.push({ at: now + 600, role, name: event.mark.name });
+        if (event.event === 'media')
+          assert.equal(Buffer.from(event.media.payload, 'base64').length, 1600);
+      }
+      // Fake transports must not retain an hour of history during a soak test.
+      f.phones[role].sent.length = 0;
+    }
+    maximumFixturePending = Math.max(maximumFixturePending, waiting.length);
+    inspect();
+  }
+  for (let tail = 0; tail < 3; tail += 1) {
+    now += 200;
+    acknowledge();
+    inspect();
+  }
+  assert.equal(generatedCount, 39000);
+  assert.equal(confirmedCount, generatedCount);
+  assert.equal(maximumFixturePending, 6);
+  assert.equal(peakOutstanding, 600);
+  assert.equal(waiting.length, 0);
+  assert.deepEqual(f.failures, []);
+  f.bridge.close();
+  assert.equal(f.audio.length, 0, 'no outstanding deliveries left on close');
+  assert.equal(f.phones.local.listenerCount('message'), 0);
+  assert.equal(f.phones.remote.listenerCount('message'), 0);
+  f.provider('local').audio(pcm);
+  assert.equal(
+    f.audio.length,
+    0,
+    'stale provider output cannot restart delivery',
+  );
+});
 
 test('Nano candidate suppresses original English audio and keeps reverse Chinese routing', async () => {
   const calls: string[] = [];

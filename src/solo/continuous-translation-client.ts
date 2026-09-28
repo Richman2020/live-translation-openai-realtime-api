@@ -2,12 +2,23 @@ import WebSocket from 'ws';
 
 import { createOpenAIWebSocket } from './openai-websocket';
 
+export type ContinuousTranslationAudioMetadata = {
+  /** Stream alignment only, not a unique delta or sentence identifier. */
+  providerElapsedMs?: number;
+};
+
+export type ContinuousTranslationSessionMetadata = {
+  stage: 'session_created' | 'session_updated';
+  expiresAtEpochSeconds: number;
+};
+
 export type ContinuousTranslationOptions = {
   apiKey: string;
   targetLanguage: 'en' | 'zh';
   noiseReduction?: 'near_field' | 'far_field' | null;
   proxyUrl?: string;
-  onAudio: (pcm: Buffer) => void;
+  onAudio: (pcm: Buffer, metadata?: ContinuousTranslationAudioMetadata) => void;
+  onSessionMetadata?: (event: ContinuousTranslationSessionMetadata) => void;
   /** Append-only translated text; no provider sentence-final event is implied. */
   onTranslatedText?: (delta: string) => void;
   onTranscript?: (delta: string) => void;
@@ -30,6 +41,9 @@ const MODEL = 'gpt-realtime-translate';
 const MAX_EVENT_BYTES = 1024 * 1024;
 const MAX_INPUT_BYTES = 48000; // One second of mono PCM16 at 24 kHz.
 const MAX_BUFFERED_BYTES = 256 * 1024;
+// Diagnostic bounds only: invalid optional metadata never interrupts audio.
+const MAX_ALIGNMENT_MS = 7 * 24 * 60 * 60 * 1000;
+const MAX_EXPIRY_SECONDS = 4102444800; // 2100-01-01, a finite Unix timestamp.
 const ignoreSocketError = () => {};
 
 function deferred() {
@@ -190,6 +204,28 @@ export function createContinuousTranslationClient(
     });
   };
 
+  const sessionMetadata = (event: Record<string, any>) => {
+    const expires = event.session?.expires_at;
+    if (
+      event.session?.model !== MODEL ||
+      !Number.isSafeInteger(expires) ||
+      expires <= 0 ||
+      expires > MAX_EXPIRY_SECONDS
+    )
+      return;
+    try {
+      options.onSessionMetadata?.({
+        stage:
+          event.type === 'session.created'
+            ? 'session_created'
+            : 'session_updated',
+        expiresAtEpochSeconds: expires,
+      });
+    } catch {
+      // Optional metadata subscribers cannot interrupt translation.
+    }
+  };
+
   const receive = (raw: unknown) => {
     if (state === 'closed') return;
     let event: Record<string, any>;
@@ -201,6 +237,10 @@ export function createContinuousTranslationClient(
     }
     if (event.type === 'error') {
       fail('PROVIDER_SESSION_REJECTED');
+      return;
+    }
+    if (event.type === 'session.created') {
+      sessionMetadata(event);
       return;
     }
     if (event.type === 'session.updated') {
@@ -222,6 +262,7 @@ export function createContinuousTranslationClient(
         state = 'ready';
         ready.resolve();
       }
+      sessionMetadata(event);
       return;
     }
     if (event.type === 'session.closed') {
@@ -264,7 +305,14 @@ export function createContinuousTranslationClient(
         return;
       }
       try {
-        options.onAudio(pcm);
+        const elapsed = event.elapsed_ms;
+        options.onAudio(pcm, {
+          ...(Number.isSafeInteger(elapsed) &&
+          elapsed >= 0 &&
+          elapsed <= MAX_ALIGNMENT_MS
+            ? { providerElapsedMs: elapsed }
+            : {}),
+        });
       } catch {
         fail('AUDIO_CALLBACK_FAILED');
       }

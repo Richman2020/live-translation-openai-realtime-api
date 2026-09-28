@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import vm from 'node:vm';
 import { createCallLifecycle, createDeviceMediaOwner, microphoneErrorCode } from '../public/call-lifecycle.js';
+import * as rtcDiagnostics from '../public/rtc-diagnostics.js';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -11,6 +12,8 @@ function deferred<T>() {
   const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
   return { promise, resolve, reject };
 }
+
+const settlePage = () => new Promise<void>(resolve => setImmediate(resolve));
 
 function streamFixture() {
   let stopped = 0;
@@ -514,6 +517,8 @@ async function pageFixture(requestMedia: (constraints: unknown) => Promise<unkno
   }
   class FakeDevice extends EventEmitter {
     options: any;
+    tokens: string[] = [];
+    destroyed = 0;
     audio = Object.assign(new EventEmitter(), {
       isOutputSelectionSupported: true,
       availableOutputDevices: new Map([['default', { deviceId: 'default', label: 'Default speaker' }], ['headset', { deviceId: 'headset', label: 'Headphones' }]]),
@@ -526,20 +531,27 @@ async function pageFixture(requestMedia: (constraints: unknown) => Promise<unkno
     constructor(_token: string, options: unknown) { super(); this.options = options; device = this; }
     async register() { this.emit('registered'); }
     async unregister() { this.emit('unregistered'); }
-    destroy() {}
+    destroy() { this.destroyed++; }
+    updateToken(token: string) { this.tokens.push(token); }
     async connect() { sdkConnects += 1; mediaHandedToSdk = await this.options.getUserMedia({ audio: true }); outgoingCall = new FakeCall(); return outgoingCall; }
   }
   const sources: any[] = [];
   class FakeEvents {
+    static CLOSED = 2;
+    static CONNECTING = 0;
+    static OPEN = 1;
+    readyState = 0;
     onopen?: () => void;
+    onerror?: () => void;
     handlers = new Map();
     constructor() { sources.push(this); }
     addEventListener(name: string, handler: unknown) { this.handlers.set(name, handler); }
-    close() {}
+    close() { this.readyState = FakeEvents.CLOSED; }
   }
   const context = vm.createContext({
     audioOutputModule: await import('../public/audio-output.js'),
     microphoneInputModule: await import('../public/microphone-input.js'),
+    rtcDiagnosticsModule: { createRtcDiagnostics: (options: any = {}) => rtcDiagnostics.createRtcDiagnostics({ now, ...options }) },
     translationEngineModule: await import('../public/translation-engine.js'),
     lifecycleModule: { createCallLifecycle, createDeviceMediaOwner, microphoneMessages: (await import('../public/call-lifecycle.js')).microphoneMessages },
     document: { getElementById: element, querySelector: element, querySelectorAll: () => [], createElement: node, createElementNS: node, body: node() },
@@ -553,7 +565,7 @@ async function pageFixture(requestMedia: (constraints: unknown) => Promise<unkno
     console: { info: (...values: string[]) => sdkLogs.push(values.join(' ')) },
     setTimeout: (...args: Parameters<typeof setTimeout>) => {
       const timer = setTimeout(...args); timer.unref();
-      const entry = { delay: args[1] || 0, cleared: false, fire() { if (!entry.cleared) { clearTimeout(timer); Reflect.apply(args[0], undefined, args.slice(2)); } } };
+      const entry = { delay: args[1] || 0, cleared: false, fire() { if (!entry.cleared) { entry.cleared = true; clearTimeout(timer); Reflect.apply(args[0], undefined, args.slice(2)); } } };
       timeouts.set(timer, entry); return timer;
     },
     clearTimeout: (timer: ReturnType<typeof setTimeout>) => { const entry = timeouts.get(timer); if (entry) entry.cleared = true; clearTimeout(timer); },
@@ -586,21 +598,23 @@ async function pageFixture(requestMedia: (constraints: unknown) => Promise<unkno
   const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
   const importLine = "await import('./call-lifecycle.js')";
   assert.ok(source.includes(importLine));
-  await vm.runInContext(source.replace(importLine, 'lifecycleModule').replace("await import('./audio-output.js')", 'audioOutputModule').replace("await import('./microphone-input.js')", 'microphoneInputModule').replace("await import('./translation-engine.js')", 'translationEngineModule'), context);
+  await vm.runInContext(source.replace(importLine, 'lifecycleModule').replace("await import('./audio-output.js')", 'audioOutputModule').replace("await import('./microphone-input.js')", 'microphoneInputModule').replace("await import('./rtc-diagnostics.js')", 'rtcDiagnosticsModule').replace("await import('./translation-engine.js')", 'translationEngineModule'), context);
   await new Promise(resolve => setImmediate(resolve));
   if (!options.initialStatusFailure && sources.length) {
-    sources[0].onopen();
+    sources[0].readyState = FakeEvents.OPEN; sources[0].onopen();
     await new Promise(resolve => setImmediate(resolve));
     await element('enable-device').events.click();
   }
   element('phone-number').value = '+12125551234';
   return {
-    element, requests, requestBodies, device, sdkLogs, exports, historyPaths, storedAccessToken: () => sessionValues.get('ai-phone-local-token'), history: () => JSON.parse(localValues.get('ai-phone-calls-v1') || '[]'), outgoingCall: () => outgoingCall, sdkConnects: () => sdkConnects, media: () => mediaHandedToSdk,
+    element, requests, requestBodies, device, currentDevice: () => device, sdkLogs, exports, historyPaths, storedAccessToken: () => sessionValues.get('ai-phone-local-token'), history: () => JSON.parse(localValues.get('ai-phone-calls-v1') || '[]'), outgoingCall: () => outgoingCall, sdkConnects: () => sdkConnects, media: () => mediaHandedToSdk,
     requestTimeout(path: string) { return apiTimeouts.filter(entry => entry.path === path).at(-1)?.timer; },
     failApi(path: string, failure: 'network' | 'timeout' | { status: number; error: string }) { apiFailures.set(path, failure); },
     restoreApi(path: string) { apiFailures.delete(path); },
     eventSourceCount: () => sources.length,
-    async openEvents() { assert.ok(sources.length); sources[sources.length - 1].onopen(); await new Promise(resolve => setImmediate(resolve)); },
+    eventSource: (index = sources.length - 1) => sources[index],
+    pendingTimeouts: (delay: number) => [...timeouts.values()].filter(timer => !timer.cleared && timer.delay === delay),
+    async openEvents() { assert.ok(sources.length); const source = sources[sources.length - 1]; source.readyState = FakeEvents.OPEN; source.onopen(); await new Promise(resolve => setImmediate(resolve)); },
     pagehide() { windowEvents.get('pagehide')?.(); },
     async pollStatus() {
       const matching = [...intervals.values()].filter(timer => timer.delay === 10000);
@@ -1330,31 +1344,229 @@ test('sound detection and SDK quality warnings remain separate and reset for the
   await f.element('end-call').events.click();
 });
 
-test('RTC diagnostic logs are rate limited, retain SDK units, and include only allowed finite numeric fields', async () => {
+test('token renewal deduplicates expiry events and updates only the current Device', async () => {
+  const pending = deferred<void>(); let tokenReads = 0;
+  const f = await pageFixture(async () => streamFixture().stream, undefined, {
+    beforeResponse: async path => { if (path === '/api/token' && ++tokenReads === 2) await pending.promise; },
+  });
+  f.device.emit('tokenWillExpire'); f.device.emit('tokenWillExpire');
+  assert.equal(tokenReads, 2, 'duplicate SDK events share one pending renewal');
+  pending.resolve(); await settlePage();
+  assert.deepEqual(f.device.tokens, ['offline-sdk-token']);
+  assert.equal(f.device.destroyed, 0);
+  f.device.emit('tokenWillExpire'); await settlePage();
+  assert.equal(f.device.tokens.length, 2, 'a later expiry begins a fresh renewal');
+  assert.doesNotMatch(f.sdkLogs.join('\n'), /offline-sdk-token|Bearer|private/);
+  assert.equal(f.sdkConnects(), 0);
+  f.pagehide();
+});
+
+test('token renewal retries a temporary failure with backoff and clears retries on success', async () => {
+  const f = await pageFixture(async () => streamFixture().stream);
+  f.failApi('/api/token', 'network'); f.device.emit('tokenWillExpire'); await settlePage();
+  assert.equal(f.device.destroyed, 0);
+  assert.equal(f.pendingTimeouts(1000).length, 1);
+  f.device.emit('tokenWillExpire');
+  assert.equal(f.requests.filter(path => path === 'GET /api/token').length, 2);
+  f.restoreApi('/api/token'); f.pendingTimeouts(1000)[0].fire(); await settlePage();
+  assert.equal(f.device.tokens.length, 1);
+  assert.equal(f.pendingTimeouts(1000).length, 0);
+  assert.equal(f.pendingTimeouts(3000).length, 0);
+  assert.equal(f.device.destroyed, 0);
+  assert.equal(f.element('start-call').disabled, false);
+  f.pagehide();
+});
+
+test('token renewal stops after three failures and keeps its final warning visible after status recovery', async t => {
+  for (const inCall of [false, true]) await t.test(inCall ? 'active call is preserved' : 'idle Device is retired', async () => {
+    const f = await pageFixture(async () => streamFixture().stream);
+    if (inCall) await f.element('start-call').events.click();
+    f.failApi('/api/token', 'network'); f.device.emit('tokenWillExpire'); await settlePage();
+    for (const delay of [1000, 3000]) { assert.equal(f.pendingTimeouts(delay).length, 1); f.pendingTimeouts(delay)[0].fire(); await settlePage(); }
+    assert.equal(f.requests.filter(path => path === 'GET /api/token').length, 4, 'initial registration plus exactly three renewal attempts');
+    assert.equal(f.device.destroyed, inCall ? 0 : 1);
+    assert.match(f.element('app-error').textContent, /凭据续期失败/);
+    await f.pollStatus();
+    assert.equal(f.element('app-error').hidden, false);
+    assert.match(f.element('app-error').textContent, /凭据续期失败/);
+    f.device.emit('tokenWillExpire'); await settlePage();
+    assert.equal(f.requests.filter(path => path === 'GET /api/token').length, 4);
+    assert.equal(f.pendingTimeouts(1000).length + f.pendingTimeouts(3000).length, 0);
+    assert.doesNotMatch(f.sdkLogs.join('\n'), /private fetch|offline-sdk-token/);
+    f.pagehide();
+  });
+});
+
+test('stale token success, transport failure and unauthorized response cannot affect a replacement Device', async t => {
+  for (const result of ['success', 'network', 'unauthorized']) await t.test(result, async () => {
+    const pending = deferred<void>(); let tokenReads = 0; let oldSignal: AbortSignal;
+    const f = await pageFixture(async () => streamFixture().stream, undefined, {
+      beforeResponse: async (path, signal) => {
+        if (path !== '/api/token' || ++tokenReads !== 2) return;
+        oldSignal = signal; await pending.promise;
+        if (result === 'network') throw new TypeError('private stale request error');
+      },
+    });
+    const old = f.device; old.emit('tokenWillExpire');
+    await f.element('enable-device').events.click();
+    assert.equal(oldSignal.aborted, true, 'retiring a Device cancels its outstanding fetch');
+    await f.element('enable-device').events.click();
+    const current = f.currentDevice(); assert.notEqual(current, old);
+    if (result === 'unauthorized') f.failApi('/api/token', { status: 401, error: 'UNAUTHORIZED' });
+    pending.resolve(); await settlePage();
+    f.restoreApi('/api/token');
+    assert.equal(old.destroyed, 1); assert.equal(current.destroyed, 0);
+    assert.deepEqual(old.tokens, []); assert.deepEqual(current.tokens, []);
+    assert.equal(f.element('local-state').textContent, '本机服务已连接');
+    assert.equal(f.element('start-call').disabled, false);
+    assert.doesNotMatch(f.element('app-error').textContent, /凭据|private/);
+    old.emit('tokenWillExpire'); await settlePage();
+    assert.equal(tokenReads, 3, 'old Device events must never start additional requests');
+    assert.equal(f.pendingTimeouts(1000).length + f.pendingTimeouts(3000).length, 0);
+    f.pagehide();
+  });
+});
+
+test('renewal request timeouts and retry timers are bounded and disposed with the page or Device', async () => {
+  let reads = 0; let renewalSignal: AbortSignal;
+  const f = await pageFixture(async () => streamFixture().stream, undefined, {
+    beforeResponse: async (path, signal) => {
+      if (path !== '/api/token' || ++reads < 2) return;
+      renewalSignal = signal;
+      await new Promise<void>((_resolve, reject) => signal.addEventListener('abort', () => reject(Object.assign(new Error('private abort'), { name: 'AbortError' })), { once: true }));
+    },
+  });
+  f.device.emit('tokenWillExpire');
+  assert.equal(f.requestTimeout('/api/token').delay, 8000);
+  f.requestTimeout('/api/token').fire(); await settlePage();
+  assert.equal(renewalSignal.aborted, true);
+  assert.equal(f.pendingTimeouts(1000).length, 1);
+  f.pendingTimeouts(1000)[0].fire();
+  assert.equal(reads, 3);
+  f.pagehide(); await settlePage();
+  assert.equal(renewalSignal.aborted, true);
+  assert.equal(f.pendingTimeouts(1000).length + f.pendingTimeouts(3000).length + f.pendingTimeouts(8000).length, 0);
+  assert.doesNotMatch(f.element('app-error').textContent, /续期失败|private/);
+
+  const retired = await pageFixture(async () => streamFixture().stream);
+  retired.failApi('/api/token', 'network'); retired.device.emit('tokenWillExpire'); await settlePage();
+  const retry = retired.pendingTimeouts(1000)[0];
+  await retired.element('enable-device').events.click();
+  assert.equal(retry.cleared, true); retry.fire(); await settlePage();
+  assert.equal(retired.requests.filter(path => path === 'GET /api/token').length, 2);
+  retired.pagehide();
+});
+
+test('current unauthorized token renewal stops retries and closes protected event streams', async () => {
+  const f = await pageFixture(async () => streamFixture().stream);
+  f.failApi('/api/token', { status: 401, error: 'UNAUTHORIZED' }); f.device.emit('tokenWillExpire'); await settlePage();
+  assert.match(f.element('app-error').textContent, /本机访问凭据已失效/);
+  assert.equal(f.element('start-call').disabled, true);
+  assert.equal(f.eventSource().readyState, 2);
+  assert.equal(f.pendingTimeouts(1000).length + f.pendingTimeouts(3000).length, 0);
+  const count = f.requests.length; await f.pollStatus();
+  assert.equal(f.requests.length, count);
+  f.pagehide();
+});
+
+test('SSE preserves native CONNECTING recovery and retries CLOSED sources without duplicate or stale handlers', async () => {
+  const f = await pageFixture(async () => streamFixture().stream);
+  const first = f.eventSource(); first.readyState = 0; first.onerror();
+  await f.pollStatus();
+  assert.equal(f.eventSourceCount(), 1); assert.equal(f.pendingTimeouts(1000).length, 0);
+  first.readyState = 2; first.onerror(); first.onerror();
+  assert.equal(f.element('start-call').disabled, true);
+  assert.equal(f.pendingTimeouts(1000).length, 1);
+  await f.pollStatus();
+  assert.equal(f.eventSourceCount(), 1, 'status polling cannot bypass pending backoff');
+  f.pendingTimeouts(1000)[0].fire(); assert.equal(f.eventSourceCount(), 2);
+  await f.openEvents();
+  assert.equal(f.element('start-call').disabled, false);
+  const requests = f.requests.length;
+  first.onopen(); first.onerror(); first.handlers.get('error')({ data: JSON.stringify({ message: 'stale private event' }) });
+  first.handlers.get('snapshot')({ data: JSON.stringify({ activeSession: { id: 'stale-call', status: 'active' } }) });
+  assert.equal(f.requests.length, requests);
+  assert.doesNotMatch(f.element('app-error').textContent, /stale private/);
+  assert.equal(f.element('start-call').disabled, false);
+  assert.equal(f.sdkConnects(), 0);
+  f.pagehide();
+});
+
+test('SSE CLOSED retries stop after three attempts and manual refresh restarts the bounded sequence', async () => {
+  const f = await pageFixture(async () => streamFixture().stream);
+  for (const delay of [1000, 3000, 10000]) {
+    const source = f.eventSource(); source.readyState = 2; source.onerror();
+    assert.equal(f.pendingTimeouts(delay).length, 1); f.pendingTimeouts(delay)[0].fire();
+  }
+  const source = f.eventSource(); source.readyState = 2; source.onerror();
+  assert.equal(f.eventSourceCount(), 4);
+  assert.match(f.element('app-error').textContent, /状态连接未能恢复/);
+  await f.pollStatus(); await f.pollStatus();
+  assert.equal(f.eventSourceCount(), 4, 'normal polling must not create an unbounded retry loop');
+  assert.equal(f.element('app-error').hidden, false);
+  await f.element('refresh-status').events.click();
+  assert.equal(f.eventSourceCount(), 5);
+  assert.equal(f.element('app-error').hidden, false, 'a successful status request alone does not prove SSE recovery');
+  await f.openEvents(); assert.equal(f.element('start-call').disabled, false);
+  assert.equal(f.element('app-error').hidden, true);
+  assert.match(f.element('toast').textContent, /状态连接已恢复.*文字记录可能不完整/);
+  f.device.emit('error', { code: 31003 });
+  const sdkError = f.element('app-error').textContent;
+  await f.openEvents();
+  assert.equal(f.element('app-error').hidden, false);
+  assert.equal(f.element('app-error').textContent, sdkError, 'SSE recovery must not clear unrelated phone errors');
+  f.pagehide();
+});
+
+test('SSE backoff is canceled on authentication failure or unload without further sources or calls', async t => {
+  for (const reason of ['unauthorized', 'unload']) await t.test(reason, async () => {
+    const f = await pageFixture(async () => streamFixture().stream);
+    f.eventSource().readyState = 2; f.eventSource().onerror();
+    const retry = f.pendingTimeouts(1000)[0]; assert.ok(retry);
+    if (reason === 'unload') f.pagehide();
+    else { f.failApi('/api/status', { status: 401, error: 'UNAUTHORIZED' }); await f.pollStatus(); }
+    assert.equal(retry.cleared, true); retry.fire(); await settlePage();
+    assert.equal(f.eventSourceCount(), 1);
+    assert.equal(f.sdkConnects(), 0);
+    assert.equal(f.requests.includes('POST /api/calls'), false);
+    f.pagehide();
+  });
+});
+
+test('RTC logs aggregate every one-second sample, retain units, isolate calls, and exclude private fields', async () => {
   let now = 10000;
   const f = await pageFixture(async () => streamFixture().stream, () => now);
   await f.element('start-call').events.click();
   const call = f.outgoingCall();
   const sample = {
-    bytesSent: 1400, bytesReceived: 1600, packetsLost: 2, packetsLostFraction: 12.5,
+    bytesSent: 1400, bytesReceived: 1600, packetsSent: 50, packetsReceived: 48, packetsLost: 2, packetsLostFraction: 4,
+    rtt: 100, jitter: 3, mos: 4,
     audioInputLevel: 1000, audioOutputLevel: 1200, callSid: 'private-call', ip: 'private-ip', sdp: 'private-sdp',
     audio: 'private-audio', token: 'private-token', extra: 123, totals: { bytesSent: 999999 },
   };
   call.emit('volume', 0.07, 0.12);
   call.emit('volume', 0.02, 0.03);
-  now += 4999; call.emit('sample', sample);
+  for (let second = 1; second <= 4; second++) { now += 1000; call.emit('sample', sample); }
   assert.equal(f.sdkLogs.filter(log => log.startsWith('[AI Phone RTC]')).length, 0);
-  now += 1; call.emit('sample', sample); call.emit('sample', sample);
+  now += 1000; call.emit('sample', { ...sample, rtt: 200, jitter: 8, mos: 3 });
   const entries = () => f.sdkLogs.filter(log => log.startsWith('[AI Phone RTC]')).map(log => JSON.parse(log.slice('[AI Phone RTC] '.length)));
-  assert.deepEqual(entries(), [{ bytesSent: 1400, bytesReceived: 1600, packetsLost: 2, packetLossPercent: 12.5, audioInputLevel: 1000, audioOutputLevel: 1200, inputVolumePeak: 0.07, outputVolumePeak: 0.12 }]);
+  assert.deepEqual(entries(), [{ elapsedMs: 5000, windowDurationMs: 5000, sampleCount: 5,
+    bytesSent: 7000, bytesReceived: 8000, packetsSent: 250, packetsReceived: 240, packetsLost: 10,
+    packetLossPercent: 4, packetLossSampleCount: 5, packetLossPacketsExpected: 250,
+    rttAvgMs: 120, rttMaxMs: 200, jitterAvgMs: 4, jitterMaxMs: 8, mosAvg: 3.8, mosMin: 3,
+    audioInputLevelPeak: 1000, audioOutputLevelPeak: 1200, inputVolumePeak: 0.07, outputVolumePeak: 0.12 }]);
   call.emit('volume', NaN, Infinity);
   now += 5000;
-  call.emit('sample', { ...sample, bytesSent: Infinity, bytesReceived: '1600', packetsLost: -1, packetsLostFraction: NaN, audioInputLevel: 32768, audioOutputLevel: null });
-  assert.equal(entries().length, 1, 'invalid numbers are omitted, not represented as successful zero readings');
+  call.emit('sample', { bytesSent: Infinity, bytesReceived: '1600', packetsLost: -1, packetsLostFraction: NaN, audioInputLevel: 32768, audioOutputLevel: null });
+  assert.deepEqual(entries()[1], { elapsedMs: 10000, windowDurationMs: 5000, sampleCount: 1 }, 'unavailable metrics are absent, not represented as successful zero readings');
   assert.doesNotMatch(f.sdkLogs.join('\n'), /private-|callSid|sdp|token|totals/);
   await f.element('end-call').events.click();
   now += 5000; call.emit('sample', sample);
-  assert.equal(entries().length, 1, 'ended calls cannot keep logging RTC samples');
+  assert.equal(entries().length, 2, 'ended calls cannot keep logging RTC samples');
+  await f.element('start-call').events.click();
+  now += 5000; f.outgoingCall().emit('sample', { packetsSent: 0, bytesSent: 0, rtt: 0 });
+  assert.deepEqual(entries()[2], { elapsedMs: 5000, windowDurationMs: 5000, sampleCount: 1, bytesSent: 0, packetsSent: 0, rttAvgMs: 0, rttMaxMs: 0 }, 'new calls start a fresh window without old peaks or counters');
+  await f.element('end-call').events.click();
 });
 
 test('confirmed cleanup clears its stale banner while preserving unrelated SDK and provider errors', async () => {

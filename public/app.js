@@ -4,6 +4,7 @@
   const { createCallLifecycle, createDeviceMediaOwner, microphoneMessages } = await import('./call-lifecycle.js');
   const { createAudioOutput } = await import('./audio-output.js');
   const { createMicrophoneInput } = await import('./microphone-input.js');
+  const { createRtcDiagnostics } = await import('./rtc-diagnostics.js');
   const { createTranslationEngineSelection, translationEngineLabel, translationReadiness, usesNanoVoice, usesRemoteCaptions } = await import('./translation-engine.js');
   const $ = id => document.getElementById(id);
   const tokenKey = 'ai-phone-local-token';
@@ -105,6 +106,10 @@
   let verifying = false;
   let muted = false;
   let eventSource = null;
+  let eventRetryTimer = null;
+  let eventRetryAttempt = 0;
+  let eventRetriesExhausted = false;
+  let tokenRenewal = null;
   let eventsOnline = false;
   let heartbeat = null;
   let refreshPending = null;
@@ -196,7 +201,7 @@
     return diagnostics.length ? `${message}（${diagnostics.join('，')}）` : message;
   }
   function showError(error) {
-    displayedErrorSource = error?.recoverableLocalConnection === true ? 'local-connection' : 'operation';
+    displayedErrorSource = error?.recoverableLocalConnection === true ? 'local-connection' : error?.recoverableEventConnection === true ? 'event-connection' : 'operation';
     $('app-error').textContent = cleanMessage(typeof error === 'string' ? error : error?.message); $('app-error').hidden = false;
   }
   function clearError() { displayedErrorSource = null; $('app-error').hidden = true; $('app-error').textContent = ''; }
@@ -234,19 +239,24 @@
     if (view === 'history') renderHistory();
     window.scrollTo(0, 0);
   }
-  async function api(path, options = {}, timeoutMs) {
+  async function api(path, options = {}, timeoutMs, acceptResponse = () => true) {
     if (!accessToken) throw new Error(missingAccessMessage);
     const controller = new AbortController();
+    const abort = () => controller.abort();
+    if (options.signal?.aborted) abort();
+    else options.signal?.addEventListener('abort', abort, { once: true });
     // Verification allows four sequential requests. Dialing can require a
     // 5-second public probe plus a 15-second engine probe, with transport margin.
     const timeout = setTimeout(() => controller.abort(), timeoutMs ?? (path === '/api/verify' ? 75000 : path === '/api/calls' ? 30000 : 20000));
     try {
       const response = await fetch(path, { ...options, cache: 'no-store', signal: controller.signal, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` } });
       let payload = {}; try { payload = await response.json(); } catch { /* A non-JSON error has a useful HTTP status. */ }
+      // A retired Device's renewal must not invalidate a newer page/device state.
+      if (!acceptResponse()) return null;
       if (!response.ok) {
         if (response.status === 401 || payload.error === 'UNAUTHORIZED') {
           localAccessRejected = true;
-          state = null; eventSource?.close(); eventsOnline = false;
+          state = null; stopEvents(); eventsOnline = false;
           throw new Error(rejectedAccessMessage);
         }
         throw new Error(cleanMessage(typeof payload.error === 'string' ? payload.error : payload.message, `操作未完成（HTTP ${response.status}），请检查设置后重试。`));
@@ -259,7 +269,7 @@
         throw Object.assign(new Error(message), { recoverableLocalConnection: path === '/api/status' });
       }
       throw error;
-    } finally { clearTimeout(timeout); }
+    } finally { clearTimeout(timeout); options.signal?.removeEventListener('abort', abort); }
   }
   const post = (path, body = {}, timeoutMs) => api(path, { method: 'POST', body: JSON.stringify(body) }, timeoutMs);
 
@@ -447,6 +457,7 @@
     callLifecycle.cancel(attempt);
     if (attempt?.mediaOwner?.retireIfPending(attempt) && device === attempt.device) {
       // Destroy only this old Device. A later registration gets a fresh AudioHelper.
+      cancelTokenRenewal();
       const oldDevice = device; device = null; deviceMediaOwner = null; registered = false;
       audioOutput.bind(null);
       clearInterval(heartbeat); heartbeat = null;
@@ -496,11 +507,23 @@
     })();
     return refreshPending;
   }
+  function stopEvents() {
+    clearTimeout(eventRetryTimer); eventRetryTimer = null;
+    eventSource?.close(); eventSource = null;
+  }
   function connectEvents() {
-    if (!accessToken || eventSource || disposed || localAccessRejected) return;
-    eventSource = new EventSource(`/api/events?token=${encodeURIComponent(accessToken)}`);
-    eventSource.onopen = () => { if (disposed || localAccessRejected) return; eventsOnline = true; renderStatus(); refreshStatus().catch(error => showError(error)); };
-    const receive = (name, handler) => eventSource.addEventListener(name, event => {
+    if (!accessToken || eventSource || eventRetryTimer || eventRetriesExhausted || disposed || localAccessRejected) return;
+    const source = new EventSource(`/api/events?token=${encodeURIComponent(accessToken)}`);
+    eventSource = source;
+    const current = () => eventSource === source && !disposed && !localAccessRejected;
+    source.onopen = () => {
+      if (!current()) return;
+      eventRetryAttempt = 0; eventsOnline = true;
+      if (displayedErrorSource === 'event-connection') { clearError(); toast('状态连接已恢复；断开期间的文字记录可能不完整。'); }
+      renderStatus(); refreshStatus().catch(error => showError(error));
+    };
+    const receive = (name, handler) => source.addEventListener(name, event => {
+      if (!current()) return;
       if (!event.data) return;
       try { handler(JSON.parse(event.data)); } catch { showError('收到的状态数据无法读取，正在重新检查。'); refreshStatus().catch(error => showError(error)); }
     });
@@ -512,7 +535,20 @@
     receive('translation-audio', applyAudioDelivery);
     receive('translation-metric', applyTranslationTiming);
     receive('error', value => showError(cleanMessage(value.message || value.error, '通话服务报告错误，请检查连接状态。')));
-    eventSource.onerror = () => { eventsOnline = false; renderStatus(); };
+    source.onerror = () => {
+      if (!current()) return;
+      eventsOnline = false; renderStatus();
+      // CONNECTING streams already have browser-managed retry. CLOSED streams do not.
+      if (source.readyState !== EventSource.CLOSED) return;
+      source.close(); eventSource = null;
+      const delay = [1000, 3000, 10000][eventRetryAttempt++];
+      if (delay === undefined) {
+        eventRetriesExhausted = true;
+        showError({ message: '状态连接未能恢复，请点击「刷新状态」重试；电话音频使用独立连接，断开期间的文字记录可能不完整。', recoverableEventConnection: true });
+        return;
+      }
+      eventRetryTimer = setTimeout(() => { eventRetryTimer = null; connectEvents(); }, delay);
+    };
   }
   function applyCaptionStatus(value) {
     if (!value || !activeSession || !usesRemoteCaptions(activeSession.translationEngine) || value.sessionId !== activeSession.id || terminal(activeSession.status) || activeSession.status === 'ending') return;
@@ -670,7 +706,43 @@
     $('export-current').disabled = false;
   }
   async function presence(available) { if (accessToken) await post('/api/presence', { available }); }
+  function cancelTokenRenewal() {
+    const old = tokenRenewal; tokenRenewal = null;
+    clearTimeout(old?.timer); old?.controller?.abort();
+  }
+  function renewDeviceToken(next) {
+    if (device !== next || disposed || localAccessRejected || tokenRenewal?.device === next) return;
+    cancelTokenRenewal();
+    const renewal = { device: next, attempts: 0, timer: null, controller: null };
+    tokenRenewal = renewal;
+    const current = () => device === next && tokenRenewal === renewal && !disposed;
+    const run = async () => {
+      if (!current() || localAccessRejected) return;
+      renewal.attempts += 1;
+      renewal.controller = new AbortController();
+      try {
+        // Three bounded attempts fit within the 60-second SDK expiry warning.
+        const fresh = await api('/api/token', { signal: renewal.controller.signal }, 8000, current);
+        if (!current() || localAccessRejected) return;
+        if (typeof fresh?.token !== 'string' || !fresh.token) throw new Error('INVALID_TOKEN_RESPONSE');
+        next.updateToken(fresh.token);
+        cancelTokenRenewal();
+        logSdkEvent('device-token-renewed');
+      } catch (error) {
+        if (!current()) return;
+        if (!localAccessRejected && renewal.attempts < 3) {
+          renewal.timer = setTimeout(run, [1000, 3000][renewal.attempts - 1]);
+          return;
+        }
+        showError(localAccessRejected ? rejectedAccessMessage : '电话访问凭据续期失败，请结束当前通话后重新开启通话。');
+        logSdkEvent('device-token-renewal-failed');
+        if (!busy() && current()) await destroyDevice();
+      }
+    };
+    run();
+  }
   async function destroyDevice() {
+    cancelTokenRenewal();
     clearInterval(heartbeat); heartbeat = null; registered = false;
     const oldDevice = device; device = null; deviceMediaOwner = null;
     audioOutput.bind(null);
@@ -709,7 +781,7 @@
         heartbeat = setInterval(() => presence(true).catch(error => showError(error.message)), 15000); renderStatus();
       });
       next.on('unregistered', () => { if (device !== next) return; logSdkEvent('device-unregistered'); registered = false; clearInterval(heartbeat); presence(false).catch(() => {}); renderStatus(); });
-      next.on('tokenWillExpire', async () => { try { const fresh = await api('/api/token'); if (device === next) next.updateToken(fresh.token); } catch (error) { showError(error.message); if (!busy()) await destroyDevice(); } });
+      next.on('tokenWillExpire', () => renewDeviceToken(next));
       next.on('error', error => { if (device !== next) return; logSdkEvent('device-error', error); showError(sdkFailureMessage(error)); });
       next.on('incoming', receiveIncoming);
       await next.register();
@@ -719,7 +791,8 @@
   function bindCall(call, attempt) {
     audioOutput.cancelTest();
     sdkCall = call;
-    const diagnostics = { volumeSeen: false, inputDetected: false, outputDetected: false, playerState: '', inputPeak: null, outputPeak: null, lastLoggedAt: Date.now(), qualityWarnings: new Set() };
+    const diagnostics = { volumeSeen: false, inputDetected: false, outputDetected: false, playerState: '', qualityWarnings: new Set() };
+    const rtcWindow = createRtcDiagnostics();
     callDiagnostics = diagnostics;
     // Public SDK audio event; do not restart SDK-managed or retired audio elements.
     // https://www.twilio.com/docs/voice/sdks/javascript/twiliocall#audio-event
@@ -727,6 +800,7 @@
     diagnostics.disposePlayers = () => {
       for (const [player, update] of players) for (const name of ['playing', 'pause', 'volumechange', 'error', 'ended']) player.removeEventListener(name, update);
       players.clear();
+      rtcWindow.reset();
     };
     call.on('audio', player => {
       if (sdkCall !== call || !callLifecycle.isCurrent(attempt) || players.has(player)) return;
@@ -747,32 +821,21 @@
     call.on('volume', (input, output) => {
       if (sdkCall !== call || !callLifecycle.isCurrent(attempt)) return;
       const wasSeen = diagnostics.volumeSeen; const wasDetected = diagnostics.inputDetected; const outputWasDetected = diagnostics.outputDetected;
+      rtcWindow.addVolume(input, output);
       if (Number.isFinite(input) && input >= 0 && input <= 1) {
-        diagnostics.volumeSeen = true; diagnostics.inputPeak = Math.max(diagnostics.inputPeak ?? 0, input);
+        diagnostics.volumeSeen = true;
         if (!muted && input > 0.01) diagnostics.inputDetected = true;
       }
       if (Number.isFinite(output) && output >= 0 && output <= 1) {
-        diagnostics.outputPeak = Math.max(diagnostics.outputPeak ?? 0, output);
         if (output > 0.01) diagnostics.outputDetected = true;
       }
       if (wasSeen !== diagnostics.volumeSeen || wasDetected !== diagnostics.inputDetected || outputWasDetected !== diagnostics.outputDetected) renderStatus();
     });
     call.on('sample', sample => {
-      if (sdkCall !== call || !callLifecycle.isCurrent(attempt) || !sample || Date.now() - diagnostics.lastLoggedAt < 5000) return;
-      // sample byte/packet fields are deltas since the preceding sample (normally one second).
-      // SDK statsMonitor multiplies packetsLostFraction by 100. Audio levels use 0..32767.
-      const entry = {};
-      for (const key of ['bytesSent', 'bytesReceived', 'packetsLost']) {
-        if (Number.isSafeInteger(sample[key]) && sample[key] >= 0) entry[key] = sample[key];
-      }
-      if (Number.isFinite(sample.packetsLostFraction) && sample.packetsLostFraction >= 0 && sample.packetsLostFraction <= 100) entry.packetLossPercent = Math.round(sample.packetsLostFraction * 100) / 100;
-      for (const key of ['audioInputLevel', 'audioOutputLevel']) {
-        if (Number.isFinite(sample[key]) && sample[key] >= 0 && sample[key] <= 32767) entry[key] = Math.round(sample[key]);
-      }
-      if (diagnostics.inputPeak !== null) entry.inputVolumePeak = Math.round(diagnostics.inputPeak * 10000) / 10000;
-      if (diagnostics.outputPeak !== null) entry.outputVolumePeak = Math.round(diagnostics.outputPeak * 10000) / 10000;
-      diagnostics.lastLoggedAt = Date.now(); diagnostics.inputPeak = null; diagnostics.outputPeak = null;
-      if (Object.keys(entry).length) console.info('[AI Phone RTC]', JSON.stringify(entry));
+      if (sdkCall !== call || !callLifecycle.isCurrent(attempt)) return;
+      // Every SDK one-second delta contributes; raw stats never leave this handler.
+      const entry = rtcWindow.addSample(sample);
+      if (entry) console.info('[AI Phone RTC]', JSON.stringify(entry));
     });
     call.on('accept', () => { if (sdkCall !== call || !callLifecycle.isCurrent(attempt)) return; logSdkEvent('call-accepted'); incomingCall = null; callLifecycle.update(attempt, { phase: 'connected' }); renderStatus(); refreshStatus().catch(error => showError(error)); });
     call.on('reconnecting', error => { if (sdkCall === call) { logSdkEvent('call-reconnecting', error); callLifecycle.update(attempt, { phase: 'reconnecting' }); } });
@@ -998,7 +1061,10 @@
   $('phone-number').addEventListener('input', () => { $('phone-error').textContent = ''; $('phone-number').removeAttribute('aria-invalid'); });
   $('phone-number').addEventListener('keydown', event => { if (event.key === 'Enter') startCall(); });
   $('export-current').addEventListener('click', () => exportRecord(record));
-  $('refresh-status').addEventListener('click', () => refreshStatus().then(() => toast('已重新检查本机配置。')).catch(error => showError(error)));
+  $('refresh-status').addEventListener('click', () => {
+    if (!eventSource) { clearTimeout(eventRetryTimer); eventRetryTimer = null; eventRetryAttempt = 0; eventRetriesExhausted = false; }
+    return refreshStatus().then(() => toast('已重新检查本机配置。')).catch(error => showError(error));
+  });
   $('settings-form').addEventListener('submit', saveSettings); $('verify-connections').addEventListener('click', verifyConnections);
   $('help-button').addEventListener('click', () => $('help-dialog').showModal()); $('close-help').addEventListener('click', () => $('help-dialog').close()); $('help-start').addEventListener('click', () => { $('help-dialog').close(); navigate('workspace'); });
   $('clear-history').addEventListener('click', () => $('clear-dialog').showModal()); $('cancel-clear').addEventListener('click', () => $('clear-dialog').close());
@@ -1006,7 +1072,7 @@
   for (const [id, key] of [['save-history-toggle', 'saveHistory'], ['show-original-toggle', 'showOriginal']]) $(id).addEventListener('click', () => { preferences[key] = !preferences[key]; saveLocal(preferencesKey, preferences); applyPreferences(); });
   window.addEventListener('beforeunload', event => { if (busy()) { event.preventDefault(); event.returnValue = ''; } });
   window.addEventListener('pagehide', () => {
-    disposed = true; clearInterval(heartbeat); eventSource?.close();
+    disposed = true; clearInterval(heartbeat); stopEvents(); cancelTokenRenewal();
     audioOutput.bind(null);
     microphoneInput.dispose();
     callLifecycle.cancel();

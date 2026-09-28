@@ -1,6 +1,7 @@
 import { ConfigStore } from './config';
 import { buildSoloServer } from './server';
 import { SessionManager } from './session-manager';
+import { diagnosticLogRecord } from './diagnostic-log';
 
 const configStore = new ConfigStore();
 const config = configStore.value;
@@ -16,57 +17,11 @@ if (
   throw new Error('Invalid API_PORT');
 const sessionManager = new SessionManager();
 sessionManager.on('event', ({ event, data }) => {
-  if (
-    ![
-      'translation-connection',
-      'translation-audio',
-      'translation-metric',
-      'caption-input',
-    ].includes(event)
-  )
-    return;
-  // Fixed connection metadata only: no IDs, credentials, audio or transcripts.
-  // eslint-disable-next-line no-console -- Retain the numeric close code for diagnosis.
-  console.log(
-    JSON.stringify({
-      at: new Date().toISOString(),
-      event,
-      role: data.role,
-      state: data.state,
-      closeCode: data.closeCode,
-      ...(event === 'caption-input'
-        ? {
-            stage: data.stage,
-            receivedBytes: data.receivedBytes,
-            forwardedBytes: data.forwardedBytes,
-            discardedZeroBytes: data.discardedZeroBytes,
-            lowEnergyBytes: data.lowEnergyBytes,
-            commits: data.commits,
-            peakRms: data.peakRms,
-            turnAudioMs: data.turnAudioMs,
-            finalCharacters: data.finalCharacters,
-          }
-        : {}),
-      ...(event === 'translation-audio'
-        ? {
-            recipientRole: data.recipientRole,
-            stage: data.stage,
-            generatedBytes: data.generatedBytes,
-            sentBytes: data.sentBytes,
-          }
-        : {}),
-      ...(event === 'translation-metric'
-        ? {
-            name: data.name,
-            scope: data.scope,
-            value: data.value,
-            transcriptionMs: data.transcriptionMs,
-            queueMs: data.queueMs,
-            generationMs: data.generationMs,
-          }
-        : {}),
-    }),
-  );
+  const record = diagnosticLogRecord(event, data);
+  if (!record) return;
+  // Locally generated correlation IDs and numeric fields only, never call SIDs/content.
+  // eslint-disable-next-line no-console -- Keep bounded numeric evidence for call diagnosis.
+  console.log(JSON.stringify(record));
 });
 const server = await buildSoloServer({ configStore, sessionManager });
 server.addHook('onClose', async () => {

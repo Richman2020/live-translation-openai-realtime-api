@@ -1,11 +1,14 @@
+import { randomUUID } from 'node:crypto';
+import { performance } from 'node:perf_hooks';
 import WebSocket from 'ws';
 
 import {
   createContinuousTranslationClient,
+  type ContinuousTranslationAudioMetadata,
   type ContinuousTranslationClient,
   type ContinuousTranslationOptions,
 } from './continuous-translation-client';
-import { Pcm24kToPcmu, PcmuToPcm24k } from './translation-pcm';
+import { muLawToPcm16, Pcm24kToPcmu, PcmuToPcm24k } from './translation-pcm';
 import { createNanoTextCommitter } from './nano-text-committer';
 import {
   createRemoteCaptionClient,
@@ -71,8 +74,24 @@ type Delivery = {
   pendingWrites: number;
   sentReported: boolean;
   acknowledged: boolean;
+  createdAtMs: number;
+  sentAtMs?: number;
+  acknowledgedAtMs?: number;
+  energySquares: number;
+  energySamples: number;
+  peak: number;
+  providerElapsedMs?: number;
   sealed: boolean;
   timer: ReturnType<typeof setTimeout>;
+};
+
+type InputEnergyWindow = {
+  startedAtMs: number;
+  endedAtMs: number;
+  samples: number;
+  squares: number;
+  peak: number;
+  mediaTimestampMs?: number;
 };
 
 const ROLES: TranslationRole[] = ['local', 'remote'];
@@ -141,6 +160,17 @@ export class ContinuousTranslationBridge {
 
   private readonly deliveries = new Map<string, Delivery>();
 
+  private readonly pipelineId = randomUUID();
+
+  private diagnosticClockOrigin = 0;
+
+  private diagnosticClockLast = 0;
+
+  private readonly inputEnergyWindows = new Map<
+    TranslationRole,
+    InputEnergyWindow
+  >();
+
   private readonly removeListeners: (() => void)[] = [];
 
   private sequence = 0;
@@ -181,6 +211,12 @@ export class ContinuousTranslationBridge {
     const timeout = options.playbackTimeoutMs ?? 20000;
     if (!Number.isFinite(timeout) || timeout < 1 || timeout > 120000)
       throw new Error('INVALID_CONTINUOUS_PLAYBACK_TIMEOUT');
+    try {
+      const origin = (options.monotonicNow || (() => performance.now()))();
+      if (Number.isFinite(origin)) this.diagnosticClockOrigin = origin;
+    } catch {
+      // A diagnostic clock is never an audio dependency.
+    }
     if (options.localVoice) {
       this.nanoCommitter = createNanoTextCommitter({
         boundaryDelayMs: options.sentenceBoundaryDelayMs,
@@ -199,6 +235,105 @@ export class ContinuousTranslationBridge {
         onCommit: (text) => this.enqueueNano(text),
         onError: () => this.shutdown('nano_text_boundary_failed:local'),
       });
+    }
+  }
+
+  private diagnosticTime(): number {
+    try {
+      const value =
+        (this.options.monotonicNow || (() => performance.now()))() -
+        this.diagnosticClockOrigin;
+      if (
+        Number.isFinite(value) &&
+        value >= 0 &&
+        value <= Number.MAX_SAFE_INTEGER
+      )
+        this.diagnosticClockLast = Math.max(this.diagnosticClockLast, value);
+    } catch {
+      // Preserve the last valid timestamp if an optional test clock fails.
+    }
+    return Math.round(this.diagnosticClockLast * 1000) / 1000;
+  }
+
+  private energy(delivery: Delivery, audio: Buffer): void {
+    for (const code of audio) {
+      const sample = muLawToPcm16(code);
+      delivery.energySquares += sample * sample;
+      delivery.energySamples += 1;
+      delivery.peak = Math.max(delivery.peak, Math.abs(sample));
+    }
+  }
+
+  private inputEnergy(
+    role: TranslationRole,
+    audio: Buffer,
+    timestamp: unknown,
+  ): void {
+    if (!this.options.onInputDiagnostic) return;
+    const observed = this.diagnosticTime();
+    const parsed =
+      typeof timestamp === 'string' && /^\d{1,9}$/.test(timestamp)
+        ? Number(timestamp)
+        : timestamp;
+    const mediaTimestamp =
+      typeof parsed === 'number' &&
+      Number.isSafeInteger(parsed) &&
+      parsed >= 0 &&
+      parsed <= 7 * 24 * 60 * 60 * 1000
+        ? parsed
+        : undefined;
+    let offset = 0;
+    while (offset < audio.length && !this.closed) {
+      let window = this.inputEnergyWindows.get(role);
+      if (!window) {
+        window = {
+          startedAtMs: observed,
+          endedAtMs: observed,
+          samples: 0,
+          squares: 0,
+          peak: 0,
+          ...(mediaTimestamp === undefined
+            ? {}
+            : { mediaTimestampMs: mediaTimestamp + offset / 8 }),
+        };
+        this.inputEnergyWindows.set(role, window);
+      }
+      const end = Math.min(
+        audio.length,
+        offset + DELIVERY_BYTES - window.samples,
+      );
+      for (; offset < end; offset += 1) {
+        const sample = muLawToPcm16(audio[offset]);
+        window.samples += 1;
+        window.squares += sample * sample;
+        window.peak = Math.max(window.peak, Math.abs(sample));
+      }
+      window.endedAtMs = observed;
+      if (window.samples === DELIVERY_BYTES) this.flushInputEnergy(role);
+    }
+  }
+
+  private flushInputEnergy(role: TranslationRole): void {
+    const window = this.inputEnergyWindows.get(role);
+    this.inputEnergyWindows.delete(role);
+    if (!window?.samples) return;
+    try {
+      this.options.onInputDiagnostic?.({
+        pipelineId: this.pipelineId,
+        role,
+        clock: 'bridge_monotonic',
+        observedAtMs: this.diagnosticTime(),
+        windowStartedAtMs: window.startedAtMs,
+        windowEndedAtMs: window.endedAtMs,
+        audioDurationMs: window.samples / 8,
+        rms: Math.round(Math.sqrt(window.squares / window.samples)),
+        peak: window.peak,
+        ...(window.mediaTimestampMs === undefined
+          ? {}
+          : { mediaTimestampMs: window.mediaTimestampMs }),
+      });
+    } catch {
+      // Input telemetry is never a reason to stop forwarding speech.
     }
   }
 
@@ -298,7 +433,20 @@ export class ContinuousTranslationBridge {
         proxyUrl: this.options.proxyUrl,
         timeoutMs: this.options.sessionTimeoutMs,
         createWebSocket: this.options.createWebSocket,
-        onAudio: (pcm) => this.onAudio(role, provider, pcm),
+        onAudio: (pcm, metadata) => this.onAudio(role, provider, pcm, metadata),
+        onSessionMetadata: (metadata) => {
+          if (this.closed) return;
+          try {
+            this.options.onProviderDiagnostic?.({
+              pipelineId: this.pipelineId,
+              role,
+              ...metadata,
+              observedAtMs: this.diagnosticTime(),
+            });
+          } catch {
+            // Metadata reporting must never interrupt audio or readiness.
+          }
+        },
         onTranscript: (delta) => this.onTranscript(role, provider, delta),
         ...(role === 'local' && this.nanoCommitter
           ? {
@@ -456,6 +604,7 @@ export class ContinuousTranslationBridge {
       )
         throw new Error('INVALID_MARK_STREAM');
       delivery.acknowledged = true;
+      delivery.acknowledgedAtMs ??= this.diagnosticTime();
       this.progress(delivery);
       return;
     }
@@ -474,6 +623,8 @@ export class ContinuousTranslationBridge {
     // microphone stream is not a connected conversation and must not fill a
     // queue or be replayed once the other party eventually answers.
     if (!this.started) return;
+    this.inputEnergy(role, audio, event.media.timestamp);
+    if (this.closed) return;
     if (role === 'remote' && this.options.remoteCaptions) {
       // Forward first: no model handshake, endpointing, ASR or TTS on this path.
       this.forwardOriginal(audio);
@@ -518,12 +669,13 @@ export class ContinuousTranslationBridge {
     role: TranslationRole,
     provider: Provider,
     pcm: Buffer,
+    metadata?: ContinuousTranslationAudioMetadata,
   ): void {
     if (this.closed || this.providers.get(role) !== provider) return;
     if (role === 'local' && this.options.localVoice) return;
     // The client can deliver output immediately after resolving ready, before
     // its promise continuation runs; client protocol validation owns readiness.
-    this.forward(role, provider.output.push(pcm));
+    this.forward(role, provider.output.push(pcm), metadata);
     // Provider chunk gaps are not semantic end-of-speech. Keep the FIR tail
     // and resampling phase across every chunk, including provider silence;
     // never add synthetic padding between chunks. Hangup discards the tail
@@ -657,6 +809,10 @@ export class ContinuousTranslationBridge {
         pendingWrites: 1,
         sentReported: false,
         acknowledged: false,
+        createdAtMs: this.diagnosticTime(),
+        energySquares: 0,
+        energySamples: 0,
+        peak: 0,
         sealed: false,
         timer: setTimeout(
           () => this.shutdown('continuous_playback_timeout:local'),
@@ -672,6 +828,7 @@ export class ContinuousTranslationBridge {
     }
     const delivery = this.directDelivery;
     delivery.generatedBytes += audio.length;
+    this.energy(delivery, audio);
     delivery.pendingWrites += 1;
     phone.outstandingBytes += audio.length;
     this.send(
@@ -715,7 +872,11 @@ export class ContinuousTranslationBridge {
     );
   }
 
-  private forward(role: TranslationRole, audio: Buffer): void {
+  private forward(
+    role: TranslationRole,
+    audio: Buffer,
+    metadata?: ContinuousTranslationAudioMetadata,
+  ): void {
     if (this.closed || !audio.length) return;
     const recipientRole = opposite(role);
     const phone = this.phones.get(recipientRole);
@@ -748,6 +909,15 @@ export class ContinuousTranslationBridge {
         pendingWrites: 2,
         sentReported: false,
         acknowledged: false,
+        createdAtMs: this.diagnosticTime(),
+        energySquares: 0,
+        energySamples: 0,
+        peak: 0,
+        ...(Number.isSafeInteger(metadata?.providerElapsedMs) &&
+        metadata.providerElapsedMs >= 0 &&
+        metadata.providerElapsedMs <= 7 * 24 * 60 * 60 * 1000
+          ? { providerElapsedMs: metadata.providerElapsedMs }
+          : {}),
         sealed: true,
         timer: setTimeout(
           () => this.shutdown(`continuous_playback_timeout:${recipientRole}`),
@@ -757,6 +927,7 @@ export class ContinuousTranslationBridge {
       delivery.timer.unref?.();
       phone.outstandingBytes += chunk.length;
       this.deliveries.set(name, delivery);
+      this.energy(delivery, chunk);
       this.diagnostic(delivery, 'generated');
       this.send(
         phone,
@@ -829,6 +1000,34 @@ export class ContinuousTranslationBridge {
         stage,
         generatedBytes: delivery.generatedBytes,
         sentBytes: delivery.sentBytes,
+        pipelineId: this.pipelineId,
+        deliveryId: delivery.name,
+        clock: 'bridge_monotonic',
+        observedAtMs: this.diagnosticTime(),
+        createdAtMs: delivery.createdAtMs,
+        ...(delivery.sentAtMs === undefined
+          ? {}
+          : { sentAtMs: delivery.sentAtMs }),
+        ...(delivery.acknowledgedAtMs === undefined
+          ? {}
+          : { acknowledgedAtMs: delivery.acknowledgedAtMs }),
+        ...(delivery.sentAtMs !== undefined &&
+        delivery.acknowledgedAtMs !== undefined &&
+        delivery.acknowledgedAtMs >= delivery.sentAtMs
+          ? { sentToMarkMs: delivery.acknowledgedAtMs - delivery.sentAtMs }
+          : {}),
+        outstandingAudioMs:
+          (this.phones.get(delivery.recipientRole)?.outstandingBytes ?? 0) / 8,
+        audioDurationMs: delivery.generatedBytes / 8,
+        rms: delivery.energySamples
+          ? Math.round(
+              Math.sqrt(delivery.energySquares / delivery.energySamples),
+            )
+          : 0,
+        peak: delivery.peak,
+        ...(delivery.providerElapsedMs === undefined
+          ? {}
+          : { providerElapsedMs: delivery.providerElapsedMs }),
       });
     } catch {
       // Aggregate diagnostics only, never an audio dependency.
@@ -845,6 +1044,7 @@ export class ContinuousTranslationBridge {
       return;
     if (!delivery.sentReported) {
       delivery.sentReported = true;
+      delivery.sentAtMs = this.diagnosticTime();
       this.diagnostic(delivery, 'sent');
     }
     if (this.closed || !delivery.acknowledged) return;
@@ -897,6 +1097,7 @@ export class ContinuousTranslationBridge {
   private shutdown(reason?: string): void {
     if (this.closed) return;
     this.closed = true;
+    for (const role of ROLES) this.flushInputEnergy(role);
     clearTimeout(this.directMarkTimer);
     this.directDelivery = undefined;
     try {

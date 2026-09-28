@@ -547,6 +547,20 @@ export class SessionManager extends EventEmitter {
                 data: { ...diagnostic, sessionId: session.view.id },
               });
           },
+          onProviderDiagnostic: (diagnostic) => {
+            if (!session.ended)
+              this.emit('event', {
+                event: 'translation-provider',
+                data: { ...diagnostic, sessionId: session.view.id },
+              });
+          },
+          onInputDiagnostic: (diagnostic) => {
+            // Preserve the final partial input window during bridge cleanup.
+            this.emit('event', {
+              event: 'translation-input',
+              data: { ...diagnostic, sessionId: session.view.id },
+            });
+          },
           onMetric: (metric) => {
             if (!session.ended)
               this.emit('event', {

@@ -7,6 +7,17 @@ $environmentPath = Join-Path $projectRoot '.env'
 $message = '本机电话服务当前没有运行。'
 $localToken = ''
 
+function ConvertTo-RecordedUtcTime([object]$value) {
+    # PowerShell 7 may decode JSON dates already; never round-trip them through
+    # a culture-dependent string, which loses fractional ticks and UTC kind.
+    if ($value -is [DateTime]) { $parsed = $value }
+    elseif ($value -is [string]) {
+        $parsed = [DateTime]::ParseExact($value, 'o', [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind)
+    } else { throw '启动记录中的进程时间无效，未停止任何程序。' }
+    if ($parsed.Kind -eq [DateTimeKind]::Unspecified) { throw '启动记录中的进程时间缺少时区，未停止任何程序。' }
+    return $parsed.ToUniversalTime()
+}
+
 function Invoke-LocalService([string]$url, [string]$method, [string]$token = '') {
     $response = $null
     try {
@@ -34,7 +45,7 @@ try {
         $workerId = [int]$record.launcherPid
         $worker = Get-Process -Id $workerId -ErrorAction SilentlyContinue
         if ($null -ne $worker) {
-            $expectedStart = [DateTime]::Parse($record.launcherStartedAt).ToUniversalTime()
+            $expectedStart = ConvertTo-RecordedUtcTime $record.launcherStartedAt
             $workerInfo = Get-CimInstance Win32_Process -Filter "ProcessId = $workerId"
             if ($worker.StartTime.ToUniversalTime() -ne $expectedStart -or $workerInfo.Name -ne 'powershell.exe' -or $workerInfo.CommandLine -notmatch [regex]::Escape($launcherPath) -or $workerInfo.CommandLine -notmatch '(?i)(?:^|\s)-Serve(?:\s|$)') { throw '进程身份与本项目记录不匹配，未停止任何程序。' }
             $allProcesses = @(Get-CimInstance Win32_Process)
@@ -51,7 +62,7 @@ try {
             if ($null -eq $listener) { throw '未找到可确认的电话服务，线路清理状态未知；未强制结束后台进程。' }
             if (-not $knownIds.Contains([int]$listener.OwningProcess)) { throw '当前端口属于另一程序，未停止任何程序。' }
             $server = Get-Process -Id ([int]$listener.OwningProcess) -ErrorAction Stop
-            if (-not $record.serverPid -or $server.Id -ne [int]$record.serverPid -or $server.StartTime.ToUniversalTime() -ne [DateTime]::Parse($record.serverStartedAt).ToUniversalTime()) { throw '电话服务进程已经变化，未停止任何程序。' }
+            if (-not $record.serverPid -or $server.Id -ne [int]$record.serverPid -or $server.StartTime.ToUniversalTime() -ne (ConvertTo-RecordedUtcTime $record.serverStartedAt)) { throw '电话服务进程已经变化，未停止任何程序。' }
             $baseUrl = 'http://127.0.0.1:' + [int]$record.port
             $health = Invoke-LocalService "$baseUrl/health" 'GET'
             if ($health.appId -ne 'ai-phone-solo' -or $health.mode -ne 'solo' -or $health.ok -ne $true) { throw '本机服务身份无法确认，未停止任何程序。' }

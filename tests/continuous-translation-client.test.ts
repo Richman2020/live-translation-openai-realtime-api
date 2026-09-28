@@ -7,6 +7,8 @@ import WebSocket from 'ws';
 
 import {
   createContinuousTranslationClient,
+  type ContinuousTranslationAudioMetadata,
+  type ContinuousTranslationSessionMetadata,
   type ContinuousTranslationOptions,
 } from '../src/solo/continuous-translation-client';
 
@@ -99,6 +101,100 @@ function fixture(options: Partial<ContinuousTranslationOptions> = {}) {
     connection: () => ({ url: connectedUrl, options: socketOptions }),
   };
 }
+
+test('session expiry diagnostics use bounded numeric metadata without exposing provider IDs', async () => {
+  const metadata: ContinuousTranslationSessionMetadata[] = [];
+  const f = fixture({ onSessionMetadata: (event) => metadata.push(event) });
+  f.socket.open();
+  const session = {
+    id: 'PRIVATE_SESSION_ID',
+    model: 'gpt-realtime-translate',
+    expires_at: 1900000000,
+    audio: { output: { language: 'en' } },
+  };
+  f.socket.receive({ type: 'session.created', session });
+  f.socket.receive({ type: 'session.updated', session });
+  await f.client.ready;
+  assert.deepEqual(metadata, [
+    { stage: 'session_created', expiresAtEpochSeconds: 1900000000 },
+    { stage: 'session_updated', expiresAtEpochSeconds: 1900000000 },
+  ]);
+  for (const expiry of [-1, 0, 1.5, '1900000000', null, 4102444801]) {
+    f.socket.receive({
+      type: 'session.updated',
+      session: { ...session, expires_at: expiry },
+    });
+  }
+  assert.equal(metadata.length, 2);
+  assert.deepEqual(f.errors, []);
+  f.client.abort();
+  f.socket.receive({ type: 'session.created', session });
+  assert.equal(metadata.length, 2);
+});
+
+test('optional expiry callback failure does not alter handshake, silence or audio routing', async () => {
+  const f = fixture({
+    onSessionMetadata: () => {
+      throw new Error('diagnostic only');
+    },
+  });
+  f.acknowledge();
+  await f.client.ready;
+  f.socket.receive({
+    type: 'session.created',
+    session: {
+      model: 'gpt-realtime-translate',
+      expires_at: 1900000000,
+    },
+  });
+  const pcm = Buffer.alloc(9600);
+  f.client.append(pcm);
+  f.socket.receive({
+    type: 'session.output_audio.delta',
+    delta: pcm.toString('base64'),
+  });
+  assert.deepEqual(f.audio, [pcm]);
+  assert.equal(f.socket.sent[1].audio, pcm.toString('base64'));
+  assert.deepEqual(f.errors, []);
+  f.client.abort();
+});
+
+test('audio alignment is optional bounded metadata, never a deduplication or audio gate', async () => {
+  const values: {
+    pcm: Buffer;
+    metadata: ContinuousTranslationAudioMetadata;
+  }[] = [];
+  const f = fixture({
+    onAudio: (pcm, metadata) => values.push({ pcm, metadata }),
+  });
+  f.acknowledge();
+  await f.client.ready;
+  const pcm = Buffer.from([0, 0, 1, 0, 255, 127]);
+  for (const elapsed of [0, 1200, 1200, -1, 1.5, '200', null, 604800001]) {
+    f.socket.receive({
+      type: 'session.output_audio.delta',
+      delta: pcm.toString('base64'),
+      elapsed_ms: elapsed,
+    });
+  }
+  assert.equal(values.length, 8);
+  assert.ok(values.every((value) => value.pcm.equals(pcm)));
+  assert.deepEqual(
+    values.map((value) => value.metadata),
+    [
+      { providerElapsedMs: 0 },
+      { providerElapsedMs: 1200 },
+      { providerElapsedMs: 1200 },
+      {},
+      {},
+      {},
+      {},
+      {},
+    ],
+  );
+  assert.deepEqual(f.errors, []);
+  f.client.abort();
+});
 
 test('continuous protocol uses a dedicated session with no ASR or response creation', async () => {
   for (const targetLanguage of ['en', 'zh'] as const) {
@@ -304,37 +400,58 @@ test('required translated text receives raw append-only deltas before optional d
   for (const delta of ['Hello', ', thank', ' you.'])
     f.socket.receive({ type: 'session.output_transcript.delta', delta });
   assert.deepEqual(received, [
-    'required:Hello', 'display:Hello',
-    'required:, thank', 'display:, thank',
-    'required: you.', 'display: you.',
+    'required:Hello',
+    'display:Hello',
+    'required:, thank',
+    'display:, thank',
+    'required: you.',
+    'display: you.',
   ]);
   assert.deepEqual(f.errors, []);
   f.client.abort();
 });
 
 test('required translated-text callback failure terminates the session and suppresses later output', async () => {
-  const f = fixture({ onTranslatedText: () => { throw new Error('private text'); } });
+  const f = fixture({
+    onTranslatedText: () => {
+      throw new Error('private text');
+    },
+  });
   f.acknowledge();
   await f.client.ready;
-  f.socket.receive({ type: 'session.output_transcript.delta', delta: 'Hello.' });
+  f.socket.receive({
+    type: 'session.output_transcript.delta',
+    delta: 'Hello.',
+  });
   f.socket.receive({ type: 'session.output_audio.delta', delta: 'AAAAAA==' });
   assert.deepEqual(f.errors, ['TRANSLATED_TEXT_CALLBACK_FAILED']);
   assert.deepEqual(f.transcripts, []);
   assert.deepEqual(f.audio, []);
   assert.equal(f.socket.closeCount, 1);
-  await assert.rejects(f.client.finish(), /^Error: TRANSLATED_TEXT_CALLBACK_FAILED$/);
+  await assert.rejects(
+    f.client.finish(),
+    /^Error: TRANSLATED_TEXT_CALLBACK_FAILED$/,
+  );
 });
 
 test('optional caption failure cannot disable required translated text', async () => {
   const translated: string[] = [];
   const f = fixture({
     onTranslatedText: (text) => translated.push(text),
-    onTranscript: () => { throw new Error('display failed'); },
+    onTranscript: () => {
+      throw new Error('display failed');
+    },
   });
   f.acknowledge();
   await f.client.ready;
-  f.socket.receive({ type: 'session.output_transcript.delta', delta: 'Hello.' });
-  f.socket.receive({ type: 'session.output_transcript.delta', delta: ' Goodbye.' });
+  f.socket.receive({
+    type: 'session.output_transcript.delta',
+    delta: 'Hello.',
+  });
+  f.socket.receive({
+    type: 'session.output_transcript.delta',
+    delta: ' Goodbye.',
+  });
   assert.deepEqual(translated, ['Hello.', ' Goodbye.']);
   assert.deepEqual(f.errors, []);
   f.client.abort();
@@ -344,7 +461,10 @@ test('abort inside required translated text prevents a diagnostic callback after
   const f = fixture({ onTranslatedText: () => f.client.abort() });
   f.acknowledge();
   await f.client.ready;
-  f.socket.receive({ type: 'session.output_transcript.delta', delta: 'Hello.' });
+  f.socket.receive({
+    type: 'session.output_transcript.delta',
+    delta: 'Hello.',
+  });
   assert.deepEqual(f.transcripts, []);
   assert.deepEqual(f.errors, []);
   assert.equal(f.socket.closeCount, 1);

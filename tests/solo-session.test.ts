@@ -142,6 +142,29 @@ for (const engine of ['nano-captions', 'continuous-captions'] as const)
     assert.equal(f.events.length, count);
   });
 
+test('provider expiry diagnostics follow their session and stop after cleanup', async (t) => {
+  const f = fixture(t);
+  const call = browser(f);
+  attach(f.manager, call.id, 'local', call.connectionParams.nonce, localSid);
+  await tick();
+  const diagnostic = {
+    pipelineId: 'aa112233-4455-4667-8899-aabbccddeeff',
+    role: 'local' as const,
+    stage: 'session_created' as const,
+    observedAtMs: 100,
+    expiresAtEpochSeconds: 1790600000,
+  };
+  f.bridge().onProviderDiagnostic?.(diagnostic);
+  assert.deepEqual(f.events.at(-1), {
+    event: 'translation-provider',
+    data: { ...diagnostic, sessionId: call.id },
+  });
+  await f.manager.end(call.id);
+  const count = f.events.length;
+  f.bridge().onProviderDiagnostic?.(diagnostic);
+  assert.equal(f.events.length, count);
+});
+
 test('outbound pays for no PSTN call until authenticated local stream; then pairs unique legs and hangs up both once', async (t) => {
   const f = fixture(t);
   const call = browser(f);

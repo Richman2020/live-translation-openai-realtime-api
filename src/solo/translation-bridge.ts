@@ -47,6 +47,46 @@ export type TranslationAudioDiagnostic = {
   stage: 'generated' | 'sent' | 'playback_confirmed' | 'unconfirmed';
   generatedBytes: number;
   sentBytes: number;
+  /** Non-content correlation; timestamps share one bridge-local monotonic clock. */
+  pipelineId?: string;
+  deliveryId?: string;
+  clock?: 'bridge_monotonic';
+  observedAtMs?: number;
+  createdAtMs?: number;
+  sentAtMs?: number;
+  acknowledgedAtMs?: number;
+  /** Send callback to matching mark receipt; never mouth-to-ear latency. */
+  sentToMarkMs?: number;
+  outstandingAudioMs?: number;
+  audioDurationMs?: number;
+  /** PCM16-scale energy of decoded destination PCMU, including silence. */
+  rms?: number;
+  peak?: number;
+  /** Provider alignment metadata, not a semantic boundary or unique ID. */
+  providerElapsedMs?: number;
+};
+
+export type TranslationProviderDiagnostic = {
+  pipelineId: string;
+  role: TranslationRole;
+  stage: 'session_created' | 'session_updated';
+  observedAtMs: number;
+  expiresAtEpochSeconds: number;
+};
+
+export type TranslationInputDiagnostic = {
+  pipelineId: string;
+  role: TranslationRole;
+  clock: 'bridge_monotonic';
+  observedAtMs: number;
+  /** Packet receipt observations, not acoustic speech boundaries. */
+  windowStartedAtMs: number;
+  windowEndedAtMs: number;
+  audioDurationMs: number;
+  rms: number;
+  peak: number;
+  /** Twilio media timestamp for the window's first sample, when supplied. */
+  mediaTimestampMs?: number;
 };
 
 export type TranslationBridgeOptions = {
@@ -61,6 +101,8 @@ export type TranslationBridgeOptions = {
   onAudioDiagnostic?: (event: TranslationAudioDiagnostic) => void;
   onCaptionState?: (event: CaptionState) => void;
   onCaptionInputDiagnostic?: (event: RemoteCaptionInputDiagnostic) => void;
+  onProviderDiagnostic?: (event: TranslationProviderDiagnostic) => void;
+  onInputDiagnostic?: (event: TranslationInputDiagnostic) => void;
   createWebSocket?: (
     url: string,
     options: {
@@ -72,6 +114,8 @@ export type TranslationBridgeOptions = {
   sessionTimeoutMs?: number;
   responseTimeoutMs?: number;
   now?: () => number;
+  /** Diagnostic clock only; defaults to performance.now(), never wall time. */
+  monotonicNow?: () => number;
 };
 
 type JsonEvent = Record<string, any>;
