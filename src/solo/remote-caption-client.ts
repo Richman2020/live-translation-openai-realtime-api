@@ -3,16 +3,31 @@ import WebSocket from 'ws';
 import { createOpenAIWebSocket } from './openai-websocket';
 import type { TranscriptEvent } from './translation-bridge';
 
-export const REMOTE_CAPTION_TRANSCRIPTION_MODEL = 'gpt-live-transcribe';
+export const REMOTE_CAPTION_TRANSCRIPTION_MODEL = 'gpt-4o-transcribe';
+export type RemoteCaptionTranscriptionModel =
+  | typeof REMOTE_CAPTION_TRANSCRIPTION_MODEL
+  | 'gpt-live-transcribe';
 export const REMOTE_CAPTION_TEXT_MODEL = 'gpt-realtime-1.5';
 export type RemoteCaptionState = {
   state: 'connecting' | 'ready' | 'failed';
   code?: string;
 };
+export type RemoteCaptionInputDiagnostic = {
+  stage: 'input' | 'commit' | 'asr-final';
+  receivedBytes: number;
+  forwardedBytes: number;
+  discardedZeroBytes: number;
+  lowEnergyBytes: number;
+  commits: number;
+  peakRms: number;
+  turnAudioMs: number;
+  finalCharacters?: number;
+};
 export type RemoteCaptionOptions = {
   apiKey: string;
   proxyUrl?: string;
   textModel?: string;
+  transcriptionModel?: RemoteCaptionTranscriptionModel;
   createWebSocket?: (
     url: string,
     options: WebSocket.ClientOptions,
@@ -20,6 +35,7 @@ export type RemoteCaptionOptions = {
   onTranscript: (event: TranscriptEvent) => void;
   onError: (code: string) => void;
   onState?: (event: RemoteCaptionState) => void;
+  onInputDiagnostic?: (event: RemoteCaptionInputDiagnostic) => void;
   timeoutMs?: number;
   now?: () => number;
 };
@@ -38,7 +54,15 @@ const FRAME_BYTES = 960; // 20 ms mono PCM16 at 24 kHz.
 const PRE_ROLL_BYTES = 9600;
 const MAX_TURN_BYTES = 60 * 48000;
 const SILENCE_END_BYTES = 38400; // 800 ms: preserve brief in-clause pauses; drafts do not wait.
+// Endpointing only, never a delivery gate. This is near digital silence (-69 dBFS),
+// not the previous RMS160 threshold that discarded quiet telephone speech.
+const ENDPOINT_SILENCE_RMS = 12;
 const DRAFT_INTERVAL_MS = 350;
+const ASR_TRANSCRIPTION_INSTRUCTIONS = [
+  "English telephone conversation. Transcribe only the caller's actual speech faithfully, including incomplete phrases, questions, negation, quantities, dates and times.",
+  'Preserve negative words and corrections. Do not answer questions, add explanations, invent missing words, or silently turn a quantity into a time.',
+  'Do not produce words for silence or background noise.',
+].join(' ');
 const TRANSLATION_INSTRUCTIONS = [
   'You are a text conversion engine: render current_english_transcript in Simplified Chinese.',
   'The user message is a JSON data envelope. Decode only current_english_transcript and output only its Chinese rendering, without JSON, quotation markers, explanations, answers, or prefixes.',
@@ -108,7 +132,8 @@ const validId = (id: unknown): id is string =>
 
 /**
  * Independent captions only. No provider-generated audio is requested or played.
- * gpt-live-transcribe emits text before commit and does not support server VAD:
+ * The default gpt-4o-transcribe profile uses provider speech endpoints. The
+ * explicitly selected live-transcribe comparison profile uses local endpoints:
  * https://developers.openai.com/api/docs/guides/realtime-transcription
  * Translation responses have explicit input and conversation:none, preventing
  * an unbounded model conversation or accidental replies to the caller.
@@ -118,6 +143,9 @@ export function createRemoteCaptionClient(
 ): RemoteCaptionClient {
   const timeoutMs = options.timeoutMs ?? 15000;
   const model = options.textModel ?? REMOTE_CAPTION_TEXT_MODEL;
+  const transcriptionModel =
+    options.transcriptionModel ?? REMOTE_CAPTION_TRANSCRIPTION_MODEL;
+  const serverEndpoints = transcriptionModel === 'gpt-4o-transcribe';
   const now = options.now ?? Date.now;
   if (
     typeof options.apiKey !== 'string' ||
@@ -125,8 +153,13 @@ export function createRemoteCaptionClient(
     typeof options.onTranscript !== 'function' ||
     typeof options.onError !== 'function' ||
     (options.onState !== undefined && typeof options.onState !== 'function') ||
+    (options.onInputDiagnostic !== undefined &&
+      typeof options.onInputDiagnostic !== 'function') ||
     typeof now !== 'function' ||
     !/^gpt-realtime(?:-[a-zA-Z0-9.]+)*$/.test(model) ||
+    !['gpt-4o-transcribe', 'gpt-live-transcribe'].includes(
+      transcriptionModel,
+    ) ||
     !Number.isFinite(timeoutMs) ||
     timeoutMs < 1 ||
     timeoutMs > 120000
@@ -160,7 +193,38 @@ export function createRemoteCaptionClient(
   let preRoll = Buffer.alloc(0);
   let turnBytes = 0;
   let silenceBytes = 0;
+  let turnHasActivity = false;
+  let receivedBytes = 0;
+  let forwardedBytes = 0;
+  let discardedZeroBytes = 0;
+  let lowEnergyBytes = 0;
+  let commits = 0;
+  let peakRms = 0;
+  let inputFrames = 0;
+  let serverFinishConfigPending = false;
+  let serverActiveSpeechId: string | undefined;
   const isClosed = () => state === 'closed';
+
+  const inputDiagnostic = (
+    stage: RemoteCaptionInputDiagnostic['stage'],
+    finalCharacters?: number,
+  ) => {
+    try {
+      options.onInputDiagnostic?.({
+        stage,
+        receivedBytes,
+        forwardedBytes,
+        discardedZeroBytes,
+        lowEnergyBytes,
+        commits,
+        peakRms: Math.round(peakRms),
+        turnAudioMs: turnBytes / 48,
+        ...(finalCharacters === undefined ? {} : { finalCharacters }),
+      });
+    } catch {
+      /* Audio delivery never depends on diagnostics. */
+    }
+  };
 
   const notifyState = (event: RemoteCaptionState) => {
     try {
@@ -263,6 +327,7 @@ export function createRemoteCaptionClient(
   const maybeFinish = () => {
     if (
       state !== 'draining' ||
+      serverFinishConfigPending ||
       pendingCommits.length ||
       committed.size ||
       active ||
@@ -377,38 +442,130 @@ export function createRemoteCaptionClient(
     }
     return turn;
   };
+  const commit = () => {
+    if (!turnBytes || state === 'closed') return;
+    if (pendingCommits.length + committed.size >= MAX_TURNS) {
+      fail('CAPTION_TURN_BACKLOG');
+      return;
+    }
+    if (turnBytes < 4800) {
+      const paddingBytes = 4800 - turnBytes;
+      if (
+        !send(asr, {
+          type: 'input_audio_buffer.append',
+          audio: Buffer.alloc(paddingBytes).toString('base64'),
+        })
+      )
+        return;
+      forwardedBytes += paddingBytes;
+    }
+    pendingCommits.push({
+      timer: setTimeout(() => fail('CAPTION_COMMIT_TIMEOUT'), timeoutMs),
+      at: now(),
+    });
+    commits += 1;
+    inputDiagnostic('commit');
+    turnBytes = 0;
+    silenceBytes = 0;
+    turnHasActivity = false;
+    send(asr, { type: 'input_audio_buffer.commit' });
+  };
   const onAsr = (event: Record<string, any>) => {
     if (event.type === 'session.updated') {
       const input = event.session?.audio?.input;
+      const endpoint = input?.turn_detection;
+      const validTranscription = serverEndpoints
+        ? input?.transcription?.language === 'en' &&
+          (serverFinishConfigPending
+            ? endpoint === null
+            : endpoint?.type === 'server_vad' &&
+              endpoint.threshold === 0.3 &&
+              endpoint.prefix_padding_ms === 300 &&
+              endpoint.silence_duration_ms === 400)
+        : (input?.transcription?.delay === undefined ||
+            input.transcription.delay === 'low') &&
+          JSON.stringify(input?.transcription?.languages) === '["en"]' &&
+          endpoint === null;
       if (
         !asrConfigured ||
         event.session?.type !== 'transcription' ||
         input?.format?.type !== 'audio/pcm' ||
         input?.format?.rate !== 24000 ||
-        input?.transcription?.model !== REMOTE_CAPTION_TRANSCRIPTION_MODEL ||
-        (input?.transcription?.delay !== undefined &&
-          input.transcription.delay !== 'low') ||
-        JSON.stringify(input?.transcription?.languages) !== '["en"]' ||
-        input?.turn_detection !== null
+        input?.transcription?.model !== transcriptionModel ||
+        !validTranscription
       ) {
         fail('CAPTION_ASR_SESSION_MISMATCH');
         return;
       }
       asrReady = true;
+      if (serverFinishConfigPending) {
+        serverFinishConfigPending = false;
+        // Do not manufacture an ASR item from idle silence. Some recognizers
+        // hallucinate text when explicitly asked to transcribe an empty tail.
+        // The disable acknowledgement follows earlier automatic VAD endpoints,
+        // so only a still-active provider speech item needs an explicit flush.
+        if (!serverActiveSpeechId) {
+          maybeFinish();
+          return;
+        }
+        // A short active tail may not satisfy the provider's 100 ms minimum.
+        if (
+          !send(asr, {
+            type: 'input_audio_buffer.append',
+            audio: Buffer.alloc(4800).toString('base64'),
+          })
+        )
+          return;
+        forwardedBytes += 4800;
+        turnBytes += 4800;
+        commit();
+        maybeFinish();
+      }
+      return;
+    }
+    if (serverEndpoints && event.type === 'input_audio_buffer.speech_started') {
+      if (!asrReady || !validId(event.item_id)) {
+        fail('CAPTION_INVALID_TRANSCRIPT');
+        return;
+      }
+      if (completedIds.has(event.item_id)) return;
+      serverActiveSpeechId = event.item_id;
+      getTurn(event.item_id);
+      return;
+    }
+    if (serverEndpoints && event.type === 'input_audio_buffer.speech_stopped') {
+      if (!validId(event.item_id)) {
+        fail('CAPTION_INVALID_TRANSCRIPT');
+        return;
+      }
+      if (serverActiveSpeechId === event.item_id)
+        serverActiveSpeechId = undefined;
       return;
     }
     if (event.type === 'input_audio_buffer.committed') {
-      if (!validId(event.item_id) || !pendingCommits.length) {
+      if (
+        !validId(event.item_id) ||
+        (!serverEndpoints && !pendingCommits.length)
+      ) {
         fail('CAPTION_UNEXPECTED_COMMIT');
         return;
       }
       const pending = pendingCommits.shift();
-      clearTimeout(pending.timer);
+      clearTimeout(pending?.timer);
+      if (serverEndpoints) {
+        if (serverActiveSpeechId === event.item_id)
+          serverActiveSpeechId = undefined;
+        if (!pending) {
+          commits += 1;
+          inputDiagnostic('commit');
+        }
+        turnBytes = 0;
+      }
       // Commit acknowledgements precede potentially out-of-order completions.
       // Register each row here, while preserving an earlier live-delta row time.
       const turn = completedIds.has(event.item_id)
         ? undefined
-        : getTurn(event.item_id, pending.at);
+        : getTurn(event.item_id, pending?.at ?? now());
       if (isClosed()) return;
       if (!completedIds.has(event.item_id) && !turn?.final) {
         if (committed.has(event.item_id)) {
@@ -455,11 +612,14 @@ export function createRemoteCaptionClient(
       fail('CAPTION_INVALID_TRANSCRIPT');
       return;
     }
+    const hadOriginal = Boolean(turn.text);
     turn.text = final ? text : turn.text + text;
     turn.final = final;
-    if (turn.text || final) publish(turn, 'original', turn.text, final);
+    if (turn.text || (final && hadOriginal))
+      publish(turn, 'original', turn.text, final);
     if (state === 'closed') return;
     if (final) {
+      inputDiagnostic('asr-final', turn.text.length);
       clearTimeout(turn.draftTimer);
       turn.draftTimer = undefined;
       clearTimeout(committed.get(turn.id));
@@ -470,7 +630,8 @@ export function createRemoteCaptionClient(
           active.cancelled = true;
           cancelActive();
         }
-        publish(turn, 'translation', '', true);
+        if (hadOriginal || turn.hasVisibleTranslation)
+          publish(turn, 'translation', '', true);
         turns.delete(turn.id);
         rememberCompleted(turn.id);
       } else {
@@ -634,11 +795,22 @@ export function createRemoteCaptionClient(
                   input: {
                     format: { type: 'audio/pcm', rate: 24000 },
                     transcription: {
-                      model: REMOTE_CAPTION_TRANSCRIPTION_MODEL,
-                      languages: ['en'],
-                      delay: 'low',
+                      model: transcriptionModel,
+                      ...(serverEndpoints
+                        ? {
+                            language: 'en',
+                            prompt: ASR_TRANSCRIPTION_INSTRUCTIONS,
+                          }
+                        : { languages: ['en'], delay: 'low' }),
                     },
-                    turn_detection: null,
+                    turn_detection: serverEndpoints
+                      ? {
+                          type: 'server_vad',
+                          threshold: 0.3,
+                          prefix_padding_ms: 300,
+                          silence_duration_ms: 400,
+                        }
+                      : null,
                   },
                 },
               }
@@ -701,53 +873,75 @@ export function createRemoteCaptionClient(
     if (socket.readyState === WebSocket.OPEN) configure();
     return socket;
   };
-  const commit = () => {
-    if (!turnBytes || state === 'closed') return;
-    if (pendingCommits.length + committed.size >= MAX_TURNS) {
-      fail('CAPTION_TURN_BACKLOG');
-      return;
-    }
-    if (turnBytes < 4800)
-      send(asr, {
-        type: 'input_audio_buffer.append',
-        audio: Buffer.alloc(4800 - turnBytes).toString('base64'),
-      });
-    pendingCommits.push({
-      timer: setTimeout(() => fail('CAPTION_COMMIT_TIMEOUT'), timeoutMs),
-      at: now(),
-    });
-    turnBytes = 0;
-    silenceBytes = 0;
-    send(asr, { type: 'input_audio_buffer.commit' });
-  };
   const frame = (pcm: Buffer) => {
     let squareSum = 0;
     for (let i = 0; i < pcm.length; i += 2)
       squareSum += pcm.readInt16LE(i) ** 2;
-    // Application energy VAD is a heuristic, not a speech recognizer: speech
-    // below this threshold for >200ms may be omitted. Validate quiet telephone
-    // speech, noise and accents before treating this candidate as accepted.
-    const speech = Math.sqrt(squareSum / (pcm.length / 2)) >= 160;
-    if (!turnBytes && !speech) {
+    const rms = Math.sqrt(squareSum / (pcm.length / 2));
+    receivedBytes += pcm.length;
+    inputFrames += 1;
+    peakRms = Math.max(peakRms, rms);
+    if (rms < 160) lowEnergyBytes += pcm.length;
+    if (serverEndpoints) {
+      // The provider VAD needs the original timeline, including silence. No
+      // application amplitude gate or local pause detector deletes/cuts audio.
+      if (
+        !send(asr, {
+          type: 'input_audio_buffer.append',
+          audio: pcm.toString('base64'),
+        })
+      )
+        return;
+      forwardedBytes += pcm.length;
+      turnBytes += pcm.length;
+      if (inputFrames % 50 === 0) inputDiagnostic('input');
+      // Never race server_vad with a local time-based commit. This path retains
+      // no audio buffer; outstanding ASR turns and response sizes stay bounded.
+      return;
+    }
+    // Only provably all-zero idle samples may be omitted. Low-volume speech,
+    // breath and background noise all reach ASR unchanged; endpoint thresholds
+    // never decide which nonzero audio to delete.
+    if (!turnBytes && squareSum === 0) {
+      const available = preRoll.length + pcm.length;
+      discardedZeroBytes += Math.max(0, available - PRE_ROLL_BYTES);
       preRoll = Buffer.concat([preRoll, pcm]).subarray(-PRE_ROLL_BYTES);
+      if (inputFrames % 50 === 0) inputDiagnostic('input');
       return;
     }
     if (!turnBytes && preRoll.length) {
-      send(asr, {
-        type: 'input_audio_buffer.append',
-        audio: preRoll.toString('base64'),
-      });
+      if (
+        !send(asr, {
+          type: 'input_audio_buffer.append',
+          audio: preRoll.toString('base64'),
+        })
+      )
+        return;
+      forwardedBytes += preRoll.length;
       turnBytes = preRoll.length;
       preRoll = Buffer.alloc(0);
     }
-    send(asr, {
-      type: 'input_audio_buffer.append',
-      audio: pcm.toString('base64'),
-    });
+    if (
+      !send(asr, {
+        type: 'input_audio_buffer.append',
+        audio: pcm.toString('base64'),
+      })
+    )
+      return;
+    forwardedBytes += pcm.length;
     turnBytes += pcm.length;
-    silenceBytes = speech ? 0 : silenceBytes + pcm.length;
-    if (silenceBytes >= SILENCE_END_BYTES) commit();
-    else if (turnBytes >= MAX_TURN_BYTES) fail('CAPTION_SPEECH_TOO_LONG');
+    if (rms > ENDPOINT_SILENCE_RMS) turnHasActivity = true;
+    silenceBytes = rms > ENDPOINT_SILENCE_RMS ? 0 : silenceBytes + pcm.length;
+    if (inputFrames % 50 === 0) inputDiagnostic('input');
+    // Background room/line noise may prevent a digital-silence endpoint.
+    // Roll a bounded item instead of permanently killing captions after 60 s.
+    // No samples are dropped; an arbitrary cap can still split a spoken word,
+    // so ordinary silence endpoints remain preferable and are measured above.
+    if (
+      (turnHasActivity && silenceBytes >= SILENCE_END_BYTES) ||
+      turnBytes >= MAX_TURN_BYTES
+    )
+      commit();
   };
 
   notifyState({ state: 'connecting' });
@@ -801,7 +995,16 @@ export function createRemoteCaptionClient(
         );
         if (frameTail.length) frame(frameTail);
         frameTail = Buffer.alloc(0);
-        commit();
+        if (serverEndpoints && !isClosed()) {
+          serverFinishConfigPending = true;
+          send(asr, {
+            type: 'session.update',
+            session: {
+              type: 'transcription',
+              audio: { input: { turn_detection: null } },
+            },
+          });
+        } else commit();
         maybeFinish();
       }
       return finished.promise;

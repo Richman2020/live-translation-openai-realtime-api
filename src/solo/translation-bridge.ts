@@ -2,6 +2,7 @@ import WebSocket from 'ws';
 
 import { createOpenAIWebSocket } from './openai-websocket';
 import { DEFAULT_TRANSCRIPTION_MODEL, validTranscriptionModel } from './config';
+import type { RemoteCaptionInputDiagnostic } from './remote-caption-client';
 
 export type TranslationRole = 'local' | 'remote';
 
@@ -16,10 +17,13 @@ export type TranscriptEvent = {
 
 export type TranslationMetric = {
   role: TranslationRole;
-  name: 'speech_stop_to_first_audio_ms' | 'nano_text_to_audio_ms';
+  name:
+    | 'speech_stop_to_first_audio_ms'
+    | 'nano_text_to_audio_ms'
+    | 'nano_boundary_wait_ms';
   value: number;
   at: number;
-  scope: 'provider_generation' | 'local_synthesis';
+  scope: 'provider_generation' | 'local_synthesis' | 'text_boundary';
   transcriptionMs?: number;
   queueMs?: number;
   generationMs?: number;
@@ -56,6 +60,7 @@ export type TranslationBridgeOptions = {
   onConnection?: (event: TranslationConnection) => void;
   onAudioDiagnostic?: (event: TranslationAudioDiagnostic) => void;
   onCaptionState?: (event: CaptionState) => void;
+  onCaptionInputDiagnostic?: (event: RemoteCaptionInputDiagnostic) => void;
   createWebSocket?: (
     url: string,
     options: {

@@ -52,7 +52,7 @@ class FakeSocket extends EventEmitter {
   }
 }
 
-const asrSession = () => ({
+const asrSession = (model = 'gpt-live-transcribe', drain = false) => ({
   type: 'session.updated',
   session: {
     type: 'transcription',
@@ -60,12 +60,19 @@ const asrSession = () => ({
       input: {
         format: { type: 'audio/pcm', rate: 24000 },
         // Actual capability probe omits delay in the response, despite accepting it.
-        transcription: {
-          model: 'gpt-live-transcribe',
-          language: null,
-          languages: ['en'],
-        },
-        turn_detection: null,
+        transcription:
+          model === 'gpt-live-transcribe'
+            ? { model, language: null, languages: ['en'] }
+            : { model, language: 'en' },
+        turn_detection:
+          model === 'gpt-live-transcribe' || drain
+            ? null
+            : {
+                type: 'server_vad',
+                threshold: 0.3,
+                prefix_padding_ms: 300,
+                silence_duration_ms: 400,
+              },
       },
     },
   },
@@ -92,6 +99,7 @@ function fixture(options: Partial<RemoteCaptionOptions> = {}) {
   const states: RemoteCaptionState[] = [];
   const client = createRemoteCaptionClient({
     apiKey: 'fixture-no-credentials',
+    transcriptionModel: 'gpt-live-transcribe',
     now: () => 123,
     onTranscript: (event) => transcripts.push(event),
     onError: (code) => errors.push(code),
@@ -117,7 +125,7 @@ function fixture(options: Partial<RemoteCaptionOptions> = {}) {
     async ready() {
       asr.open();
       text.open();
-      asr.receive(asrSession());
+      asr.receive(asrSession(options.transcriptionModel));
       text.receive(textSession());
       await client.ready;
     },
@@ -522,7 +530,7 @@ test('bounded backlog fails the caption client without invoking any audio path',
   assert.deepEqual(f.errors, ['CAPTION_TURN_BACKLOG']);
 });
 
-test('long speech is not cut at 12 seconds; 60 second safety cap fails explicitly', async () => {
+test('long speech has no early time cut; background noise rolls at 60 seconds without dropping input', async () => {
   const f = fixture();
   await f.ready();
   try {
@@ -532,8 +540,129 @@ test('long speech is not cut at 12 seconds; 60 second safety cap fails explicitl
         .length,
       0,
     );
-    assert.throws(() => f.client.append(pcm(1000)), /CAPTION_INPUT_FAILED/);
-    await assert.rejects(f.client.finish(), /CAPTION_SPEECH_TOO_LONG/);
+    f.client.append(pcm(1000));
+    assert.equal(f.asr.sent.at(-1).type, 'input_audio_buffer.commit');
+    f.committed('noise_1');
+    f.transcript('noise_1', '', true);
+    f.client.append(pcm(1000, 80));
+    assert.equal(
+      f.asr.sent.filter((event) => event.type === 'input_audio_buffer.commit')
+        .length,
+      1,
+    );
+    assert.equal(
+      f.asr.sent
+        .filter((event) => event.type === 'input_audio_buffer.append')
+        .reduce(
+          (bytes, event) => bytes + Buffer.from(event.audio, 'base64').length,
+          0,
+        ),
+      61 * 48000,
+    );
+    assert.deepEqual(f.errors, []);
+    assert.deepEqual(f.transcripts, []);
+  } finally {
+    f.client.abort();
+  }
+});
+
+test('quiet telephone input below the old RMS160 gate reaches ASR byte for byte', async () => {
+  const diagnostics = [];
+  const f = fixture({ onInputDiagnostic: (value) => diagnostics.push(value) });
+  await f.ready();
+  try {
+    const input = Buffer.concat([
+      pcm(1600, 80),
+      pcm(500, 0),
+      pcm(1800, 32),
+      pcm(800, 0),
+    ]);
+    for (let offset = 0; offset < input.length; offset += 960)
+      f.client.append(input.subarray(offset, offset + 960));
+    const forwarded = Buffer.concat(
+      f.asr.sent
+        .filter((event) => event.type === 'input_audio_buffer.append')
+        .map((event) => Buffer.from(event.audio, 'base64')),
+    );
+    assert.deepEqual(forwarded, input);
+    assert.equal(
+      f.asr.sent.filter((event) => event.type === 'input_audio_buffer.commit')
+        .length,
+      1,
+    );
+    const report = diagnostics.at(-1);
+    assert.equal(report.stage, 'commit');
+    assert.equal(report.receivedBytes, input.length);
+    assert.equal(report.forwardedBytes, input.length);
+    assert.equal(report.discardedZeroBytes, 0);
+    assert.equal(report.lowEnergyBytes, input.length);
+    assert.equal(report.commits, 1);
+    assert.equal(report.peakRms, 80);
+  } finally {
+    f.client.abort();
+  }
+});
+
+test('near-silent nonzero audio remains intact without creating repeated noise-only turns', async () => {
+  const f = fixture();
+  await f.ready();
+  try {
+    const input = Buffer.concat([pcm(3000, 3), pcm(1000, 40), pcm(800, 3)]);
+    for (let offset = 0; offset < input.length; offset += 960)
+      f.client.append(input.subarray(offset, offset + 960));
+    const forwarded = Buffer.concat(
+      f.asr.sent
+        .filter((event) => event.type === 'input_audio_buffer.append')
+        .map((event) => Buffer.from(event.audio, 'base64')),
+    );
+    assert.deepEqual(forwarded, input);
+    assert.equal(
+      f.asr.sent.filter((event) => event.type === 'input_audio_buffer.commit')
+        .length,
+      1,
+    );
+    assert.deepEqual(f.errors, []);
+  } finally {
+    f.client.abort();
+  }
+});
+
+test('zero-only idle is bounded and silent/noise finals do not create empty caption rows', async () => {
+  const diagnostics = [];
+  const f = fixture({ onInputDiagnostic: (value) => diagnostics.push(value) });
+  await f.ready();
+  try {
+    f.client.append(pcm(1000, 0));
+    f.client.append(pcm(800, 4));
+    assert.equal(
+      f.asr.sent.filter((event) => event.type === 'input_audio_buffer.commit')
+        .length,
+      0,
+    );
+    f.transcript('noise', '', true);
+    assert.deepEqual(f.transcripts, []);
+    assert.equal(diagnostics.at(-1).discardedZeroBytes, 800 * 48);
+    assert.equal(diagnostics.at(-1).finalCharacters, 0);
+    assert.equal(diagnostics.at(-1).forwardedBytes, 1000 * 48);
+    assert.equal(JSON.stringify(diagnostics).includes('transcript'), false);
+    f.client.append(pcm(1000, 80));
+    assert.deepEqual(f.errors, []);
+  } finally {
+    f.client.abort();
+  }
+});
+
+test('diagnostic subscriber failures never interrupt ASR input delivery', async () => {
+  const f = fixture({
+    onInputDiagnostic: () => {
+      throw new Error('subscriber');
+    },
+  });
+  await f.ready();
+  try {
+    f.client.append(pcm(1000, 80));
+    assert.deepEqual(f.errors, []);
+    assert.equal(f.asr.sent.at(-1).type, 'input_audio_buffer.append');
   } finally {
     f.client.abort();
   }
@@ -614,7 +743,7 @@ test('capability check configures both sessions without input or paid response g
   );
   sockets[0].open();
   sockets[1].open();
-  sockets[0].receive(asrSession());
+  sockets[0].receive(asrSession('gpt-4o-transcribe'));
   sockets[1].receive(textSession());
   assert.deepEqual(await check, {
     name: 'openaiRemoteCaption',
@@ -821,4 +950,295 @@ test('an incomplete replacement never publishes its buffered prefix or marks it 
     before,
   );
   await assert.rejects(f.client.finish(), /CAPTION_TRANSLATION_INCOMPLETE/);
+});
+
+test('production ASR profile sends all quiet speech and silence and leaves endpointing to the provider', async () => {
+  const f = fixture({ transcriptionModel: 'gpt-4o-transcribe' });
+  await f.ready();
+  try {
+    const asrConfig = f.asr.sent[0].session.audio.input.transcription;
+    assert.equal(asrConfig.model, 'gpt-4o-transcribe');
+    assert.equal(asrConfig.language, 'en');
+    assert.match(asrConfig.prompt, /negation, quantities, dates and times/);
+    assert.match(asrConfig.prompt, /Do not produce words for silence/);
+    assert.doesNotMatch(asrConfig.prompt, /Tom|Friday|two rooms|three in/i);
+    const input = Buffer.concat([
+      pcm(1000, 0),
+      pcm(1000, 3),
+      pcm(800, 0),
+      pcm(1000, 80),
+    ]);
+    for (let offset = 0; offset < input.length; offset += 960)
+      f.client.append(input.subarray(offset, offset + 960));
+    assert.deepEqual(
+      Buffer.concat(
+        f.asr.sent
+          .filter((event) => event.type === 'input_audio_buffer.append')
+          .map((event) => Buffer.from(event.audio, 'base64')),
+      ),
+      input,
+    );
+    assert.equal(
+      f.asr.sent.filter((event) => event.type === 'input_audio_buffer.commit')
+        .length,
+      0,
+    );
+    assert.deepEqual(f.errors, []);
+  } finally {
+    f.client.abort();
+  }
+});
+
+test('provider-created speech turns accept automatic commits and produce paired Chinese before the next turn ends', async () => {
+  const f = fixture({ transcriptionModel: 'gpt-4o-transcribe' });
+  await f.ready();
+  try {
+    f.asr.receive({
+      type: 'input_audio_buffer.speech_started',
+      item_id: 'first',
+    });
+    f.committed('first');
+    f.asr.receive({
+      type: 'input_audio_buffer.speech_started',
+      item_id: 'second',
+    });
+    f.transcript('first', 'I have two rooms, not three.', true);
+    f.createResponse('r1');
+    f.output('r1', '我有两间房，不是三间。');
+    assert.equal(f.transcripts.at(-1).text, '我有两间房，不是三间。');
+    f.complete('r1', '我有两间房，不是三间。');
+    assert.equal(f.transcripts.at(-1).final, true);
+    assert.equal(
+      f.asr.sent.filter((event) => event.type === 'input_audio_buffer.commit')
+        .length,
+      0,
+    );
+    f.committed('second');
+    f.transcript('second', 'I do not need help today.', true);
+    const request = f.createResponse('r2');
+    assert.deepEqual(
+      JSON.parse(request.response.input[0].content[0].text)
+        .preceding_final_english_context,
+      ['I have two rooms, not three.'],
+    );
+    f.complete('r2', '我今天不需要帮助。');
+    assert.deepEqual(f.errors, []);
+  } finally {
+    f.client.abort();
+  }
+});
+
+test('server endpoint finish only pads and explicitly flushes a provider-confirmed active speech item', async () => {
+  const f = fixture({ transcriptionModel: 'gpt-4o-transcribe' });
+  await f.ready();
+  f.client.append(pcm(1000));
+  f.asr.receive({
+    type: 'input_audio_buffer.speech_started',
+    item_id: 'speech_tail',
+  });
+  const finished = f.client.finish();
+  assert.deepEqual(f.asr.sent.at(-1), {
+    type: 'session.update',
+    session: {
+      type: 'transcription',
+      audio: { input: { turn_detection: null } },
+    },
+  });
+  assert.equal(
+    f.asr.sent.some((event) => event.type === 'input_audio_buffer.commit'),
+    false,
+  );
+  f.asr.receive(asrSession('gpt-4o-transcribe', true));
+  assert.equal(f.asr.sent.at(-1).type, 'input_audio_buffer.commit');
+  assert.equal(Buffer.from(f.asr.sent.at(-2).audio, 'base64').length, 4800);
+  f.committed('speech_tail');
+  f.transcript('speech_tail', 'The last words.', true);
+  f.createResponse('last');
+  f.complete('last', '最后几个字。');
+  await finished;
+  assert.equal(f.transcripts.at(-1).text, '最后几个字。');
+  assert.deepEqual(f.errors, []);
+});
+
+test('server drain waits for the preceding automatic turn and its Chinese translation', async () => {
+  const f = fixture({ transcriptionModel: 'gpt-4o-transcribe' });
+  await f.ready();
+  f.asr.receive({
+    type: 'input_audio_buffer.speech_started',
+    item_id: 'speech',
+  });
+  f.committed('speech');
+  let resolved = false;
+  const finished = f.client.finish().then(() => {
+    resolved = true;
+  });
+  f.asr.receive(asrSession('gpt-4o-transcribe', true));
+  assert.equal(
+    f.asr.sent.some((event) => event.type === 'input_audio_buffer.commit'),
+    false,
+  );
+  await delay(0);
+  assert.equal(resolved, false);
+  f.transcript('speech', 'Tomorrow at three.', true);
+  f.createResponse('last');
+  f.complete('last', '明天三点。');
+  await finished;
+  assert.equal(f.transcripts.at(-1).text, '明天三点。');
+  assert.equal(f.transcripts.at(-1).final, true);
+});
+
+test('pure zero audio finishes without inventing a transcription request for its silent tail', async () => {
+  const f = fixture({ transcriptionModel: 'gpt-4o-transcribe' });
+  await f.ready();
+  for (let index = 0; index < 8; index += 1) f.client.append(pcm(1000, 0));
+  const before = f.asr.sent.filter(
+    (event) => event.type === 'input_audio_buffer.append',
+  ).length;
+  const finished = f.client.finish();
+  f.asr.receive(asrSession('gpt-4o-transcribe', true));
+  await finished;
+  assert.equal(
+    f.asr.sent.some((event) => event.type === 'input_audio_buffer.commit'),
+    false,
+  );
+  assert.equal(
+    f.asr.sent.filter((event) => event.type === 'input_audio_buffer.append')
+      .length,
+    before,
+  );
+  assert.equal(
+    f.text.sent.some((event) => event.type === 'response.create'),
+    false,
+  );
+  assert.deepEqual(f.transcripts, []);
+  assert.deepEqual(f.errors, []);
+});
+
+test('an automatic speech endpoint during drain configuration prevents a duplicate empty commit', async () => {
+  const f = fixture({ transcriptionModel: 'gpt-4o-transcribe' });
+  await f.ready();
+  f.client.append(pcm(1000));
+  f.asr.receive({
+    type: 'input_audio_buffer.speech_started',
+    item_id: 'speech',
+  });
+  const finished = f.client.finish();
+  f.asr.receive({
+    type: 'input_audio_buffer.speech_stopped',
+    item_id: 'speech',
+  });
+  f.committed('speech');
+  f.asr.receive(asrSession('gpt-4o-transcribe', true));
+  assert.equal(
+    f.asr.sent.some((event) => event.type === 'input_audio_buffer.commit'),
+    false,
+  );
+  f.transcript('speech', 'I do not need it today.', true);
+  f.createResponse('response');
+  f.complete('response', '我今天不需要。');
+  await finished;
+  assert.equal(f.transcripts.at(-1).text, '我今天不需要。');
+  assert.deepEqual(f.errors, []);
+});
+
+test('server endpoint session mismatch cannot silently change the selected model or VAD settings', async () => {
+  for (const field of ['model', 'threshold']) {
+    const f = fixture({ transcriptionModel: 'gpt-4o-transcribe' });
+    f.asr.open();
+    f.text.open();
+    const event = asrSession('gpt-4o-transcribe');
+    if (field === 'model')
+      event.session.audio.input.transcription.model = 'gpt-live-transcribe';
+    else event.session.audio.input.turn_detection.threshold = 0.9;
+    f.asr.receive(event);
+    await assert.rejects(f.client.ready, /CAPTION_ASR_SESSION_MISMATCH/);
+    assert.equal(
+      f.sockets.every((socket) => socket.terminated === 1),
+      true,
+    );
+  }
+});
+
+test('a server drain configuration timeout fails explicitly instead of pretending the last words arrived', async () => {
+  const f = fixture({ transcriptionModel: 'gpt-4o-transcribe', timeoutMs: 25 });
+  await f.ready();
+  await assert.rejects(f.client.finish(), /CAPTION_FINISH_TIMEOUT/);
+  assert.deepEqual(f.errors, ['CAPTION_FINISH_TIMEOUT']);
+});
+
+test('a failed minimum-duration pad does not enqueue a commit or publish a diagnostic after cleanup', async () => {
+  const diagnostics = [];
+  const f = fixture({ onInputDiagnostic: (event) => diagnostics.push(event) });
+  await f.ready();
+  f.client.append(pcm(10));
+  const originalSend = f.asr.send.bind(f.asr);
+  f.asr.send = (raw, callback) => {
+    const event = JSON.parse(raw);
+    if (
+      event.type === 'input_audio_buffer.append' &&
+      Buffer.from(event.audio, 'base64').length === 4320
+    )
+      callback?.(new Error('fixture padding failure'));
+    else originalSend(raw, callback);
+  };
+  await assert.rejects(f.client.finish(), /CAPTION_SEND_FAILED/);
+  assert.equal(
+    f.asr.sent.some((event) => event.type === 'input_audio_buffer.commit'),
+    false,
+  );
+  assert.equal(
+    diagnostics.some((event) => event.stage === 'commit'),
+    false,
+  );
+  assert.deepEqual(f.errors, ['CAPTION_SEND_FAILED']);
+});
+
+test('an empty server ASR correction clears visible drafts and cancels the stale in-flight translation', async () => {
+  const f = fixture({ transcriptionModel: 'gpt-4o-transcribe' });
+  await f.ready();
+  try {
+    f.committed('turn');
+    f.transcript('turn', 'Uncertain draft');
+    await delay(390);
+    f.createResponse('draft');
+    f.output('draft', '暂时识别。');
+    f.transcript('turn', '', true);
+    assert.equal(f.text.sent.at(-1).type, 'response.cancel');
+    assert.deepEqual(
+      f.transcripts
+        .slice(-2)
+        .map((event) => [event.kind, event.text, event.final]),
+      [
+        ['original', '', true],
+        ['translation', '', true],
+      ],
+    );
+    const count = f.transcripts.length;
+    f.output('draft', '不应显示');
+    f.complete('draft', '不应显示', 'cancelled');
+    assert.equal(f.transcripts.length, count);
+    assert.deepEqual(f.errors, []);
+  } finally {
+    f.client.abort();
+  }
+});
+
+test('server VAD owns long-call commits even when its speech endpoint arrives just after 60 seconds', async () => {
+  const f = fixture({ transcriptionModel: 'gpt-4o-transcribe' });
+  await f.ready();
+  try {
+    for (let index = 0; index < 60; index += 1) f.client.append(pcm(1000));
+    f.client.append(pcm(400, 0));
+    assert.equal(
+      f.asr.sent.some((event) => event.type === 'input_audio_buffer.commit'),
+      false,
+    );
+    f.committed('long');
+    f.transcript('long', 'A bounded transcript.', true);
+    f.createResponse('long_response');
+    f.complete('long_response', '这一段文字。');
+    assert.deepEqual(f.errors, []);
+  } finally {
+    f.client.abort();
+  }
 });

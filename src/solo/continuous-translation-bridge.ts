@@ -157,6 +157,8 @@ export class ContinuousTranslationBridge {
 
   private nanoBusy = false;
 
+  private nanoActiveChars = 0;
+
   private readonly nanoCommitter?: ReturnType<typeof createNanoTextCommitter>;
 
   private captionClient?: RemoteCaptionClient;
@@ -182,6 +184,18 @@ export class ContinuousTranslationBridge {
     if (options.localVoice) {
       this.nanoCommitter = createNanoTextCommitter({
         boundaryDelayMs: options.sentenceBoundaryDelayMs,
+        clauseBoundaries: options.remoteCaptions === true,
+        now: options.now,
+        onCommitTiming: ({ bufferWaitMs }) => {
+          if (!this.options.remoteCaptions) return;
+          this.options.onMetric?.({
+            role: 'local',
+            name: 'nano_boundary_wait_ms',
+            scope: 'text_boundary',
+            value: bufferWaitMs,
+            at: (this.options.now || Date.now)(),
+          });
+        },
         onCommit: (text) => this.enqueueNano(text),
         onError: () => this.shutdown('nano_text_boundary_failed:local'),
       });
@@ -370,6 +384,10 @@ export class ContinuousTranslationBridge {
           }
         },
         onError: () => this.failCaptions(),
+        onInputDiagnostic: (event) => {
+          if (!this.closed && !this.captionFailed)
+            this.options.onCaptionInputDiagnostic?.(event);
+        },
       });
       this.captionClient = client;
       if (this.closed || this.captionFailed) {
@@ -514,8 +532,18 @@ export class ContinuousTranslationBridge {
 
   private enqueueNano(text: string): void {
     if (this.closed) return;
-    // At most one active sentence and three waiting; do not silently lose words.
-    if (this.nanoQueue.length + Number(this.nanoBusy) >= 4) {
+    // Old mode keeps four whole-sentence jobs. Finer live clauses use the same
+    // maximum text allowance (4 * 240 chars) with a separate bounded job count;
+    // one paragraph must not overflow solely because it has more clause cuts.
+    const jobLimit = this.options.remoteCaptions ? 12 : 4;
+    const textChars = this.nanoQueue.reduce(
+      (sum, job) => sum + job.text.length,
+      this.nanoActiveChars,
+    );
+    if (
+      this.nanoQueue.length + Number(this.nanoBusy) >= jobLimit ||
+      textChars + text.length > 960
+    ) {
       this.shutdown('nano_synthesis_queue_full:local');
       return;
     }
@@ -531,6 +559,7 @@ export class ContinuousTranslationBridge {
     try {
       while (!this.closed && this.nanoQueue.length) {
         const job = this.nanoQueue.shift();
+        this.nanoActiveChars = job.text.length;
         // eslint-disable-next-line no-await-in-loop -- One FIFO synthesis at a time preserves spoken order.
         const generated = await this.options.localVoice.synthesize(
           job.text,
@@ -591,6 +620,7 @@ export class ContinuousTranslationBridge {
       if (!this.closed) this.shutdown('nano_synthesis_failed:local');
     } finally {
       this.nanoBusy = false;
+      this.nanoActiveChars = 0;
     }
   }
 

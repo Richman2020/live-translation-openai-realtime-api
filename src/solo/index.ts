@@ -21,6 +21,7 @@ sessionManager.on('event', ({ event, data }) => {
       'translation-connection',
       'translation-audio',
       'translation-metric',
+      'caption-input',
     ].includes(event)
   )
     return;
@@ -33,6 +34,19 @@ sessionManager.on('event', ({ event, data }) => {
       role: data.role,
       state: data.state,
       closeCode: data.closeCode,
+      ...(event === 'caption-input'
+        ? {
+            stage: data.stage,
+            receivedBytes: data.receivedBytes,
+            forwardedBytes: data.forwardedBytes,
+            discardedZeroBytes: data.discardedZeroBytes,
+            lowEnergyBytes: data.lowEnergyBytes,
+            commits: data.commits,
+            peakRms: data.peakRms,
+            turnAudioMs: data.turnAudioMs,
+            finalCharacters: data.finalCharacters,
+          }
+        : {}),
       ...(event === 'translation-audio'
         ? {
             recipientRole: data.recipientRole,

@@ -227,6 +227,9 @@ test('invalid settings and non-string data fail closed', () => {
     { maxSentenceChars: 240, maxBufferChars: 200 },
     { onCommit: undefined },
     { onError: undefined },
+    { clauseBoundaries: 'yes' as unknown as boolean },
+    { onCommitTiming: 'yes' as unknown as () => void },
+    { now: 'yes' as unknown as () => number },
   ])
     assert.throws(
       () => fixture(options),
@@ -235,4 +238,145 @@ test('invalid settings and non-string data fail closed', () => {
   const f = fixture();
   f.committer.append(null as unknown as string);
   assert.deepEqual(f.errors, ['NANO_TEXT_INVALID_DELTA']);
+});
+
+test('live clauses commit before a comma-linked long sentence ends, retaining all text once', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = fixture({ clauseBoundaries: true });
+  const first = 'Please clean the kitchen and the living room tomorrow,';
+  f.committer.append(first);
+  t.mock.timers.tick(5000);
+  assert.deepEqual(
+    f.committed,
+    [],
+    'a trailing comma alone is not a semantic boundary',
+  );
+  f.committer.append(' but I');
+  assert.deepEqual(f.committed, []);
+  f.committer.append(' do not need the bedroom cleaned');
+  assert.deepEqual(f.committed, [first]);
+  f.committer.append(', and you can leave the two boxes by the door.');
+  t.mock.timers.tick(300);
+  assert.deepEqual(f.committed, [
+    first,
+    'but I do not need the bedroom cleaned,',
+    'and you can leave the two boxes by the door.',
+  ]);
+  assert.deepEqual(f.errors, []);
+  f.committer.close();
+});
+
+test('old voice mode still waits for sentence punctuation in exactly the same comma stream', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = fixture();
+  f.committer.append(
+    'Please clean the kitchen and the living room tomorrow, but I do not need the bedroom cleaned',
+  );
+  t.mock.timers.tick(5000);
+  assert.deepEqual(f.committed, []);
+  f.committer.append('.');
+  t.mock.timers.tick(300);
+  assert.deepEqual(f.committed, [
+    'Please clean the kitchen and the living room tomorrow, but I do not need the bedroom cleaned.',
+  ]);
+  f.committer.close();
+});
+
+test('clause mode does not cut numbers, lists, dependent openings, negative tails or corrections', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  for (const text of [
+    'The total price for the house is 1,000 dollars, not one hundred dollars',
+    'Please clean the kitchen, the living room, and the bathroom',
+    'If you arrive at my house after three in the afternoon, please call me before coming inside',
+    'I want the kitchen cleaned tomorrow but not, please leave the bedroom alone',
+    'I would like you to clean my bedroom tomorrow, I mean please clean the living room',
+    'I would like to arrange a visit next week, to New York for a meeting',
+    'Please put the clean books into the living room, to the left of the door',
+    'If you would like to come tomorrow, at two p.m., to clean the kitchen',
+    'If you can make it to my house tomorrow, at three in the afternoon, I will book the cleaning',
+    'I would like you to clean the kitchen tomorrow, I was mistaken about the room and meant the bedroom',
+    'Hello, I would like to arrange a cleaning tomorrow',
+  ]) {
+    const f = fixture({ clauseBoundaries: true });
+    f.committer.append(text);
+    t.mock.timers.tick(5000);
+    assert.deepEqual(f.committed, [], text);
+    assert.deepEqual(f.errors, [], text);
+    f.committer.close();
+  }
+});
+
+test('a completed booking clause starts before the longer purpose clause, keeping time intact', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = fixture({ clauseBoundaries: true });
+  const intro = "Hello, I'd like to book for Friday, at three p.m.,";
+  f.committer.append(intro);
+  t.mock.timers.tick(1000);
+  assert.deepEqual(f.committed, []);
+  f.committer.append(' to clean the kitchen and living room');
+  assert.deepEqual(f.committed, [intro]);
+  f.committer.append('; the bedroom does not need cleaning.');
+  t.mock.timers.tick(300);
+  assert.deepEqual(f.committed, [
+    intro,
+    'to clean the kitchen and living room;',
+    'the bedroom does not need cleaning.',
+  ]);
+  assert.deepEqual(f.errors, []);
+  f.committer.close();
+});
+
+test('boundary timing follows each retained text range and ignores old leading whitespace', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let now = 100;
+  const timings: { bufferWaitMs: number; chars: number }[] = [];
+  const f = fixture({
+    now: () => now,
+    onCommitTiming: (timing) => timings.push(timing),
+  });
+  f.committer.append('First sentence. ');
+  now = 400;
+  t.mock.timers.tick(300);
+  assert.deepEqual(timings, [{ bufferWaitMs: 300, chars: 15 }]);
+  now = 8000;
+  f.committer.append('Second');
+  now = 9000;
+  f.committer.append(' sentence. Third');
+  assert.deepEqual(timings[1], { bufferWaitMs: 1000, chars: 16 });
+  now = 9500;
+  f.committer.append(' sentence.');
+  now = 9800;
+  t.mock.timers.tick(300);
+  assert.deepEqual(timings[2], { bufferWaitMs: 800, chars: 15 });
+  f.committer.close();
+});
+
+test('timing subscriber exceptions cannot stop speech and close clears timing state', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = fixture({
+    onCommitTiming: () => {
+      throw new Error('diagnostic failure');
+    },
+  });
+  f.committer.append('Hello. Another sentence.');
+  t.mock.timers.tick(300);
+  assert.deepEqual(f.committed, ['Hello.', 'Another sentence.']);
+  assert.deepEqual(f.errors, []);
+  f.committer.close();
+});
+
+test('clause result is invariant across individual characters and keeps contractions', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const text =
+    "The appointment can be tomorrow at three in the afternoon, and I'll call you before I leave.";
+  const f = fixture({ clauseBoundaries: true });
+  for (const char of text) f.committer.append(char);
+  t.mock.timers.tick(300);
+  assert.deepEqual(f.committed, [
+    'The appointment can be tomorrow at three in the afternoon,',
+    "and I'll call you before I leave.",
+  ]);
+  assert.equal(f.committed.join(' '), text);
+  assert.deepEqual(f.errors, []);
+  f.committer.close();
 });

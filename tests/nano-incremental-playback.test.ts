@@ -317,3 +317,94 @@ test('hangup drops active synthesis, queued sentences, incomplete text and late 
   assert.deepEqual(f.lifetime(), { finished: 0, aborted: 1 });
   assert.deepEqual(f.failures, []);
 });
+
+test('a comma-linked complete clause reaches phone before the long sentence final full stop', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = fixture();
+  t.after(() => f.bridge.close());
+  await settled();
+  f.input('local', Buffer.alloc(160, 0x42));
+  f.text('Please clean the kitchen and living room tomorrow afternoon,');
+  t.mock.timers.tick(500);
+  assert.equal(f.jobs.length, 0, 'comma requires next-clause context');
+  f.text(' but I do not need the bedroom');
+  assert.deepEqual(
+    f.jobs.map((job) => job.text),
+    ['Please clean the kitchen and living room tomorrow afternoon,'],
+  );
+  const first = tone(0.2);
+  f.complete(0, first);
+  await settled();
+  assert.deepEqual(mediaBytes(f.phones.remote), encoded(first));
+  assert.deepEqual(f.lifetime(), { finished: 0, aborted: 0 });
+  f.input('local', Buffer.alloc(160, 0x55));
+  assert.equal(f.microphone.length, 2);
+  assert.equal(f.jobs.length, 1, 'incomplete second clause remains buffered');
+  f.text(' cleaned.');
+  t.mock.timers.tick(300);
+  assert.deepEqual(
+    f.jobs.map((job) => job.text),
+    [
+      'Please clean the kitchen and living room tomorrow afternoon,',
+      'but I do not need the bedroom cleaned.',
+    ],
+  );
+  const second = tone(0.2, 17);
+  f.complete(1, second);
+  await settled();
+  assert.deepEqual(
+    mediaBytes(f.phones.remote),
+    Buffer.concat([encoded(first), encoded(second)]),
+  );
+  assert.deepEqual(f.failures, []);
+});
+
+test('finer clauses from one paragraph do not exhaust the old four sentence job count', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = fixture();
+  t.after(() => f.bridge.close());
+  await settled();
+  const clauses = [
+    'I want the kitchen and the living room cleaned,',
+    'and I want the two boxes left by the door,',
+    'and I do not want the books moved today,',
+    'and you can call me before you leave tomorrow,',
+    'and I will open the front door for you,',
+    'and I will pay you after the work is done.',
+  ];
+  f.text(clauses.join(' '));
+  t.mock.timers.tick(300);
+  assert.deepEqual(f.failures, []);
+  const outputs: Buffer[] = [];
+  for (let i = 0; i < clauses.length; i += 1) {
+    assert.equal(f.jobs[i]?.text, clauses[i]);
+    const pcm = tone(0.2, i + 12);
+    outputs.push(encoded(pcm));
+    f.complete(i, pcm);
+    await settled();
+  }
+  assert.deepEqual(mediaBytes(f.phones.remote), Buffer.concat(outputs));
+  assert.deepEqual(f.failures, []);
+});
+
+test('hybrid smaller jobs remain bounded by count and the original total text allowance', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const byCount = fixture();
+  const byChars = fixture();
+  t.after(() => {
+    byCount.bridge.close();
+    byChars.bridge.close();
+  });
+  await settled();
+  byCount.text('Small phrase. '.repeat(13));
+  t.mock.timers.tick(300);
+  assert.deepEqual(byCount.failures, ['nano_synthesis_queue_full:local']);
+  for (let i = 0; i < 4; i += 1) {
+    byChars.text(`${'x'.repeat(239)}.`);
+    t.mock.timers.tick(300);
+  }
+  assert.deepEqual(byChars.failures, []);
+  byChars.text('Another.');
+  t.mock.timers.tick(300);
+  assert.deepEqual(byChars.failures, ['nano_synthesis_queue_full:local']);
+});

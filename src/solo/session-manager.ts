@@ -531,6 +531,13 @@ export class SessionManager extends EventEmitter {
               data: { ...audio, sessionId: session.view.id },
             });
           },
+          onCaptionInputDiagnostic: (diagnostic) => {
+            if (!session.ended)
+              this.emit('event', {
+                event: 'caption-input',
+                data: { ...diagnostic, sessionId: session.view.id },
+              });
+          },
           onMetric: (metric) => {
             if (!session.ended)
               this.emit('event', {

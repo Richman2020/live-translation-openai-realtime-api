@@ -875,6 +875,27 @@ test('caption mode sends its engine, verifies it and reports original audio sepa
   await f.element('end-call').events.click();
 });
 
+test('caption mode separates text boundary wait from synthesis and rejects late or unrelated metrics', async () => {
+  const f = await pageFixture(async () => streamFixture().stream);
+  f.element('translation-engine').value = 'nano-captions';
+  f.element('translation-engine').events.change();
+  await f.element('start-call').events.click();
+  const boundary = { role: 'local', name: 'nano_boundary_wait_ms', scope: 'text_boundary', value: 9400, at: 1000 };
+  f.metricEvent(boundary);
+  assert.match(f.element('translation-timing-local').textContent, /分节等待 9\.40 秒.*尚无合成计时/);
+  f.metricEvent({ role: 'local', name: 'nano_text_to_audio_ms', scope: 'local_synthesis', value: 1700, at: 1100 });
+  assert.match(f.element('translation-timing-local').textContent, /分节等待 9\.40 秒.*合成 1\.70 秒/);
+  const expected = f.element('translation-timing-local').textContent;
+  for (const patch of [{ at: 999 }, { role: 'remote' }, { scope: 'local_synthesis' }, { sessionId: 'old-call' }, { value: -1 }]) {
+    f.metricEvent({ ...boundary, value: 99999, ...patch });
+    assert.equal(f.element('translation-timing-local').textContent, expected);
+  }
+  await f.element('end-call').events.click();
+  await f.element('start-call').events.click();
+  assert.doesNotMatch(f.element('translation-timing-local').textContent, /9\.40|1\.70/);
+  await f.element('end-call').events.click();
+});
+
 test('caption status is separate, safe, session-scoped and recovered from a status snapshot', async () => {
   const f = await pageFixture(async () => streamFixture().stream);
   f.element('translation-engine').value = 'nano-captions';
@@ -949,6 +970,25 @@ test('caption drafts pair English with Chinese even with original preference off
   assert.equal(historyRows[0].dataset.transcriptId, original.id);
   assert.equal(historyRows[0].className.split(/\s+/).includes('original-entry'), false);
   assert.equal(historyRows[1].children[1].children[0].textContent, '不是五点。');
+});
+
+test('empty final captions remove invalid drafts instead of leaving blank or stale rows', async () => {
+  const f = await pageFixture(async () => streamFixture().stream);
+  f.element('translation-engine').value = 'nano-captions';
+  f.element('translation-engine').events.change();
+  await f.element('start-call').events.click();
+  const emit = (kind: string, text: string, final: boolean, sessionId?: string) => f.transcriptEvent({ id: `remote:${kind}:empty_case:0`, role: 'remote', kind, text, final, ...(sessionId ? { sessionId } : {}) });
+  emit('original', 'uncertain noise', false);
+  emit('translation', '不确定的声音', false);
+  assert.equal(f.element('transcript').children.length, 2);
+  emit('original', '', true, 'previous-session');
+  assert.equal(f.element('transcript').children.length, 2);
+  emit('original', '', true);
+  emit('translation', '', true);
+  assert.equal(f.element('transcript').children.length, 0);
+  assert.equal(f.element('empty-conversation').hidden, false);
+  assert.equal(f.element('export-current').disabled, true);
+  await f.element('end-call').events.click();
 });
 
 test('caption ASR turns use stable source time across late completions, paired translations, history and export', async () => {

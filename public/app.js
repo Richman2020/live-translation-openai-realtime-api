@@ -344,7 +344,7 @@
       : snapshot.selected === 'continuous-nano' ? '下一通使用本人声线实验版。分句合成会增加等待，请用完整短句测试。'
       : snapshot.selected === 'continuous' ? '下一通使用连续翻译实验版。请与当前版本分两次通话比较效果。' : '下一通使用当前版本。';
     $('translation-engine-help').textContent = snapshot.value === 'nano-captions'
-      ? '你的英文采用 B 版：92% 语速，音量适度增强并限制峰值。完整英文句子形成后逐句合成、按顺序播放，后文继续接收；仍需等待翻译与单句合成。对方英文原声直接送到电脑，同步中英字幕，不生成中文声音。字幕故障不阻断原声。拨号前选择，来电保持当前版本。'
+      ? '你的英文采用 B 版：92% 语速，音量适度增强并限制峰值。有足够上下文的完整英文小节先合成、按顺序播放，后文继续接收；仍需等待模型听译与小节合成。对方英文原声直接送到电脑，同步中英字幕，不生成中文声音。字幕故障不阻断原声。拨号前选择，来电保持当前版本。'
       : snapshot.value === 'continuous-nano'
       ? '电脑中文 → 手机英文使用本机本人声线；对方英文 → 电脑中文保留连续翻译原声。等待完整译文句子后合成，会增加等待；无完整句尾时继续等候。拨号前选择，通话中不能切换；来电保持当前版本。'
       : '拨号前选择，通话中不能切换。用相同内容分两次拨打，比较实际听到的译音和等待。来电保持当前版本。';
@@ -532,7 +532,7 @@
     const ownVoice = usesNanoVoice(engine);
     const continuous = ownVoice || engine === 'continuous';
     $('translation-timing-note').textContent = captions
-      ? '出程本人英文 B 版逐句合成和播放，后文继续翻译；计时含合成排队、变速和音量处理，不含等待分句、线路传输及播放。回程直接传送英文原声，中文仅为文字字幕；字幕处理耗时不等于原声延迟。'
+      ? '出程本人英文 B 版按完整小节合成，后文继续翻译。分节等待从收到本小节首个译文字开始计；合成计时另含排队、变速和音量处理。两项均不包含此前模型听译、线路传输和播放，不能当作完整电话延迟。回程直接听英文原声、看中文字幕。'
       : ownVoice
       ? '本人声线等待完整译文句子后合成。合成耗时从句子提交到本机声音生成完成，含合成排队；不含此前等待分句、线路传输及播放，不等于实际电话延迟。回程中文使用连续翻译原声。'
       : continuous
@@ -552,7 +552,7 @@
       const timing = translationTiming.get(role);
       const seconds = value => `${(value / 1000).toFixed(2)} 秒`;
       $(`translation-timing-${role}`).textContent = ownVoice && role === 'local'
-        ? `${target}：${timing ? `最近一次本人声线合成 ${seconds(timing.value)}（含合成排队）` : '等待完整译文句子后合成本人声线，尚无合成计时'}`
+        ? `${target}：${timing?.boundaryWaitMs !== undefined ? `最近一次分节等待 ${seconds(timing.boundaryWaitMs)}；` : ''}${Number.isFinite(timing?.value) ? `本人声线合成 ${seconds(timing.value)}（含合成排队）` : captions ? '等待完整译文小节后合成本人声线，尚无合成计时' : '等待完整译文句子后合成本人声线，尚无合成计时'}`
         : continuous ? `${target}：${ownVoice ? '连续翻译原声' : '连续翻译'}，不使用旧版逐句停说计时` : !timing ? `${target}：尚无服务端计时` :
         `${target}最近一句：服务端停说事件 → 首个译音数据 ${seconds(timing.value)}` +
         (timing.parts ? `（等待转写 ${seconds(timing.parts[0])} · 等待发起 ${seconds(timing.parts[1])} · 生成首音 ${seconds(timing.parts[2])}）` : '（分项时间不可用）');
@@ -562,6 +562,14 @@
     if (!value || !activeSession || value.sessionId !== activeSession.id || terminal(activeSession.status) || activeSession.status === 'ending') return;
     if (activeSession.translationEngine === 'continuous') return;
     const ownVoice = usesNanoVoice(activeSession.translationEngine);
+    if (ownVoice && value.role === 'local' && value.name === 'nano_boundary_wait_ms' && value.scope === 'text_boundary') {
+      if (!Number.isFinite(value.value) || value.value < 0 || !Number.isFinite(value.at)) return;
+      const previous = translationTiming.get('local');
+      if (previous?.boundaryAt > value.at) return;
+      translationTiming.set('local', { ...previous, boundaryWaitMs: value.value, boundaryAt: value.at });
+      renderAudioDelivery();
+      return;
+    }
     if (ownVoice) {
       if (value.role !== 'local' || value.name !== 'nano_text_to_audio_ms' || value.scope !== 'local_synthesis') return;
     } else if (!['local', 'remote'].includes(value.role) || value.name !== 'speech_stop_to_first_audio_ms' || value.scope !== 'provider_generation') return;
@@ -570,7 +578,7 @@
     if (previous && value.at < previous.at) return;
     const parts = [value.transcriptionMs, value.queueMs, value.generationMs];
     const complete = !ownVoice && parts.every(part => Number.isFinite(part) && part >= 0) && Math.abs(parts.reduce((sum, part) => sum + part, 0) - value.value) < 1;
-    translationTiming.set(value.role, { value: value.value, at: value.at, parts: complete ? parts : null });
+    translationTiming.set(value.role, { ...previous, value: value.value, at: value.at, parts: complete ? parts : null });
     renderAudioDelivery();
   }
   function applyAudioDelivery(value) {
@@ -620,6 +628,13 @@
   function appendTranscript(value) {
     if (!value || typeof value.id !== 'string' || typeof value.text !== 'string' || !['local', 'remote'].includes(value.role) || !['original', 'translation'].includes(value.kind)) return;
     if (!record || (value.sessionId && value.sessionId !== record.id)) return;
+    if (record.translationEngine === 'nano-captions' && value.role === 'remote' && value.final === true && !value.text.trim()) {
+      record.lines = record.lines.filter(line => line.id !== value.id);
+      $('transcript').replaceChildren(...[...$('transcript').children].filter(node => node.dataset.transcriptId !== value.id));
+      $('empty-conversation').hidden = record.lines.length > 0;
+      $('export-current').disabled = record.lines.length === 0;
+      return;
+    }
     if (translationRecoveryHint && value.kind === 'translation' && value.final === true && (activeSession?.translationEngine !== 'nano-captions' || value.role === 'local')) { translationRecoveryHint = false; renderStatus(); }
     const line = { id: value.id, role: value.role, kind: value.kind, text: value.text.slice(0, 20000), final: value.final === true, at: value.at || new Date().toISOString() };
     const index = record.lines.findIndex(old => old.id === line.id);
