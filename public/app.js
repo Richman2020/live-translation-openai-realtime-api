@@ -7,6 +7,8 @@
   const { createTranslationEngineSelection, translationEngineLabel, translationReadiness, usesNanoVoice, usesRemoteCaptions } = await import('./translation-engine.js');
   const $ = id => document.getElementById(id);
   const tokenKey = 'ai-phone-local-token';
+  const missingAccessMessage = '此标签页未取得本机访问凭据，尚未检查服务状态。请通过桌面「AI 电话」重新打开。';
+  const rejectedAccessMessage = '本机访问凭据已失效，请关闭此窗口，再从桌面「AI 电话」打开。';
   const historyKey = 'ai-phone-calls-v1';
   const preferencesKey = 'ai-phone-preferences-v1';
   const statusNames = { connecting: '正在连接', ringing: '等待接听', active: '通话中', ending: '正在结束', completed: '通话已结束', failed: '通话未完成' };
@@ -233,7 +235,7 @@
     window.scrollTo(0, 0);
   }
   async function api(path, options = {}, timeoutMs) {
-    if (!accessToken) throw new Error('本机访问凭据缺失，请通过桌面「AI 电话」重新打开。');
+    if (!accessToken) throw new Error(missingAccessMessage);
     const controller = new AbortController();
     // Verification allows four sequential requests. Dialing can require a
     // 5-second public probe plus a 15-second engine probe, with transport margin.
@@ -245,7 +247,7 @@
         if (response.status === 401 || payload.error === 'UNAUTHORIZED') {
           localAccessRejected = true;
           state = null; eventSource?.close(); eventsOnline = false;
-          throw new Error('本机访问凭据已失效，请关闭此窗口，再从桌面「AI 电话」打开。');
+          throw new Error(rejectedAccessMessage);
         }
         throw new Error(cleanMessage(typeof payload.error === 'string' ? payload.error : payload.message, `操作未完成（HTTP ${response.status}），请检查设置后重试。`));
       }
@@ -264,10 +266,13 @@
   function renderStatus() {
     const configured = state?.configured === true;
     const cleanupPending = requiresCleanup(activeSession);
-    $('local-state').textContent = state ? '本机服务已连接' : '本机服务未连接';
-    $('configuration-badge').textContent = state ? (configured ? '配置已填写' : '需要补充配置') : '未连接';
-    $('readiness-title').textContent = !state ? '本机服务未连接' : !configured ? '先完成连接设置' : registered ? '电话已开启' : '配置已填写';
-    $('readiness-copy').textContent = !state ? '请从桌面「AI 电话」重新打开。' : !configured ? '填入真实连接信息后，再开启通话。' : registered ? '拨号前可选择翻译版本；电话接通后，等「翻译已就绪」再说话。' : '点击「开启通话」注册线路。配置通过不代表真实通话已验证。';
+    const accessNotice = !accessToken
+      ? { title: '本机访问权限缺失', badge: '需要从桌面打开', copy: missingAccessMessage }
+      : localAccessRejected ? { title: '本机访问凭据已失效', badge: '需要重新打开', copy: rejectedAccessMessage } : null;
+    $('local-state').textContent = accessNotice?.title || (state ? '本机服务已连接' : '本机服务未连接');
+    $('configuration-badge').textContent = accessNotice?.badge || (state ? (configured ? '配置已填写' : '需要补充配置') : '未连接');
+    $('readiness-title').textContent = accessNotice?.title || (!state ? '本机服务未连接' : !configured ? '先完成连接设置' : registered ? '电话已开启' : '配置已填写');
+    $('readiness-copy').textContent = accessNotice?.copy || (!state ? '请从桌面「AI 电话」重新打开。' : !configured ? '填入真实连接信息后，再开启通话。' : registered ? '拨号前可选择翻译版本；电话接通后，等「翻译已就绪」再说话。' : '点击「开启通话」注册线路。配置通过不代表真实通话已验证。');
     if (cleanupPending) { $('readiness-title').textContent = '线路关闭待确认'; $('readiness-copy').textContent = '请重试挂断。确认线路关闭前，工作台会阻止新的拨号。'; }
     $('device-state').textContent = enabling ? '正在开启电话…' : registered ? (eventsOnline ? '已注册 · 可接收来电' : '已注册 · 状态连接恢复中') : '通话尚未开启';
     $('device-dot').classList.toggle('ready', registered && eventsOnline);
@@ -1013,7 +1018,7 @@
   setInterval(() => { $('call-timer').textContent = timeText(duration()); }, 1000);
   microphoneInput.refresh();
   setInterval(() => { if (accessToken && !localAccessRejected && !disposed) refreshStatus().catch(error => showError(error)); }, 10000);
-  if (!accessToken) { showError('请通过桌面「AI 电话」打开此页面，以取得本机访问权限。'); navigate('settings'); }
+  if (!accessToken) { showError(missingAccessMessage); navigate('settings'); }
   else refreshStatus().then(next => { if (!next.configured) navigate('settings'); }).catch(error => { showError(error); navigate('settings'); });
 })().catch(() => {
   const banner = document.getElementById('app-error');

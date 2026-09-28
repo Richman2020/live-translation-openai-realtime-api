@@ -446,7 +446,7 @@ test('a browser without mediaDevices reports unsupported without claiming microp
 
 // Run the shipped page handlers offline, with inert DOM, media and provider fixtures.
 async function pageFixture(requestMedia: (constraints: unknown) => Promise<unknown>, now: () => number = () => Date.now(),
-  options: { initialStatusFailure?: 'network' | 'timeout' | { status: number; error: string }; beforeResponse?: (path: string, signal: AbortSignal) => Promise<void> } = {}) {
+  options: { initialStatusFailure?: 'network' | 'timeout' | { status: number; error: string }; beforeResponse?: (path: string, signal: AbortSignal) => Promise<void>; locationHash?: string; sessionToken?: string } = {}) {
   const nodes = new Map<string, any>();
   function node(): any {
     return {
@@ -482,6 +482,8 @@ async function pageFixture(requestMedia: (constraints: unknown) => Promise<unkno
   const sdkLogs: string[] = [];
   const exports: Blob[] = [];
   const localValues = new Map();
+  const sessionValues = new Map(options.sessionToken ? [['ai-phone-local-token', options.sessionToken]] : []);
+  const historyPaths: string[] = [];
   let activeSession: any = null;
   let sessionCounter = 0;
   let mediaHandedToSdk: unknown;
@@ -541,10 +543,10 @@ async function pageFixture(requestMedia: (constraints: unknown) => Promise<unkno
     translationEngineModule: await import('../public/translation-engine.js'),
     lifecycleModule: { createCallLifecycle, createDeviceMediaOwner, microphoneMessages: (await import('../public/call-lifecycle.js')).microphoneMessages },
     document: { getElementById: element, querySelector: element, querySelectorAll: () => [], createElement: node, createElementNS: node, body: node() },
-    window: { Twilio: { Device: FakeDevice }, history: { replaceState() {} }, addEventListener(name: string, callback: () => void) { windowEvents.set(name, callback); }, scrollTo() {} },
+    window: { Twilio: { Device: FakeDevice }, history: { replaceState(_state: unknown, _title: string, path: string) { historyPaths.push(path); } }, addEventListener(name: string, callback: () => void) { windowEvents.set(name, callback); }, scrollTo() {} },
     navigator: { mediaDevices },
-    location: { hash: '#token=offline-test-access-only', pathname: '/', search: '' },
-    sessionStorage: { getItem: () => null, setItem() {} }, localStorage: { getItem: (key: string) => localValues.get(key) ?? null, setItem: (key: string, value: string) => localValues.set(key, value) },
+    location: { hash: options.locationHash ?? '#token=offline-test-access-only', pathname: '/', search: '' },
+    sessionStorage: { getItem: (key: string) => sessionValues.get(key) ?? null, setItem: (key: string, value: string) => sessionValues.set(key, value) }, localStorage: { getItem: (key: string) => localValues.get(key) ?? null, setItem: (key: string, value: string) => localValues.set(key, value) },
     URLSearchParams, AbortController, structuredClone, EventSource: FakeEvents, Blob, TypeError,
     URL: { createObjectURL: (blob: Blob) => { exports.push(blob); return 'blob:offline-export'; }, revokeObjectURL() {} },
     Date: class extends Date { static now() { return now(); } },
@@ -586,14 +588,14 @@ async function pageFixture(requestMedia: (constraints: unknown) => Promise<unkno
   assert.ok(source.includes(importLine));
   await vm.runInContext(source.replace(importLine, 'lifecycleModule').replace("await import('./audio-output.js')", 'audioOutputModule').replace("await import('./microphone-input.js')", 'microphoneInputModule').replace("await import('./translation-engine.js')", 'translationEngineModule'), context);
   await new Promise(resolve => setImmediate(resolve));
-  if (!options.initialStatusFailure) {
+  if (!options.initialStatusFailure && sources.length) {
     sources[0].onopen();
     await new Promise(resolve => setImmediate(resolve));
     await element('enable-device').events.click();
   }
   element('phone-number').value = '+12125551234';
   return {
-    element, requests, requestBodies, device, sdkLogs, exports, history: () => JSON.parse(localValues.get('ai-phone-calls-v1') || '[]'), outgoingCall: () => outgoingCall, sdkConnects: () => sdkConnects, media: () => mediaHandedToSdk,
+    element, requests, requestBodies, device, sdkLogs, exports, historyPaths, storedAccessToken: () => sessionValues.get('ai-phone-local-token'), history: () => JSON.parse(localValues.get('ai-phone-calls-v1') || '[]'), outgoingCall: () => outgoingCall, sdkConnects: () => sdkConnects, media: () => mediaHandedToSdk,
     requestTimeout(path: string) { return apiTimeouts.filter(entry => entry.path === path).at(-1)?.timer; },
     failApi(path: string, failure: 'network' | 'timeout' | { status: number; error: string }) { apiFailures.set(path, failure); },
     restoreApi(path: string) { apiFailures.delete(path); },
@@ -1376,6 +1378,47 @@ test('confirmed cleanup clears its stale banner while preserving unrelated SDK a
   assert.match(f.element('app-error').textContent, /21216/);
 });
 
+test('a fresh bare-URL tab reports missing access rather than a service outage and cannot contact protected APIs or dial', async () => {
+  let captures = 0;
+  const f = await pageFixture(async () => { captures++; return streamFixture().stream; }, undefined, { locationHash: '' });
+  assert.equal(f.element('local-state').textContent, '本机访问权限缺失');
+  assert.equal(f.element('readiness-title').textContent, '本机访问权限缺失');
+  assert.equal(f.element('configuration-badge').textContent, '需要从桌面打开');
+  assert.match(f.element('readiness-copy').textContent, /未取得本机访问凭据.*尚未检查服务状态.*桌面/);
+  assert.match(f.element('app-error').textContent, /未取得本机访问凭据.*尚未检查服务状态/);
+  assert.doesNotMatch(f.element('app-error').textContent, /无法连接|响应超时|已失效/);
+  for (const id of ['enable-device', 'start-call', 'verify-connections', 'save-settings', 'translation-engine']) assert.equal(f.element(id).disabled, true);
+  await f.pollStatus();
+  await f.element('refresh-status').events.click();
+  await f.element('enable-device').events.click();
+  await f.element('start-call').events.click();
+  await f.element('verify-connections').events.click();
+  f.pagehide();
+  assert.deepEqual(f.requests, []);
+  assert.equal(f.eventSourceCount(), 0);
+  assert.equal(f.device, undefined);
+  assert.equal(f.sdkConnects(), 0);
+  assert.equal(captures, 0);
+  assert.equal(f.storedAccessToken(), undefined);
+});
+
+test('launcher fragment and existing tab storage retain authentication without making a new bare tab authenticated', async () => {
+  const token = 'offline-bootstrap-access-only';
+  const launched = await pageFixture(async () => streamFixture().stream, undefined, { locationHash: `#token=${token}` });
+  assert.deepEqual(launched.historyPaths, ['/']);
+  assert.equal(launched.storedAccessToken(), token);
+  assert.equal(launched.element('local-state').textContent, '本机服务已连接');
+  const restored = await pageFixture(async () => streamFixture().stream, undefined, { locationHash: '', sessionToken: token });
+  assert.equal(restored.element('local-state').textContent, '本机服务已连接');
+  assert.equal(restored.element('start-call').disabled, false);
+  assert.equal(restored.requests.includes('GET /api/status'), true);
+  assert.deepEqual(restored.historyPaths, []);
+  const newTab = await pageFixture(async () => streamFixture().stream, undefined, { locationHash: '' });
+  assert.equal(newTab.element('local-state').textContent, '本机访问权限缺失');
+  assert.deepEqual(newTab.requests, []);
+  assert.equal(launched.sdkConnects() + restored.sdkConnects() + newTab.sdkConnects(), 0);
+});
+
 test('existing status polling continues through a local outage and clears only its recovered connection warning', async t => {
   for (const failure of ['network', 'timeout'] as const) await t.test(failure, async () => {
     const f = await pageFixture(async () => streamFixture().stream);
@@ -1383,6 +1426,7 @@ test('existing status polling continues through a local outage and clears only i
     f.failApi('/api/status', failure);
     await f.pollStatus();
     assert.equal(f.element('local-state').textContent, '本机服务未连接');
+    assert.equal(f.element('readiness-title').textContent, '本机服务未连接');
     assert.equal(f.element('start-call').disabled, true);
     assert.equal(f.element('app-error').hidden, false);
     assert.match(f.element('app-error').textContent, failure === 'network' ? /无法连接本机服务/ : /本机服务响应超时/);
@@ -1498,6 +1542,12 @@ test('authentication failures are not cleared by successful status reads or retr
   f.failApi('/api/status', { status: 401, error: 'UNAUTHORIZED' });
   await f.pollStatus();
   assert.match(f.element('app-error').textContent, /本机访问凭据已失效/);
+  assert.equal(f.element('local-state').textContent, '本机访问凭据已失效');
+  assert.equal(f.element('readiness-title').textContent, '本机访问凭据已失效');
+  assert.equal(f.element('configuration-badge').textContent, '需要重新打开');
+  assert.match(f.element('readiness-copy').textContent, /关闭此窗口.*桌面/);
+  assert.equal(f.element('start-call').disabled, true);
+  assert.equal(f.element('enable-device').disabled, true);
   const before = f.requests.length;
   await f.pollStatus();
   assert.equal(f.requests.length, before, 'known rejected local credentials require reopening, not repeated polling');
