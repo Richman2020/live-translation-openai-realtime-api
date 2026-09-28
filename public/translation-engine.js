@@ -1,7 +1,11 @@
-const engineLabels = Object.freeze({ legacy: '当前版本', continuous: '连续翻译实验版', 'continuous-nano': '本人声线实验版', 'nano-captions': '英文原声＋中文字幕' });
+const engineLabels = Object.freeze({ legacy: '当前版本', continuous: '连续翻译实验版', 'continuous-nano': '本人声线实验版', 'nano-captions': '英文原声＋中文字幕', 'continuous-captions': '连续直出＋中文字幕（测试候选）' });
 
 export function usesNanoVoice(value) {
   return value === 'continuous-nano' || value === 'nano-captions';
+}
+
+export function usesRemoteCaptions(value) {
+  return value === 'nano-captions' || value === 'continuous-captions';
 }
 
 export function translationEngineLabel(value) {
@@ -35,12 +39,13 @@ export function createTranslationEngineSelection() {
 export function translationReadiness(session) {
   if (session?.status !== 'active') return null;
   const ownVoice = usesNanoVoice(session.translationEngine);
-  const captions = session.translationEngine === 'nano-captions';
+  const captions = usesRemoteCaptions(session.translationEngine);
   if (session.translationReady !== true) {
     if (ownVoice) return { ready: false, label: '电话已接通 · 本人声线准备中', instruction: '电话已接通，正在准备翻译和本人声线；请等就绪后说话。' };
     return { ready: false, label: '电话已接通 · 翻译准备中', instruction: '电话已接通，正在准备翻译；请等就绪后说话。' };
   }
-  if (captions) return { ready: true, label: '本人声线与英文原声已就绪', instruction: '你说中文，对方听本人英文本音；你直接听英文原声，并查看中英字幕。字幕状态单独显示；请用有明确句尾的短句。' };
+  if (captions && ownVoice) return { ready: true, label: '本人声线与英文原声已就绪', instruction: '你说中文，对方听本人英文本音；你直接听英文原声，并查看中英字幕。字幕状态单独显示；请用有明确句尾的短句。' };
+  if (captions) return { ready: true, label: '连续直出与英文原声已就绪', instruction: '你说中文，对方听模型声音的连续英文译音；你直接听英文原声，并查看中英字幕。字幕状态单独显示；请测试开始出声、持续跟随和句尾等待。' };
   if (ownVoice) return { ready: true, label: '本人声线翻译已就绪', instruction: '可以开始说话；请用有明确句尾的短句，本人声线会在分句合成后播放。' };
   return { ready: true, label: '翻译已就绪', instruction: '翻译已就绪，可以开始说话。' };
 }

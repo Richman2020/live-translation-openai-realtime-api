@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { createTranslationEngineSelection, translationEngineLabel, translationReadiness, usesNanoVoice } from '../public/translation-engine.js';
+import { createTranslationEngineSelection, translationEngineLabel, translationReadiness, usesNanoVoice, usesRemoteCaptions } from '../public/translation-engine.js';
 import { isTranslationEngine } from '../src/solo/translation-engine.js';
 
 const engines = ['legacy', 'continuous'];
@@ -71,6 +71,7 @@ test('history labels distinguish both engines and avoid inferring old missing me
   assert.equal(translationEngineLabel('continuous'), '连续翻译实验版');
   assert.equal(translationEngineLabel('continuous-nano'), '本人声线实验版');
   assert.equal(translationEngineLabel('nano-captions'), '英文原声＋中文字幕');
+  assert.equal(translationEngineLabel('continuous-captions'), '连续直出＋中文字幕（测试候选）');
   assert.equal(translationEngineLabel(undefined), '版本未记录');
 });
 
@@ -124,4 +125,39 @@ test('caption availability does not gate audio readiness or claim generated Chin
   assert.equal(ready.ready, true);
   assert.match(ready.label, /英文原声已就绪/);
   assert.match(ready.instruction, /直接听英文原声.*中英字幕.*字幕状态单独显示/);
+});
+
+test('native continuous captions are advertised opt-in and locked per session without enabling Nano', () => {
+  const selection = createTranslationEngineSelection();
+  selection.update({ engines: [...engines, 'nano-captions'], session: null, locked: false });
+  assert.equal(selection.select('continuous-captions'), false);
+  const available = [...engines, 'nano-captions', 'continuous-captions'];
+  selection.update({ engines: available, session: null, locked: false });
+  assert.equal(selection.snapshot.value, 'legacy');
+  assert.equal(selection.select('continuous-captions'), true);
+  selection.update({ engines: available, session: { translationEngine: 'continuous-captions' }, locked: false });
+  assert.equal(selection.snapshot.value, 'continuous-captions');
+  assert.equal(selection.select('nano-captions'), false);
+  selection.update({ engines: available, session: { translationEngine: 'legacy' }, locked: false });
+  assert.equal(selection.snapshot.value, 'legacy');
+  assert.equal(selection.snapshot.selected, 'continuous-captions');
+  selection.update({ engines: available, session: null, locked: false });
+  assert.equal(selection.snapshot.value, 'continuous-captions');
+  assert.equal(createTranslationEngineSelection().snapshot.value, 'legacy');
+  assert.equal(isTranslationEngine('continuous-captions'), true);
+  assert.equal(usesNanoVoice('continuous-captions'), false);
+  for (const engine of ['nano-captions', 'continuous-captions']) assert.equal(usesRemoteCaptions(engine), true);
+  for (const engine of ['legacy', 'continuous', 'continuous-nano', 'invented', undefined]) assert.equal(usesRemoteCaptions(engine), false);
+});
+
+test('native caption audio readiness requires translation readiness and never promises own voice', () => {
+  const session = { status: 'active', translationEngine: 'continuous-captions', captionState: 'failed' };
+  const pending = translationReadiness(session);
+  assert.equal(pending.ready, false);
+  assert.doesNotMatch(pending.label + pending.instruction, /本人声线|分句合成/);
+  const ready = translationReadiness({ ...session, translationReady: true });
+  assert.equal(ready.ready, true);
+  assert.equal(ready.label, '连续直出与英文原声已就绪');
+  assert.match(ready.instruction, /模型声音.*直接听英文原声.*中英字幕.*字幕状态单独显示/);
+  assert.doesNotMatch(ready.instruction, /本人声线|本人英文本音|分句合成/);
 });

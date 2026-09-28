@@ -4,7 +4,7 @@
   const { createCallLifecycle, createDeviceMediaOwner, microphoneMessages } = await import('./call-lifecycle.js');
   const { createAudioOutput } = await import('./audio-output.js');
   const { createMicrophoneInput } = await import('./microphone-input.js');
-  const { createTranslationEngineSelection, translationEngineLabel, translationReadiness, usesNanoVoice } = await import('./translation-engine.js');
+  const { createTranslationEngineSelection, translationEngineLabel, translationReadiness, usesNanoVoice, usesRemoteCaptions } = await import('./translation-engine.js');
   const $ = id => document.getElementById(id);
   const tokenKey = 'ai-phone-local-token';
   const historyKey = 'ai-phone-calls-v1';
@@ -68,6 +68,7 @@
     SESSION_UPDATED_BOTH_LANGUAGES: '中英双向连续翻译会话已确认配置。',
     NANO_AND_CONTINUOUS_READY: '本机本人声线已预热，中英双向连续翻译连接已就绪。',
     NANO_CAPTIONS_READY: '本人声线 B 版（稍慢、音量增强）、出程翻译和回程字幕连接已就绪。',
+    CONTINUOUS_CAPTIONS_READY: '连续英文直出与回程字幕连接已就绪；出程使用模型声音。',
     NANO_READY: '本机本人声线已完成预热。',
     VERIFIED_RESOURCE: '账户资源与配置验证通过。'
   };
@@ -340,32 +341,35 @@
       ? '正在检查翻译与本机本人声线，首次准备可能需要约 2 分钟；尚未拨出，请等待。'
       : snapshot.sessionEngine
       ? `本通电话使用：${translationEngineLabel(snapshot.sessionEngine)}。通话结束后才能换版本。`
+      : snapshot.selected === 'continuous-captions' ? '下一通使用连续直出＋中文字幕测试候选：对方听模型声音的连续英文；你听英文原声、看中英字幕。'
       : snapshot.selected === 'nano-captions' ? '下一通：你听英文原声、看中英字幕；对方听本人英文 B 版，逐句输出、稍慢且音量增强。'
       : snapshot.selected === 'continuous-nano' ? '下一通使用本人声线实验版。分句合成会增加等待，请用完整短句测试。'
       : snapshot.selected === 'continuous' ? '下一通使用连续翻译实验版。请与当前版本分两次通话比较效果。' : '下一通使用当前版本。';
-    $('translation-engine-help').textContent = snapshot.value === 'nano-captions'
+    $('translation-engine-help').textContent = snapshot.value === 'continuous-captions'
+      ? '电脑中文 → 手机英文使用模型声音，连续译音直接送到电话，不使用本人声线。回程保持英文原声直接送到电脑，同步中英字幕，不生成中文声音；字幕故障不阻断原声。请比较实际开始出声、持续跟随和句尾等待。拨号前选择，通话中不能切换；来电保持当前版本。'
+      : snapshot.value === 'nano-captions'
       ? '你的英文采用 B 版：92% 语速，音量适度增强并限制峰值。有足够上下文的完整英文小节先合成、按顺序播放，后文继续接收；仍需等待模型听译与小节合成。对方英文原声直接送到电脑，同步中英字幕，不生成中文声音。字幕故障不阻断原声。拨号前选择，来电保持当前版本。'
       : snapshot.value === 'continuous-nano'
       ? '电脑中文 → 手机英文使用本机本人声线；对方英文 → 电脑中文保留连续翻译原声。等待完整译文句子后合成，会增加等待；无完整句尾时继续等候。拨号前选择，通话中不能切换；来电保持当前版本。'
       : '拨号前选择，通话中不能切换。用相同内容分两次拨打，比较实际听到的译音和等待。来电保持当前版本。';
     $('verification-engine').textContent = `验证版本：${translationEngineLabel(snapshot.value)}。在工作台的「本次翻译版本」中选择。`;
     const displayEngine = activeSession?.translationEngine || record?.translationEngine || snapshot.value;
-    if (!record) $('transcript-subtitle').textContent = displayEngine === 'nano-captions' ? '直接听英文原声，字幕用于辅助理解与排查' : '以双方实际听到的译音为准，文字仅用于辅助排查';
-    $('transcript-engine-note').textContent = displayEngine === 'nano-captions'
+    if (!record) $('transcript-subtitle').textContent = usesRemoteCaptions(displayEngine) ? '直接听英文原声，字幕用于辅助理解与排查' : '以双方实际听到的译音为准，文字仅用于辅助排查';
+    $('transcript-engine-note').textContent = usesRemoteCaptions(displayEngine)
       ? '回程同时显示英文识别与中文字幕，草稿标为“更新中”；本模式始终显示英文原文。字幕辅助理解，可能修订或有误；听到的是对方英文原声，不是中文译音。'
       : displayEngine === 'continuous-nano'
       ? '本人声线版仅提供译文记录，不显示原文；手机英文由本机合成本人声线，电脑中文保留连续翻译原声。文字不代表声音已播放。'
       : displayEngine === 'continuous'
       ? '连续版目前仅提供译文记录，不显示原文；译音效果请双方实际听取。'
       : '当前版本可显示原文与译文；文字不能代替实际听感。';
-    $('return-audio-label').textContent = snapshot.value === 'nano-captions' ? 'English 原声 ＋ 中文字幕' : 'English → 中文';
-    $('connection-mode-label').textContent = snapshot.value === 'nano-captions' ? '本人英文本音 · 原声与字幕' : '双向语音翻译';
-    $('audio-delivery-heading').textContent = displayEngine === 'nano-captions' ? '声音传送与字幕处理状态' : '译音传送状态与用时';
+    $('return-audio-label').textContent = usesRemoteCaptions(snapshot.value) ? 'English 原声 ＋ 中文字幕' : 'English → 中文';
+    $('connection-mode-label').textContent = usesRemoteCaptions(snapshot.value) ? (usesNanoVoice(snapshot.value) ? '本人英文本音 · 原声与字幕' : '模型声音连续直出 · 原声与字幕') : '双向语音翻译';
+    $('audio-delivery-heading').textContent = usesRemoteCaptions(displayEngine) ? '声音传送与字幕处理状态' : '译音传送状态与用时';
     renderCaptionStatus();
     renderAudioDelivery();
   }
   function renderCaptionStatus() {
-    const visible = (activeSession?.translationEngine || record?.translationEngine || translationEngine.snapshot.value) === 'nano-captions';
+    const visible = usesRemoteCaptions(activeSession?.translationEngine || record?.translationEngine || translationEngine.snapshot.value);
     const node = $('caption-status');
     node.hidden = !visible;
     if (!visible) { node.textContent = ''; return; }
@@ -449,7 +453,7 @@
     if (session && (typeof session.id !== 'string' || typeof session.status !== 'string')) return;
     if (session && !terminal(session.status)) {
       if (session.id !== captionStatus?.sessionId) captionStatus = { sessionId: session.id, state: 'connecting' };
-      if (session.translationEngine === 'nano-captions' && ['connecting', 'ready', 'failed'].includes(session.captionState)) captionStatus.state = session.captionState;
+      if (usesRemoteCaptions(session.translationEngine) && ['connecting', 'ready', 'failed'].includes(session.captionState)) captionStatus.state = session.captionState;
     }
     if (!session || !terminal(session.status) && session.id !== activeSession?.id) {
       recoveringTranslationRoles.clear(); translationRecoveryHint = false;
@@ -506,7 +510,7 @@
     eventSource.onerror = () => { eventsOnline = false; renderStatus(); };
   }
   function applyCaptionStatus(value) {
-    if (!value || !activeSession || activeSession.translationEngine !== 'nano-captions' || value.sessionId !== activeSession.id || terminal(activeSession.status) || activeSession.status === 'ending') return;
+    if (!value || !activeSession || !usesRemoteCaptions(activeSession.translationEngine) || value.sessionId !== activeSession.id || terminal(activeSession.status) || activeSession.status === 'ending') return;
     if (!['connecting', 'ready', 'failed'].includes(value.state)) return;
     captionStatus = { sessionId: value.sessionId, state: value.state };
     renderCaptionStatus();
@@ -514,7 +518,7 @@
   function applyTranslationConnection(value) {
     if (!value || !activeSession || value.sessionId !== activeSession.id || terminal(activeSession.status) || activeSession.status === 'ending') return;
     if (!['local', 'remote'].includes(value.role) || !['disconnected', 'reconnecting', 'ready'].includes(value.state)) return;
-    if (activeSession.translationEngine === 'nano-captions' && value.role !== 'local') return;
+    if (usesRemoteCaptions(activeSession.translationEngine) && value.role !== 'local') return;
     const diagnostic = { role: value.role, state: value.state };
     if (Number.isInteger(value.closeCode) && value.closeCode >= 1000 && value.closeCode <= 4999) diagnostic.closeCode = value.closeCode;
     console.info('[AI Phone Translation]', JSON.stringify(diagnostic));
@@ -528,10 +532,12 @@
   }
   function renderAudioDelivery() {
     const engine = activeSession?.translationEngine || record?.translationEngine || translationEngine.snapshot.value;
-    const captions = engine === 'nano-captions';
+    const captions = usesRemoteCaptions(engine);
     const ownVoice = usesNanoVoice(engine);
-    const continuous = ownVoice || engine === 'continuous';
-    $('translation-timing-note').textContent = captions
+    const continuous = ownVoice || captions || engine === 'continuous';
+    $('translation-timing-note').textContent = captions && !ownVoice
+      ? '出程采用模型声音的连续英文译音，直接送到电话；回程保持英文原声与中英字幕。请比较实际开始出声、持续讲话落后和句尾等待；数据块数不代表已听清，本页尚无完整电话延迟测量。'
+      : captions
       ? '出程本人英文 B 版按完整小节合成，后文继续翻译。分节等待从收到本小节首个译文字开始计；合成计时另含排队、变速和音量处理。两项均不包含此前模型听译、线路传输和播放，不能当作完整电话延迟。回程直接听英文原声、看中文字幕。'
       : ownVoice
       ? '本人声线等待完整译文句子后合成。合成耗时从句子提交到本机声音生成完成，含合成排队；不含此前等待分句、线路传输及播放，不等于实际电话延迟。回程中文使用连续翻译原声。'
@@ -560,8 +566,8 @@
   }
   function applyTranslationTiming(value) {
     if (!value || !activeSession || value.sessionId !== activeSession.id || terminal(activeSession.status) || activeSession.status === 'ending') return;
-    if (activeSession.translationEngine === 'continuous') return;
     const ownVoice = usesNanoVoice(activeSession.translationEngine);
+    if (activeSession.translationEngine === 'continuous' || (usesRemoteCaptions(activeSession.translationEngine) && !ownVoice)) return;
     if (ownVoice && value.role === 'local' && value.name === 'nano_boundary_wait_ms' && value.scope === 'text_boundary') {
       if (!Number.isFinite(value.value) || value.value < 0 || !Number.isFinite(value.at)) return;
       const previous = translationTiming.get('local');
@@ -593,7 +599,7 @@
     renderAudioDelivery();
   }
   function renderLine(line, engine = record?.translationEngine) {
-    const captionOriginal = engine === 'nano-captions' && line.role === 'remote' && line.kind === 'original';
+    const captionOriginal = usesRemoteCaptions(engine) && line.role === 'remote' && line.kind === 'original';
     // Keep paired English captions visible even when the general original-text preference is off.
     const article = element('article', `utterance ${line.role === 'remote' ? 'their' : 'mine'} ${line.kind === 'original' ? (captionOriginal ? 'caption-original-entry' : 'original-entry') : ''}`);
     article.dataset.transcriptId = line.id;
@@ -611,7 +617,7 @@
       groups.get(key).push(line);
     }
     const ordered = [...groups.entries()];
-    if (engine === 'nano-captions') {
+    if (usesRemoteCaptions(engine)) {
       const turnTime = group => Math.min(...group.map(line => new Date(line.at).getTime()).filter(Number.isFinite));
       const isCaption = ([key, group]) => key.startsWith('turn:remote:') && Number.isFinite(turnTime(group));
       const captions = ordered.filter(isCaption).sort((a, b) => turnTime(a[1]) - turnTime(b[1]));
@@ -628,20 +634,20 @@
   function appendTranscript(value) {
     if (!value || typeof value.id !== 'string' || typeof value.text !== 'string' || !['local', 'remote'].includes(value.role) || !['original', 'translation'].includes(value.kind)) return;
     if (!record || (value.sessionId && value.sessionId !== record.id)) return;
-    if (record.translationEngine === 'nano-captions' && value.role === 'remote' && value.final === true && !value.text.trim()) {
+    if (usesRemoteCaptions(record.translationEngine) && value.role === 'remote' && value.final === true && !value.text.trim()) {
       record.lines = record.lines.filter(line => line.id !== value.id);
       $('transcript').replaceChildren(...[...$('transcript').children].filter(node => node.dataset.transcriptId !== value.id));
       $('empty-conversation').hidden = record.lines.length > 0;
       $('export-current').disabled = record.lines.length === 0;
       return;
     }
-    if (translationRecoveryHint && value.kind === 'translation' && value.final === true && (activeSession?.translationEngine !== 'nano-captions' || value.role === 'local')) { translationRecoveryHint = false; renderStatus(); }
+    if (translationRecoveryHint && value.kind === 'translation' && value.final === true && (!usesRemoteCaptions(activeSession?.translationEngine) || value.role === 'local')) { translationRecoveryHint = false; renderStatus(); }
     const line = { id: value.id, role: value.role, kind: value.kind, text: value.text.slice(0, 20000), final: value.final === true, at: value.at || new Date().toISOString() };
     const index = record.lines.findIndex(old => old.id === line.id);
     if (index >= 0) record.lines[index] = line; else record.lines.push(line);
     const oldNode = [...$('transcript').children].find(node => node.dataset.transcriptId === line.id);
     const scroll = $('transcript-scroll'); const nearBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 100;
-    if (record.translationEngine === 'nano-captions') {
+    if (usesRemoteCaptions(record.translationEngine)) {
       if (oldNode) oldNode.replaceWith(renderLine(line)); else $('transcript').append(renderLine(line));
       const children = [...$('transcript').children];
       const byId = new Map(children.map(node => [node.dataset.transcriptId, node]));
@@ -883,12 +889,14 @@
   }
   function exportRecord(item) {
     if (!item?.lines.length) return;
-    const engineNotes = item.translationEngine === 'nano-captions'
-      ? ['电脑中文 → 手机英文使用本机本人声线；对方英文原声直接送到电脑，不生成中文声音。', '回程英文识别与中文字幕由独立字幕分支生成；未定稿内容可能修订，字幕可能晚于原声或存在错误。']
+    const captions = usesRemoteCaptions(item.translationEngine);
+    const ownVoice = usesNanoVoice(item.translationEngine);
+    const engineNotes = captions
+      ? [`电脑中文 → 手机英文使用${ownVoice ? '本机本人声线' : '模型声音的连续译音，直接送到电话'}；对方英文原声直接送到电脑，不生成中文声音。`, '回程英文识别与中文字幕由独立字幕分支生成；未定稿内容可能修订，字幕可能晚于原声或存在错误。']
       : item.translationEngine === 'continuous-nano'
       ? ['本人声线版未开启原文转写，此记录仅包含服务返回的译文。', '电脑中文 → 手机英文使用本机本人声线；对方英文 → 电脑中文保留连续翻译原声。分句合成会增加等待。']
       : item.translationEngine === 'continuous' ? ['连续版未开启原文转写，此记录仅包含服务返回的译文。'] : [];
-    const audioNote = item.translationEngine === 'nano-captions' ? '文字用于辅助理解与排查，不代表声音已播放；电脑听英文原声，手机听本人英文本音。' : '文字仅用于辅助排查；以双方实际听到的译音为准。';
+    const audioNote = captions ? `文字用于辅助理解与排查，不代表声音已播放；电脑听英文原声，手机听${ownVoice ? '本人英文本音' : '模型声音的连续英文译音'}。` : '文字仅用于辅助排查；以双方实际听到的译音为准。';
     const text = ['AI 电话 — 通话文字记录', `翻译版本：${translationEngineLabel(item.translationEngine)}`, `方向：${item.direction === 'inbound' ? '来电' : '拨出'}`, `号码：${item.number}`, `时间：${dateText(item.startedAt)}`, `页面观察时长：${timeText(duration(item))}`, audioNote, ...engineNotes, '', ...orderedTranscriptLines(item.lines, item.translationEngine).map(line => `[${line.role === 'local' ? '你' : '对方'} · ${line.kind === 'original' ? '原文' : '译文'}${line.final ? '' : ' · 未定稿'}] ${line.text}`)].join('\r\n');
     const url = URL.createObjectURL(new Blob(['\uFEFF', text], { type: 'text/plain;charset=utf-8' }));
     const link = element('a'); link.href = url; link.download = `AI电话-通话记录-${new Date(item.startedAt).toISOString().replace(/[:.]/g, '-')}.txt`; document.body.append(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 5000);
@@ -935,8 +943,8 @@
   async function verifyConnections() {
     if (verifying || busy() || saving || !state?.configured) return;
     const chosenEngine = translationEngine.snapshot.selected;
-    verifying = true; $('verification-results').replaceChildren(element('p', 'form-intro', chosenEngine === 'nano-captions'
-      ? '正在验证电话配置、出程翻译、回程字幕和本机声线；首次预热可能需要约 2 分钟，请等待。'
+    verifying = true; $('verification-results').replaceChildren(element('p', 'form-intro', usesRemoteCaptions(chosenEngine)
+      ? (usesNanoVoice(chosenEngine) ? '正在验证电话配置、出程翻译、回程字幕和本机声线；首次预热可能需要约 2 分钟，请等待。' : '正在验证电话配置、模型声音连续直出和回程字幕连接，请等待。')
       : chosenEngine === 'continuous-nano'
       ? '正在验证本人声线实验版的电话配置、双向翻译连接和本机声线；首次预热可能需要约 2 分钟，请等待。'
       : `正在验证${translationEngineLabel(chosenEngine)}的账户、号码、电话应用与翻译连接…`)); renderStatus();
@@ -945,13 +953,13 @@
       const verifiedEngine = result.translationEngine || 'legacy';
       $('verification-results').replaceChildren(element('p', 'form-intro', `本次验证结果：${translationEngineLabel(verifiedEngine)}`));
       if (verifiedEngine !== chosenEngine) $('verification-results').append(element('p', 'field-error', '服务返回的版本与本次选择不同，所选版本尚未确认；请刷新并重新验证。'));
-      const labels = { twilioAccount: 'Twilio 账户', twilioNumber: 'Twilio 号码', twilioApplication: '电话应用', openaiRealtime: '当前版翻译连接', openaiContinuous: '连续翻译连接（双向）', nanoTranslation: '本人声线与双向连续翻译', nanoVoice: '本机本人声线', nanoCaptions: '本人声线、出程翻译与回程字幕', openaiRemoteCaption: '回程英文识别与中文字幕', openaiTranscription: '英文实时识别', captionTranslation: '中文字幕翻译' };
+      const labels = { twilioAccount: 'Twilio 账户', twilioNumber: 'Twilio 号码', twilioApplication: '电话应用', openaiRealtime: '当前版翻译连接', openaiContinuous: '连续翻译连接（双向）', nanoTranslation: '本人声线与双向连续翻译', nanoVoice: '本机本人声线', nanoCaptions: '本人声线、出程翻译与回程字幕', continuousCaptions: '连续直出翻译与回程字幕', openaiRemoteCaption: '回程英文识别与中文字幕', openaiTranscription: '英文实时识别', captionTranslation: '中文字幕翻译' };
       for (const check of result.checks || []) {
         const row = element('div', 'config-check'); row.append(element('span', '', labels[check.name] || check.name), element('span', `check-state ${check.status === 'passed' ? 'ready' : 'needs-attention'}`, { passed: '连接验证通过', failed: '验证未通过', missing: '缺少配置' }[check.status] || '待检查'));
         if (check.code) row.title = cleanMessage(String(check.code)); $('verification-results').append(row);
       }
-      $('verification-results').append(element('p', 'form-intro', verifiedEngine === 'nano-captions'
-        ? '本次仅验证连接与本机声线就绪；仍需真实电话确认英文原声、字幕准确度与延迟，以及出程本人声线听感。'
+      $('verification-results').append(element('p', 'form-intro', usesRemoteCaptions(verifiedEngine)
+        ? (usesNanoVoice(verifiedEngine) ? '本次仅验证连接与本机声线就绪；仍需真实电话确认英文原声、字幕准确度与延迟，以及出程本人声线听感。' : '本次仅验证连接；仍需真实电话确认模型声音连续直出的准确度与等待，以及回程英文原声和中英字幕。')
         : verifiedEngine === 'continuous-nano'
         ? '本次仅验证翻译连接和本机声线就绪。仍需真实电话确认两个语言方向、本人声线听感与端到端延迟。'
         : '本次仅验证 API 连接。仍需真实电话确认两个语言方向、听感与端到端延迟。'));

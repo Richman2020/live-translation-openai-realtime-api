@@ -110,40 +110,37 @@ function browser(f: ReturnType<typeof fixture>) {
   return call;
 }
 
-test('caption failure is visible in reconnect snapshots but never blocks voice readiness or ends the session', async (t) => {
-  const f = fixture(t);
-  const call = f.manager.createOutbound(
-    config,
-    '+14155550123',
-    'nano-captions',
-  );
-  assert.equal(call.captionState, 'connecting');
-  f.manager.connectBrowser({
-    ...call.connectionParams,
-    From: 'client:ai-phone',
-    CallSid: localSid,
+for (const engine of ['nano-captions', 'continuous-captions'] as const)
+  test(`${engine}: caption failure is visible in reconnect snapshots but never blocks voice readiness or ends the session`, async (t) => {
+    const f = fixture(t);
+    const call = f.manager.createOutbound(config, '+14155550123', engine);
+    assert.equal(call.captionState, 'connecting');
+    f.manager.connectBrowser({
+      ...call.connectionParams,
+      From: 'client:ai-phone',
+      CallSid: localSid,
+    });
+    attach(f.manager, call.id, 'local', call.connectionParams.nonce, localSid);
+    await tick();
+    const nonce = new URL(f.created[0].url).searchParams.get('nonce');
+    f.manager.connectLeg(call.id, 'remote', nonce, remoteSid);
+    attach(f.manager, call.id, 'remote', nonce, remoteSid);
+    f.bridge().onConnection({ role: 'local', state: 'ready' });
+    assert.equal(f.manager.activeSession.translationReady, true);
+    f.bridge().onCaptionState({ state: 'failed', code: 'PRIVATE_DO_NOT_EMIT' });
+    assert.equal(f.manager.activeSession.status, 'active');
+    assert.equal(f.manager.activeSession.captionState, 'failed');
+    assert.equal(f.manager.activeSession.translationReady, true);
+    assert.deepEqual(f.events.at(-1), {
+      event: 'caption-status',
+      data: { state: 'failed', sessionId: call.id },
+    });
+    assert.equal(f.ended.length, 0);
+    await f.manager.end(call.id);
+    const count = f.events.length;
+    f.bridge().onCaptionState({ state: 'ready' });
+    assert.equal(f.events.length, count);
   });
-  attach(f.manager, call.id, 'local', call.connectionParams.nonce, localSid);
-  await tick();
-  const nonce = new URL(f.created[0].url).searchParams.get('nonce');
-  f.manager.connectLeg(call.id, 'remote', nonce, remoteSid);
-  attach(f.manager, call.id, 'remote', nonce, remoteSid);
-  f.bridge().onConnection({ role: 'local', state: 'ready' });
-  assert.equal(f.manager.activeSession.translationReady, true);
-  f.bridge().onCaptionState({ state: 'failed', code: 'PRIVATE_DO_NOT_EMIT' });
-  assert.equal(f.manager.activeSession.status, 'active');
-  assert.equal(f.manager.activeSession.captionState, 'failed');
-  assert.equal(f.manager.activeSession.translationReady, true);
-  assert.deepEqual(f.events.at(-1), {
-    event: 'caption-status',
-    data: { state: 'failed', sessionId: call.id },
-  });
-  assert.equal(f.ended.length, 0);
-  await f.manager.end(call.id);
-  const count = f.events.length;
-  f.bridge().onCaptionState({ state: 'ready' });
-  assert.equal(f.events.length, count);
-});
 
 test('outbound pays for no PSTN call until authenticated local stream; then pairs unique legs and hangs up both once', async (t) => {
   const f = fixture(t);
@@ -253,6 +250,8 @@ test('inbound requires fresh presence, repeated webhook is idempotent, and rings
   const xml = f.manager.acceptIncoming(config, body);
   assert.equal(f.manager.acceptIncoming(config, body), xml);
   const id = f.manager.activeSession.id;
+  assert.equal(f.manager.activeSession.translationEngine, 'legacy');
+  assert.equal(f.manager.activeSession.captionState, undefined);
   const nonce = /name="nonce" value="([^"]+)"/.exec(xml)[1];
   assert.equal(
     attach(f.manager, id, 'remote', nonce, remoteSid).accepted,

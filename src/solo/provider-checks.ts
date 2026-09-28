@@ -13,7 +13,11 @@ import {
   createContinuousTranslationClient,
   type ContinuousTranslationClient,
 } from './continuous-translation-client';
-import type { TranslationEngine } from './translation-engine';
+import {
+  usesRemoteCaptions,
+  usesNanoVoice,
+  type TranslationEngine,
+} from './translation-engine';
 import { checkNanoVoice, checkNanoCaptionVoice } from './nano-runtime';
 import { checkRemoteCaption } from './remote-caption-client';
 
@@ -194,10 +198,13 @@ export async function checkTranslationEngine(
   engine: TranslationEngine,
   createSocket?: CreateSocket,
   timeoutMs = 15000,
+  nanoChecks = { voice: checkNanoVoice, captionVoice: checkNanoCaptionVoice },
 ): Promise<Check> {
-  if (engine === 'nano-captions') {
-    const local = await checkNanoCaptionVoice();
-    if (local.status !== 'passed') return local;
+  if (usesRemoteCaptions(engine)) {
+    if (usesNanoVoice(engine)) {
+      const local = await nanoChecks.captionVoice();
+      if (local.status !== 'passed') return local;
+    }
     const [translation, caption] = await Promise.all([
       checkContinuousRealtime(config, createSocket, timeoutMs, ['en']),
       checkRemoteCaption(config, createSocket, timeoutMs),
@@ -205,13 +212,15 @@ export async function checkTranslationEngine(
     if (translation.status !== 'passed') return translation;
     if (caption.status !== 'passed') return caption;
     return {
-      name: 'nanoCaptions',
+      name: usesNanoVoice(engine) ? 'nanoCaptions' : 'continuousCaptions',
       status: 'passed',
-      code: 'NANO_CAPTIONS_READY',
+      code: usesNanoVoice(engine)
+        ? 'NANO_CAPTIONS_READY'
+        : 'CONTINUOUS_CAPTIONS_READY',
     };
   }
   if (engine === 'continuous-nano') {
-    const local = await checkNanoVoice();
+    const local = await nanoChecks.voice();
     if (local.status !== 'passed') return local;
     const translation = await checkContinuousRealtime(
       config,
@@ -359,6 +368,7 @@ export async function verifyProviders(
       : {
           name: {
             'nano-captions': 'nanoCaptions',
+            'continuous-captions': 'continuousCaptions',
             'continuous-nano': 'nanoTranslation',
             continuous: 'openaiContinuous',
             legacy: 'openaiRealtime',

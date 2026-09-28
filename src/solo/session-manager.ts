@@ -12,6 +12,8 @@ import { ContinuousTranslationBridge } from './continuous-translation-bridge';
 import { getNanoVoiceWorker, getNanoCaptionVoice } from './nano-runtime';
 import {
   isTranslationEngine,
+  usesRemoteCaptions,
+  usesNanoVoice,
   type TranslationEngine,
 } from './translation-engine';
 
@@ -49,6 +51,29 @@ export type BridgeOptions = ConstructorParameters<
 >[0] & {
   translationEngine?: TranslationEngine;
 };
+
+/** Route capabilities independently: captions never imply a local voice model. */
+export function createSessionBridge(
+  settings: BridgeOptions,
+  voices = { nano: getNanoVoiceWorker, nanoCaption: getNanoCaptionVoice },
+): BridgeLike {
+  if (usesRemoteCaptions(settings.translationEngine))
+    return new ContinuousTranslationBridge({
+      ...settings,
+      remoteCaptions: true,
+      ...(usesNanoVoice(settings.translationEngine)
+        ? { localVoice: voices.nanoCaption() }
+        : {}),
+    });
+  if (settings.translationEngine === 'continuous-nano')
+    return new ContinuousTranslationBridge({
+      ...settings,
+      localVoice: voices.nano(),
+    });
+  if (settings.translationEngine === 'continuous')
+    return new ContinuousTranslationBridge(settings);
+  return new TranslationBridge(settings);
+}
 type Session = {
   view: CallView;
   config: SoloConfig;
@@ -161,24 +186,7 @@ export class SessionManager extends EventEmitter {
     super();
     this.now = options.now || Date.now;
     this.providerFactory = options.providerFactory || twilioProvider;
-    this.bridgeFactory =
-      options.bridgeFactory ||
-      ((settings) => {
-        if (settings.translationEngine === 'nano-captions')
-          return new ContinuousTranslationBridge({
-            ...settings,
-            localVoice: getNanoCaptionVoice(),
-            remoteCaptions: true,
-          });
-        if (settings.translationEngine === 'continuous-nano')
-          return new ContinuousTranslationBridge({
-            ...settings,
-            localVoice: getNanoVoiceWorker(),
-          });
-        if (settings.translationEngine === 'continuous')
-          return new ContinuousTranslationBridge(settings);
-        return new TranslationBridge(settings);
-      });
+    this.bridgeFactory = options.bridgeFactory || createSessionBridge;
     this.setupTimeoutMs = options.setupTimeoutMs ?? 75000;
     this.maxCallMs = options.maxCallMs ?? 60 * 60 * 1000;
   }
@@ -258,7 +266,7 @@ export class SessionManager extends EventEmitter {
         from,
         translationEngine,
         translationReady: false,
-        ...(translationEngine === 'nano-captions'
+        ...(usesRemoteCaptions(translationEngine)
           ? { captionState: 'connecting' as const }
           : {}),
       },
@@ -497,10 +505,11 @@ export class SessionManager extends EventEmitter {
               if (connection.state === 'ready')
                 session.readyRoles.add(connection.role);
               else session.readyRoles.delete(connection.role);
-              const translationReady =
-                session.view.translationEngine === 'nano-captions'
-                  ? session.readyRoles.has('local')
-                  : session.readyRoles.size === 2;
+              const translationReady = usesRemoteCaptions(
+                session.view.translationEngine,
+              )
+                ? session.readyRoles.has('local')
+                : session.readyRoles.size === 2;
               if (session.view.translationReady !== translationReady) {
                 session.view.translationReady = translationReady;
                 this.publish(session);
@@ -514,7 +523,7 @@ export class SessionManager extends EventEmitter {
           onCaptionState: (caption) => {
             if (
               session.ended ||
-              session.view.translationEngine !== 'nano-captions'
+              !usesRemoteCaptions(session.view.translationEngine)
             )
               return;
             session.view.captionState = caption.state;

@@ -364,3 +364,93 @@ test('engine-specific preflight dispatch preserves legacy and fails closed for u
   assert.equal(unknown.code, 'INVALID_TRANSLATION_ENGINE');
   assert.equal(unknown.status, 'failed');
 });
+
+test('continuous captions preflight checks outgoing English and the same return ASR/text chain without any Nano dependency', async () => {
+  const sockets: { url: string; socket: FakeSocket }[] = [];
+  const forbidNano = async () => {
+    throw new Error('NANO_CHECK_MUST_NOT_RUN');
+  };
+  const result = await checkTranslationEngine(
+    { ...config, OPENAI_REALTIME_MODEL: 'gpt-realtime-1.5' },
+    'continuous-captions',
+    (url) => {
+      const socket = new FakeSocket();
+      sockets.push({ url, socket });
+      queueMicrotask(() => {
+        if (socket.readyState === WebSocket.CLOSED) return;
+        socket.open();
+        if (url.includes('/translations?')) acknowledgeContinuous(socket);
+        else socket.acknowledge();
+      });
+      return socket as unknown as WebSocket;
+    },
+    1000,
+    { voice: forbidNano, captionVoice: forbidNano },
+  );
+  assert.deepEqual(result, {
+    name: 'continuousCaptions',
+    status: 'passed',
+    code: 'CONTINUOUS_CAPTIONS_READY',
+  });
+  assert.equal(sockets.length, 3);
+  assert.equal(
+    sockets.filter(({ url }) => url.includes('/translations?')).length,
+    1,
+  );
+  assert.equal(sockets[0].socket.sent[0].session.audio.output.language, 'en');
+  assert.ok(sockets.some(({ url }) => url.endsWith('?intent=transcription')));
+  assert.ok(sockets.some(({ url }) => url.endsWith('?model=gpt-realtime-1.5')));
+  assert.ok(
+    sockets.every(({ socket }) => socket.readyState === WebSocket.CLOSED),
+  );
+  assert.ok(
+    sockets.every(({ socket }) =>
+      socket.sent.every((event) => event.type === 'session.update'),
+    ),
+  );
+});
+
+test('continuous captions cannot pass when the return caption handshake fails', async () => {
+  const sockets: FakeSocket[] = [];
+  const forbidNano = async () => {
+    throw new Error('NANO_CHECK_MUST_NOT_RUN');
+  };
+  const result = await checkTranslationEngine(
+    { ...config, OPENAI_REALTIME_MODEL: 'gpt-realtime-1.5' },
+    'continuous-captions',
+    (url) => {
+      const socket = new FakeSocket();
+      sockets.push(socket);
+      queueMicrotask(() => {
+        if (socket.readyState === WebSocket.CLOSED) return;
+        socket.open();
+        if (url.includes('/translations?')) acknowledgeContinuous(socket);
+        else if (url.includes('intent=transcription'))
+          socket.emit(
+            'message',
+            JSON.stringify({
+              type: 'error',
+              error: { message: 'private-caption-error' },
+            }),
+          );
+        else if (socket.readyState === WebSocket.OPEN) socket.acknowledge();
+      });
+      return socket as unknown as WebSocket;
+    },
+    1000,
+    { voice: forbidNano, captionVoice: forbidNano },
+  );
+  assert.equal(result.status, 'failed');
+  assert.equal(result.code, 'CAPTION_SESSIONS_UNAVAILABLE');
+  assert.ok(!JSON.stringify(result).includes('private-caption-error'));
+  assert.ok(sockets.every((socket) => socket.readyState === WebSocket.CLOSED));
+  const missing = await verifyProviders(
+    { ...config, OPENAI_API_KEY: '' },
+    'continuous-captions',
+  );
+  assert.deepEqual(missing.checks.at(-1), {
+    name: 'continuousCaptions',
+    status: 'missing',
+    code: 'CONFIGURATION_REQUIRED',
+  });
+});
