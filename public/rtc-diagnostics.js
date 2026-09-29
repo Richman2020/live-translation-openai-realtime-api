@@ -2,6 +2,16 @@ const COUNTERS = ['bytesSent', 'bytesReceived', 'packetsSent', 'packetsReceived'
 const MAX_NUMBER = Number.MAX_SAFE_INTEGER;
 const inRange = (value, min = 0, max = MAX_NUMBER) => Number.isFinite(value) && value >= min && value <= max;
 const counter = value => Number.isSafeInteger(value) && value >= 0;
+// Geographic Edge values from the installed @twilio/voice-sdk/lib/twilio/regions.ts.
+// "roaming" is a selection policy, not evidence of a resolved geographic edge.
+const TWILIO_EDGES = new Set([
+  'sydney', 'sao-paulo', 'dublin', 'frankfurt', 'tokyo', 'singapore', 'ashburn', 'umatilla',
+  'ashburn-ix', 'san-jose-ix', 'london-ix', 'frankfurt-ix', 'singapore-ix', 'sydney-ix', 'tokyo-ix',
+]);
+
+export function validatedTwilioEdge(value) {
+  return typeof value === 'string' && TWILIO_EDGES.has(value) ? value : undefined;
+}
 
 // Read only named data properties: never traverse totals/raw stats or retain SDK objects.
 function field(sample, name) {
@@ -39,6 +49,8 @@ function addReading(readings, name, value) {
  * samples lacking a valid packet denominator; rttAvgMs/rttMaxMs,
  * jitterAvgMs/jitterMaxMs, mosAvg/mosMin; audioInputLevelPeak/audioOutputLevelPeak
  * (0..32767), and inputVolumePeak/outputVolumePeak (0..1).
+ * edgeAtWindowEnd is the sole optional string: a validated Device.edge snapshot
+ * supplied separately from SDK sample data. It does not describe the whole window.
  */
 export function createRtcDiagnostics({ now = () => performance.now(), windowMs = 5000 } = {}) {
   const duration = inRange(windowMs, 1, 60000) ? windowMs : 5000;
@@ -68,7 +80,7 @@ export function createRtcDiagnostics({ now = () => performance.now(), windowMs =
     if (inRange(output, 0, 1)) peaks.outputVolumePeak = Math.max(peaks.outputVolumePeak ?? 0, output);
   }
 
-  function addSample(sample) {
+  function addSample(sample, edgeAtWindowEnd) {
     if (!sample || typeof sample !== 'object' || Array.isArray(sample)) return null;
     const at = time();
     sampleCount += 1;
@@ -106,6 +118,8 @@ export function createRtcDiagnostics({ now = () => performance.now(), windowMs =
 
     if (at - windowStartedAt < duration) return null;
     const summary = { elapsedMs: at - startedAt, windowDurationMs: at - windowStartedAt, sampleCount };
+    const edge = validatedTwilioEdge(edgeAtWindowEnd);
+    if (edge) summary.edgeAtWindowEnd = edge;
     for (const name of COUNTERS) if (counter(totals[name])) summary[name] = totals[name];
     if (counter(totals.lossNumerator) && counter(totals.packetLossPacketsExpected)
       && totals.packetLossPacketsExpected > 0) {

@@ -517,6 +517,7 @@ async function pageFixture(requestMedia: (constraints: unknown) => Promise<unkno
   }
   class FakeDevice extends EventEmitter {
     options: any;
+    edge: unknown = null;
     tokens: string[] = [];
     destroyed = 0;
     audio = Object.assign(new EventEmitter(), {
@@ -551,7 +552,7 @@ async function pageFixture(requestMedia: (constraints: unknown) => Promise<unkno
   const context = vm.createContext({
     audioOutputModule: await import('../public/audio-output.js'),
     microphoneInputModule: await import('../public/microphone-input.js'),
-    rtcDiagnosticsModule: { createRtcDiagnostics: (options: any = {}) => rtcDiagnostics.createRtcDiagnostics({ now, ...options }) },
+    rtcDiagnosticsModule: { ...rtcDiagnostics, createRtcDiagnostics: (options: any = {}) => rtcDiagnostics.createRtcDiagnostics({ now, ...options }) },
     translationEngineModule: await import('../public/translation-engine.js'),
     lifecycleModule: { createCallLifecycle, createDeviceMediaOwner, microphoneMessages: (await import('../public/call-lifecycle.js')).microphoneMessages },
     document: { getElementById: element, querySelector: element, querySelectorAll: () => [], createElement: node, createElementNS: node, body: node() },
@@ -614,6 +615,35 @@ async function pageFixture(requestMedia: (constraints: unknown) => Promise<unkno
     eventSourceCount: () => sources.length,
     eventSource: (index = sources.length - 1) => sources[index],
     pendingTimeouts: (delay: number) => [...timeouts.values()].filter(timer => !timer.cleared && timer.delay === delay),
+    measureTranscriptWork(run: () => void) {
+      // Count whole-history JavaScript operations, not elapsed time or browser layout.
+      // Instrument the page's own realm without exposing its private record/indexes.
+      vm.runInContext(`
+        globalThis.__transcriptWork = { largeArrayScans: 0, largeArraySorts: 0 };
+        globalThis.__transcriptArrayMethods = new Map();
+        for (const key of ['find', 'findIndex', 'map', 'filter', 'sort', Symbol.iterator]) {
+          const original = Array.prototype[key]; __transcriptArrayMethods.set(key, original);
+          Array.prototype[key] = function (...args) {
+            if (this.length >= 128) __transcriptWork[key === 'sort' ? 'largeArraySorts' : 'largeArrayScans']++;
+            return Reflect.apply(original, this, args);
+          };
+        }
+      `, context);
+      const children = element('transcript').children;
+      const descriptor = Object.getOwnPropertyDescriptor(children, Symbol.iterator);
+      const iterator = children[Symbol.iterator]; let domRowsEnumerated = 0;
+      children[Symbol.iterator] = function* () {
+        for (const row of { [Symbol.iterator]: () => iterator.call(this) }) { domRowsEnumerated++; yield row; }
+      };
+      try {
+        run();
+        return { ...JSON.parse(vm.runInContext('JSON.stringify(__transcriptWork)', context)), domRowsEnumerated };
+      } finally {
+        if (descriptor) Object.defineProperty(children, Symbol.iterator, descriptor); else delete children[Symbol.iterator];
+        vm.runInContext(`for (const [key, original] of __transcriptArrayMethods) Array.prototype[key] = original;
+          delete globalThis.__transcriptArrayMethods; delete globalThis.__transcriptWork;`, context);
+      }
+    },
     async openEvents() { assert.ok(sources.length); const source = sources[sources.length - 1]; source.readyState = FakeEvents.OPEN; source.onopen(); await new Promise(resolve => setImmediate(resolve)); },
     pagehide() { windowEvents.get('pagehide')?.(); },
     async pollStatus() {
@@ -1095,6 +1125,84 @@ for (const engine of ['nano-captions', 'continuous-captions']) test(`${engine} t
   await f.element('end-call').events.click();
 });
 
+for (const engine of ['nano-captions', 'continuous-captions']) test(`${engine} long-history text revisions use indexed rows without repeated full scans or sorting`, async () => {
+  const f = await pageFixture(async () => streamFixture().stream);
+  f.element('save-history-toggle').events.click();
+  f.element('translation-engine').value = engine; f.element('translation-engine').events.change();
+  await f.element('start-call').events.click();
+  const emit = (turn: number, kind: string, text: string, final: boolean, at = (turn + 1) * 1000) => f.transcriptEvent({
+    id: `remote:${kind}:history_${turn}:0`, role: 'remote', kind, at, text, final,
+  });
+  for (let turn = 149; turn >= 0; turn--) {
+    emit(turn, 'translation', `译文-${turn}`, true);
+    emit(turn, 'original', `Original-${turn}`, true);
+  }
+  const rows = () => f.element('transcript').children;
+  const order = rows().map((row: any) => row.dataset.transcriptId);
+  assert.equal(rows().length, 300, 'complete earlier text remains visible');
+  const firstNode = rows()[0]; const lastNode = rows()[299];
+  const scroll = f.element('transcript-scroll'); scroll.scrollHeight = 20000; scroll.clientHeight = 500; scroll.scrollTop = 1000;
+  const work = f.measureTranscriptWork(() => {
+    for (let revision = 0; revision < 200; revision++) emit(70, 'translation', `Corrected-${revision}`, revision === 199);
+  });
+  assert.deepEqual(work, { largeArrayScans: 0, largeArraySorts: 0, domRowsEnumerated: 0 });
+  assert.deepEqual(rows().map((row: any) => row.dataset.transcriptId), order);
+  assert.equal(rows()[0], firstNode); assert.equal(rows()[299], lastNode);
+  assert.equal(rows()[141].children[1].children[0].textContent, 'Corrected-199');
+  assert.equal(rows()[141].children[0].children[2].textContent, '', 'the final-only flag revision reaches the visible row');
+  assert.equal(scroll.scrollTop, 1000, 'reading older text must not be interrupted by revisions');
+  scroll.scrollTop = 19500; emit(70, 'translation', 'Corrected-final', true);
+  assert.equal(scroll.scrollTop, scroll.scrollHeight, 'a viewer following the bottom keeps following');
+  const reorder = f.measureTranscriptWork(() => emit(0, 'original', 'Original-0-corrected', true, 200000));
+  assert.ok(reorder.largeArrayScans > 0 && reorder.largeArraySorts > 0 && reorder.domRowsEnumerated > 0,
+    'the operation sensor must see the full ordering path when source time changes');
+  assert.equal(rows().length, 300);
+  f.element('export-current').events.click();
+  const exported = await f.exports[0].text();
+  assert.equal((exported.match(/\[对方 · /g) || []).length, 300);
+  assert.match(exported, /Original-0-corrected/); assert.match(exported, /Original-149/); assert.match(exported, /Corrected-final/);
+  assert.doesNotMatch(exported, /Corrected-198|Corrected-199/);
+  f.callEvent({ status: 'completed' });
+  assert.equal(f.history()[0].lines.length, 300);
+  assert.equal(f.element('history-detail').children.length, 301, 'saved history still exposes every line plus its heading');
+  f.pagehide();
+});
+
+for (const engine of ['nano-captions', 'continuous-captions']) test(`${engine} transcript indexes survive deletion, reinsert, metadata changes and session reset`, async () => {
+  const f = await pageFixture(async () => streamFixture().stream);
+  f.element('translation-engine').value = engine; f.element('translation-engine').events.change();
+  await f.element('start-call').events.click();
+  const emit = (turn: string, kind: string, text: string, at: number, extra = {}) => f.transcriptEvent({
+    id: `remote:${kind}:${turn}:0`, role: 'remote', kind, at, text, final: true, ...extra,
+  });
+  const ids = () => f.element('transcript').children.map((row: any) => row.dataset.transcriptId);
+  emit('first', 'original', 'First', 1000); emit('first', 'translation', '第一', 3000);
+  emit('second', 'original', 'Second', 2000); emit('second', 'translation', '第二', 2000);
+  emit('first', 'original', '', 1000);
+  emit('second', 'translation', '第二修订', 2000);
+  assert.deepEqual(ids(), ['remote:original:second:0', 'remote:translation:second:0', 'remote:translation:first:0'], 'deleting the earliest group member invalidates cached caption order');
+  emit('first', 'original', 'First restored', 1000);
+  assert.deepEqual(ids(), ['remote:original:first:0', 'remote:translation:first:0', 'remote:original:second:0', 'remote:translation:second:0']);
+  emit('second', 'translation', '第二再修订', 2000);
+  assert.equal(f.element('transcript').children[3].children[1].children[0].textContent, '第二再修订', 'shifted indexes still update the correct saved and visible row');
+  emit('first', 'original', 'Metadata changed', 1000, { kind: 'translation' });
+  assert.deepEqual(ids(), ['remote:original:second:0', 'remote:translation:second:0', 'remote:translation:first:0', 'remote:original:first:0'], 'kind/group membership changes leave the reinserted unpaired row in its first-arrival slot');
+  f.element('export-current').events.click();
+  const exported = await f.exports[0].text();
+  assert.match(exported, /第二再修订/); assert.doesNotMatch(exported, /First restored/);
+  await f.element('end-call').events.click();
+  await f.element('start-call').events.click();
+  emit('first', 'original', 'New session only', 1000);
+  emit('first', 'original', 'New session revised', 1000);
+  emit('second', 'translation', 'Old session rejected', 2000, { sessionId: 'session-1' });
+  assert.deepEqual(ids(), ['remote:original:first:0']);
+  assert.equal(f.element('transcript').children[0].children[1].children[0].textContent, 'New session revised');
+  f.element('export-current').events.click();
+  const nextExport = await f.exports[1].text();
+  assert.match(nextExport, /New session revised/); assert.doesNotMatch(nextExport, /Metadata changed|第二|Old session/);
+  await f.element('end-call').events.click(); f.pagehide();
+});
+
 test('legacy transcript turns retain first arrival when timestamps arrive out of order', async () => {
   const f = await pageFixture(async () => streamFixture().stream);
   await f.element('start-call').events.click();
@@ -1531,6 +1639,56 @@ test('SSE backoff is canceled on authentication failure or unload without furthe
     assert.equal(f.requests.includes('POST /api/calls'), false);
     f.pagehide();
   });
+});
+
+test('registered SDK logs observe only validated public Device.edge and never configure a routing policy', async () => {
+  const f = await pageFixture(async () => streamFixture().stream);
+  const registrations = () => f.sdkLogs.filter(log => log.startsWith('[AI Phone SDK] '))
+    .map(log => JSON.parse(log.slice('[AI Phone SDK] '.length))).filter(entry => entry.phase === 'device-registered');
+  assert.deepEqual(registrations(), [{ phase: 'device-registered' }], 'offline/unknown edge is omitted, not presumed roaming');
+  assert.equal(Object.hasOwn(f.device.options, 'edge'), false);
+  for (const edge of ['tokyo', 'ashburn-ix']) {
+    f.device.edge = edge; f.device.emit('registered'); await settlePage();
+    assert.deepEqual(registrations().at(-1), { phase: 'device-registered', edge });
+  }
+  for (const edge of [null, undefined, 'roaming', 'private-token', 'https://private-edge.example', { edge: 'tokyo' }]) {
+    f.device.edge = edge; f.device.emit('registered'); await settlePage();
+    assert.deepEqual(registrations().at(-1), { phase: 'device-registered' });
+  }
+  Object.defineProperty(f.device, 'edge', { configurable: true, get() { throw new Error('private getter details'); } });
+  f.device.emit('registered'); await settlePage();
+  assert.deepEqual(registrations().at(-1), { phase: 'device-registered' });
+  const old = f.device;
+  await f.element('enable-device').events.click(); await f.element('enable-device').events.click();
+  const count = registrations().length; old.emit('registered'); await settlePage();
+  assert.equal(registrations().length, count, 'retired registration events cannot attribute an old edge to the current Device');
+  assert.equal(Object.hasOwn(f.currentDevice().options, 'edge'), false);
+  assert.doesNotMatch(f.sdkLogs.join('\n'), /private-|getter details|https:|offline-sdk-token/);
+  f.pagehide();
+});
+
+test('RTC route observation uses the current call Device at window end without retaining stale or raw routing values', async () => {
+  let now = 10000;
+  const f = await pageFixture(async () => streamFixture().stream, () => now);
+  await f.element('start-call').events.click();
+  const call = f.outgoingCall(); const sample = { bytesSent: 10, edge: 'private-sdk-edge', edgeAtWindowEnd: 'private-provider-id' };
+  const entries = () => f.sdkLogs.filter(log => log.startsWith('[AI Phone RTC]')).map(log => JSON.parse(log.slice('[AI Phone RTC] '.length)));
+  f.device.edge = 'tokyo'; now += 1000; call.emit('sample', sample);
+  f.device.edge = 'ashburn'; now += 4000; call.emit('sample', sample);
+  assert.deepEqual(entries()[0], { elapsedMs: 5000, windowDurationMs: 5000, sampleCount: 2, edgeAtWindowEnd: 'ashburn', bytesSent: 20 });
+  f.device.edge = null; now += 5000; call.emit('sample', sample);
+  assert.equal('edgeAtWindowEnd' in entries()[1], false);
+  f.device.edge = 'roaming'; now += 5000; call.emit('sample', sample);
+  assert.equal('edgeAtWindowEnd' in entries()[2], false);
+  Object.defineProperty(f.device, 'edge', { configurable: true, get() { throw new Error('private getter details'); } });
+  now += 5000; call.emit('sample', sample);
+  assert.equal('edgeAtWindowEnd' in entries()[3], false);
+  assert.equal(entries()[3].bytesSent, 10, 'unavailable edge must not suppress useful numeric measurements');
+  await f.element('end-call').events.click();
+  now += 5000; call.emit('sample', sample);
+  assert.equal(entries().length, 4);
+  assert.doesNotMatch(f.sdkLogs.join('\n'), /private-|getter details/);
+  f.pagehide();
 });
 
 test('RTC logs aggregate every one-second sample, retain units, isolate calls, and exclude private fields', async () => {

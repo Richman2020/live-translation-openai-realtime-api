@@ -4,7 +4,7 @@
   const { createCallLifecycle, createDeviceMediaOwner, microphoneMessages } = await import('./call-lifecycle.js');
   const { createAudioOutput } = await import('./audio-output.js');
   const { createMicrophoneInput } = await import('./microphone-input.js');
-  const { createRtcDiagnostics } = await import('./rtc-diagnostics.js');
+  const { createRtcDiagnostics, validatedTwilioEdge } = await import('./rtc-diagnostics.js');
   const { createTranslationEngineSelection, translationEngineLabel, translationReadiness, usesNanoVoice, usesRemoteCaptions } = await import('./translation-engine.js');
   const $ = id => document.getElementById(id);
   const tokenKey = 'ai-phone-local-token';
@@ -114,6 +114,8 @@
   let heartbeat = null;
   let refreshPending = null;
   let record = null;
+  const transcriptRows = new Map();
+  let transcriptOrderEngine = null;
   let selectedHistory = null;
   let toastTimer = null;
   let disposed = false;
@@ -220,11 +222,18 @@
     'low-bytes-sent', 'low-bytes-received', 'high-jitter', 'high-rtt',
     'high-packet-loss', 'high-packets-lost-fraction', 'low-mos', 'ice-connectivity-lost',
   ]);
-  function logSdkEvent(phase, error, warning) {
+  function readDeviceEdge(next) {
+    // Public SDK getter reports the connected edge, not the configured roaming policy.
+    // An unavailable/new SDK edge is omitted rather than inferred or logged verbatim.
+    try { return validatedTwilioEdge(next?.edge); } catch { return undefined; }
+  }
+  function logSdkEvent(phase, error, warning, edge) {
     // Keep raw SDK objects out of logs: they can contain tokens, SDP, call IDs, or message text.
     const entry = { phase };
     if (Number.isInteger(error?.code) && error.code > 0 && error.code <= 999999) entry.code = error.code;
     if (sdkWarnings.has(warning)) entry.warning = warning;
+    const observedEdge = validatedTwilioEdge(edge);
+    if (observedEdge) entry.edge = observedEdge;
     console.info('[AI Phone SDK]', JSON.stringify(entry));
   }
   function saveLocal(key, data) { try { localStorage.setItem(key, JSON.stringify(data)); return true; } catch { toast('浏览器未能保存记录，本次对话仍可导出。'); return false; } }
@@ -481,7 +490,7 @@
       clearCleanupError();
       if (session.error) showError(callFailureMessage(session));
     } else if (session) {
-      if (!record || record.id !== session.id) { if (record && !record.endedAt) finishRecord('completed'); audioDelivery.clear(); translationTiming.clear(); renderAudioDelivery(); record = makeRecord(session); $('transcript').replaceChildren(); $('empty-conversation').hidden = false; }
+      if (!record || record.id !== session.id) { if (record && !record.endedAt) finishRecord('completed'); audioDelivery.clear(); translationTiming.clear(); renderAudioDelivery(); record = makeRecord(session); transcriptRows.clear(); transcriptOrderEngine = null; $('transcript').replaceChildren(); $('empty-conversation').hidden = false; }
       activeSession = session; record.status = session.status; record.translationEngine = session.translationEngine || 'legacy';
       if (session.status === 'active' && !record.connectedAt) record.connectedAt = Date.now();
       $('transcript-subtitle').textContent = `${translationEngineLabel(record.translationEngine)} · ${session.direction === 'inbound' ? '来电' : '拨出'} · ${record.number} · ${statusNames[session.status] || session.status}`;
@@ -676,31 +685,44 @@
     if (!value || typeof value.id !== 'string' || typeof value.text !== 'string' || !['local', 'remote'].includes(value.role) || !['original', 'translation'].includes(value.kind)) return;
     if (!record || (value.sessionId && value.sessionId !== record.id)) return;
     if (usesRemoteCaptions(record.translationEngine) && value.role === 'remote' && value.final === true && !value.text.trim()) {
-      record.lines = record.lines.filter(line => line.id !== value.id);
-      $('transcript').replaceChildren(...[...$('transcript').children].filter(node => node.dataset.transcriptId !== value.id));
+      const removed = transcriptRows.get(value.id);
+      if (removed) {
+        record.lines.splice(removed.index, 1); removed.node.remove(); transcriptRows.delete(value.id);
+        for (let index = removed.index; index < record.lines.length; index += 1) transcriptRows.get(record.lines[index].id).index = index;
+        // Removing a group's earliest timestamp can affect the next caption reorder.
+        transcriptOrderEngine = null;
+      }
       $('empty-conversation').hidden = record.lines.length > 0;
       $('export-current').disabled = record.lines.length === 0;
       return;
     }
     if (translationRecoveryHint && value.kind === 'translation' && value.final === true && (!usesRemoteCaptions(activeSession?.translationEngine) || value.role === 'local')) { translationRecoveryHint = false; renderStatus(); }
     const line = { id: value.id, role: value.role, kind: value.kind, text: value.text.slice(0, 20000), final: value.final === true, at: value.at || new Date().toISOString() };
-    const index = record.lines.findIndex(old => old.id === line.id);
-    if (index >= 0) record.lines[index] = line; else record.lines.push(line);
-    const oldNode = [...$('transcript').children].find(node => node.dataset.transcriptId === line.id);
+    const previous = transcriptRows.get(line.id);
+    const oldLine = previous && record.lines[previous.index];
+    const captionMode = usesRemoteCaptions(record.translationEngine);
+    // Ordering depends on membership, id, role, kind and source time; text/final
+    // changes can replace one indexed row without scanning or sorting the history.
+    const sameCaptionOrder = previous && transcriptOrderEngine === record.translationEngine
+      && oldLine.role === line.role && oldLine.kind === line.kind && oldLine.at === line.at;
+    const index = previous ? previous.index : record.lines.length;
+    if (previous) record.lines[index] = line; else record.lines.push(line);
     const scroll = $('transcript-scroll'); const nearBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 100;
-    if (usesRemoteCaptions(record.translationEngine)) {
-      if (oldNode) oldNode.replaceWith(renderLine(line)); else $('transcript').append(renderLine(line));
-      const children = [...$('transcript').children];
-      const byId = new Map(children.map(node => [node.dataset.transcriptId, node]));
-      const ordered = orderedTranscriptLines(record.lines, record.translationEngine).map(item => byId.get(item.id));
-      if (ordered.some((node, index) => node !== children[index])) $('transcript').replaceChildren(...ordered);
-    } else if (oldNode) oldNode.replaceWith(renderLine(line));
+    const node = renderLine(line);
+    transcriptRows.set(line.id, { index, node });
+    if (previous) previous.node.replaceWith(node);
+    else if (captionMode) $('transcript').append(node);
     else {
       const ordered = orderedTranscriptLines(record.lines, record.translationEngine);
       const next = ordered[ordered.findIndex(item => item.id === line.id) + 1];
-      const nextNode = next && [...$('transcript').children].find(node => node.dataset.transcriptId === next.id);
-      $('transcript').insertBefore(renderLine(line), nextNode || null);
+      $('transcript').insertBefore(node, next ? transcriptRows.get(next.id).node : null);
     }
+    if (captionMode && !sameCaptionOrder) {
+      const children = [...$('transcript').children];
+      const ordered = orderedTranscriptLines(record.lines, record.translationEngine).map(item => transcriptRows.get(item.id).node);
+      if (ordered.some((node, index) => node !== children[index])) $('transcript').replaceChildren(...ordered);
+    }
+    transcriptOrderEngine = record.translationEngine;
     $('empty-conversation').hidden = true;
     if (nearBottom) scroll.scrollTop = scroll.scrollHeight;
     $('export-current').disabled = false;
@@ -776,7 +798,7 @@
       audioOutput.bind(next.audio || null);
       next.on('registered', () => {
         if (device !== next) return; registered = true; clearInterval(heartbeat);
-        logSdkEvent('device-registered'); audioOutput.refresh();
+        logSdkEvent('device-registered', null, null, readDeviceEdge(next)); audioOutput.refresh();
         presence(true).catch(error => showError(error.message));
         heartbeat = setInterval(() => presence(true).catch(error => showError(error.message)), 15000); renderStatus();
       });
@@ -834,7 +856,7 @@
     call.on('sample', sample => {
       if (sdkCall !== call || !callLifecycle.isCurrent(attempt)) return;
       // Every SDK one-second delta contributes; raw stats never leave this handler.
-      const entry = rtcWindow.addSample(sample);
+      const entry = rtcWindow.addSample(sample, readDeviceEdge(attempt.device));
       if (entry) console.info('[AI Phone RTC]', JSON.stringify(entry));
     });
     call.on('accept', () => { if (sdkCall !== call || !callLifecycle.isCurrent(attempt)) return; logSdkEvent('call-accepted'); incomingCall = null; callLifecycle.update(attempt, { phase: 'connected' }); renderStatus(); refreshStatus().catch(error => showError(error)); });
@@ -1073,6 +1095,7 @@
   window.addEventListener('beforeunload', event => { if (busy()) { event.preventDefault(); event.returnValue = ''; } });
   window.addEventListener('pagehide', () => {
     disposed = true; clearInterval(heartbeat); stopEvents(); cancelTokenRenewal();
+    transcriptRows.clear(); transcriptOrderEngine = null;
     audioOutput.bind(null);
     microphoneInput.dispose();
     callLifecycle.cancel();

@@ -1,12 +1,33 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { createRtcDiagnostics } from '../public/rtc-diagnostics.js';
+import { createRtcDiagnostics, validatedTwilioEdge } from '../public/rtc-diagnostics.js';
 
 function fixture(windowMs = 5000) {
   let time = 0;
   const rtc = createRtcDiagnostics({ now: () => time, windowMs });
   return { rtc, at(value: number) { time = value; } };
 }
+
+test('edge observation accepts geographic SDK enums without inferring a route from roaming or private values', () => {
+  for (const edge of ['tokyo', 'ashburn', 'sao-paulo', 'singapore-ix', 'san-jose-ix']) assert.equal(validatedTwilioEdge(edge), edge);
+  const neverRead = { toString() { throw new Error('must not inspect unknown objects'); } };
+  for (const value of [undefined, null, '', 'roaming', 'gll', 'us1', 'TOKYO', ' tokyo ', 'https://private-edge.example',
+    'ashburn\nprivate-token', '192.0.2.1', 1, ['tokyo'], neverRead]) assert.equal(validatedTwilioEdge(value), undefined);
+});
+
+test('RTC reports a separately validated edge only at window emission and never copies raw sample routing fields', () => {
+  const f = fixture();
+  f.at(1000); f.rtc.addSample({ packetsSent: 1 }, 'tokyo');
+  f.at(5000);
+  const result = f.rtc.addSample({ packetsSent: 2, edge: 'private-edge', edgeAtWindowEnd: 'private-token', ip: 'private-ip' }, 'ashburn');
+  assert.deepEqual(result, { elapsedMs: 5000, windowDurationMs: 5000, sampleCount: 2, edgeAtWindowEnd: 'ashburn', packetsSent: 3 });
+  f.at(10000);
+  assert.deepEqual(f.rtc.addSample({ packetsSent: 4, edge: 'tokyo' }, 'roaming'), {
+    elapsedMs: 10000, windowDurationMs: 5000, sampleCount: 1, packetsSent: 4,
+  }, 'an unknown current edge must not reuse the prior window edge or raw sample edge');
+  f.rtc.reset(); f.at(15000);
+  assert.equal('edgeAtWindowEnd' in f.rtc.addSample({ packetsSent: 0 }), false);
+});
 
 test('all five one-second deltas contribute, including the boundary sample', () => {
   const f = fixture();
