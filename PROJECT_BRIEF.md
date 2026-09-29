@@ -4,7 +4,9 @@
 
 **首批实现状态（2026-09-28）**：关联计时/能量、实际到期观测、浏览器五秒网络统计、凭据续期与事件流有限重连已实现，588 项离线测试通过，含无供应商连接的 65 分钟虚拟负载。首批不等于延迟或长期稳定性已验收；实际短测、发送调度和恢复等状态见 [首批记录](LATENCY_DIAGNOSTICS_FIRST_BATCH_2026-09-28.md) 与 PROGRESS 最新节。
 
-共享仓库：<https://github.com/Richman2020/live-translation-openai-realtime-api>。更新日期：2026-09-28。
+**最新短测核查（2026-09-29）**：用户完成约 86 秒连续直出电话并要求客观判断延迟。已验证发送后确认等待后段上升，尚未达到稳定低延迟；按现有日志分析，不补拨、不将能量/mark 粗估称为人耳延迟，具体数值和下一步见 [本通审计](CALL_LATENCY_AUDIT_2026-09-29.md)。五分钟额度边界继续有效。
+
+共享仓库：<https://github.com/Richman2020/live-translation-openai-realtime-api>。更新日期：2026-09-29。
 
 本文件保存用户需求、决定与实现范围；验证进度见 [PROGRESS.md](PROGRESS.md)，运行步骤见 [LOCAL_SETUP.md](LOCAL_SETUP.md)，协作规则见 [AGENTS.md](AGENTS.md)。
 
