@@ -22,6 +22,13 @@ const config = {
 } as SoloConfig;
 const localSid = `CA${'1'.repeat(32)}`;
 const remoteSid = `CA${'2'.repeat(32)}`;
+test('browser presence tolerates a delayed minute heartbeat but still expires and explicit close clears it', () => {
+  let now = 0;
+  const manager = new SessionManager({now:()=>now});
+  manager.setPresence(true);now=60000;assert.equal(manager.available,true);
+  now=120001;assert.equal(manager.available,false);
+  manager.setPresence(true);manager.setPresence(false);assert.equal(manager.available,false);
+});
 class Socket extends EventEmitter {
   readyState = 1;
   close() {
@@ -275,7 +282,7 @@ test('outbound pays for no PSTN call until authenticated local stream; then pair
 test('inbound requires fresh presence, repeated webhook is idempotent, and rings only the browser identity', async (t) => {
   let now = 1000;
   const f = fixture(t, { now: () => now });
-  now += 46000;
+  now += 121000;
   const body = {
     CallSid: remoteSid,
     From: '+14155550123',

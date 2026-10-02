@@ -1,4 +1,5 @@
-﻿$ErrorActionPreference = 'Stop'
+﻿param([switch]$NoConfigure)
+$ErrorActionPreference = 'Stop'
 $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $runtimeDir = Join-Path $repoRoot '.runtime'
 $binaryPath = Join-Path $runtimeDir 'tools\cloudflared.exe'
@@ -192,7 +193,7 @@ try {
     Write-TunnelRecord $record $true
   }
   if ($null -eq (Get-MatchingProcess $record)) { throw 'The tunnel exited before configuration could be saved.' }
-  Save-PublicAddress $publicUrl
+  if (-not $NoConfigure) { Save-PublicAddress $publicUrl }
   Write-Output "Public voice callback address: $publicUrl"
   Write-Output 'This temporary address changes after the tunnel restarts. Run configure:twilio after reviewing its plan.'
 } catch {

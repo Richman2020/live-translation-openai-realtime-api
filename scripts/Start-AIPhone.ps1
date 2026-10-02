@@ -1,4 +1,4 @@
-﻿param([switch]$NoOpen, [switch]$Serve)
+﻿param([switch]$NoOpen, [switch]$Serve, [switch]$LocalOnly)
 $ErrorActionPreference = 'Stop'
 $projectRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $runtimePath = Join-Path $projectRoot '.runtime'
@@ -137,8 +137,13 @@ try {
         $processRecord | ConvertTo-Json | Set-Content -LiteralPath $recordPath -Encoding UTF8
     }
     $mutex.ReleaseMutex(); $ownsMutex = $false
+    if (-not $LocalOnly) {
+        $pausePath = Join-Path $runtimePath 'desktop-online-paused'
+        if (Test-Path -LiteralPath $pausePath -PathType Leaf) { Remove-Item -LiteralPath $pausePath -Force }
+        & (Join-Path $PSScriptRoot 'Start-PhoneOnline.ps1')
+    }
     if (-not $NoOpen) {
-        $desktopUrl = $baseUrl + '/#token=' + [Uri]::EscapeDataString($localToken)
+        $desktopUrl = $baseUrl + '/#token=' + [Uri]::EscapeDataString($localToken) + '&online=1&engine=pocket-captions'
         $browserCandidates = @(
             (Join-Path ${env:ProgramFiles(x86)} 'Microsoft\Edge\Application\msedge.exe'),
             (Join-Path $env:ProgramFiles 'Microsoft\Edge\Application\msedge.exe'),

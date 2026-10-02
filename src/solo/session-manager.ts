@@ -214,7 +214,8 @@ export class SessionManager extends EventEmitter {
   }
 
   setPresence(available: boolean): void {
-    this.availableUntil = available ? this.now() + 45000 : 0;
+    // A finite two-minute lease tolerates delayed background-window heartbeats.
+    this.availableUntil = available ? this.now() + 120000 : 0;
   }
 
   get available(): boolean {

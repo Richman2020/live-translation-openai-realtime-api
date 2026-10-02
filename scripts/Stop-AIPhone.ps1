@@ -39,6 +39,10 @@ function Invoke-LocalService([string]$url, [string]$method, [string]$token = '')
 }
 
 try {
+    # Explicit Stop suppresses watchdog recovery; a later desktop launch resumes it.
+    $runtimeDir = Join-Path $projectRoot '.runtime'
+    New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null
+    [IO.File]::WriteAllText((Join-Path $runtimeDir 'desktop-online-paused'), [DateTime]::UtcNow.ToString('o'))
     if (Test-Path -LiteralPath $recordPath -PathType Leaf) {
         $record = Get-Content -LiteralPath $recordPath -Raw | ConvertFrom-Json
         if ($record.appId -ne 'ai-phone-solo' -or $record.projectRoot -ne $projectRoot -or $record.launcherPath -ne $launcherPath) { throw '启动记录不属于本项目，未停止任何程序。' }

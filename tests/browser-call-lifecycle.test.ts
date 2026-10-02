@@ -449,7 +449,7 @@ test('a browser without mediaDevices reports unsupported without claiming microp
 
 // Run the shipped page handlers offline, with inert DOM, media and provider fixtures.
 async function pageFixture(requestMedia: (constraints: unknown) => Promise<unknown>, now: () => number = () => Date.now(),
-  options: { initialStatusFailure?: 'network' | 'timeout' | { status: number; error: string }; beforeResponse?: (path: string, signal: AbortSignal) => Promise<void>; locationHash?: string; sessionToken?: string } = {}) {
+  options: { initialStatusFailure?: 'network' | 'timeout' | { status: number; error: string }; beforeResponse?: (path: string, signal: AbortSignal) => Promise<void>; locationHash?: string; sessionToken?: string; skipManualEnable?: boolean } = {}) {
   const nodes = new Map<string, any>();
   function node(): any {
     return {
@@ -604,7 +604,7 @@ async function pageFixture(requestMedia: (constraints: unknown) => Promise<unkno
   if (!options.initialStatusFailure && sources.length) {
     sources[0].readyState = FakeEvents.OPEN; sources[0].onopen();
     await new Promise(resolve => setImmediate(resolve));
-    await element('enable-device').events.click();
+    if (!options.skipManualEnable) await element('enable-device').events.click();
   }
   element('phone-number').value = '+12125551234';
   return {
@@ -2140,4 +2140,34 @@ test('partial transcript updates replace only their own paired row and keep fina
   assert.match(text, /\[你 · 原文\] 哪里？\r\n\[你 · 译文\] Where is it\?/);
   assert.doesNotMatch(text, /未定稿/);
   await f.element('end-call').events.click();
+});
+
+test('desktop online entry registers without recording, restores after a transient token failure and respects explicit close', async () => {
+  let captures=0;
+  const f=await pageFixture(async()=>{captures++;return streamFixture().stream;},undefined,{locationHash:'#token=offline-test-access-only&online=1&engine=pocket-captions',skipManualEnable:true});
+  await new Promise(resolve=>setTimeout(resolve,15));await settlePage();
+  assert.equal(f.element('enable-device').textContent,'关闭通话');
+  assert.equal(captures,0,'registration must not request the microphone');
+  assert.equal(f.element('translation-engine').value,'pocket-captions');
+  f.failApi('/api/token','network');
+  f.currentDevice().emit('unregistered');
+  for(const timer of f.pendingTimeouts(0))timer.fire();await settlePage();
+  const retry=f.pendingTimeouts(1000);assert.equal(retry.length,1,'only one bounded reconnect timer is allowed');
+  f.restoreApi('/api/token');retry[0].fire();await settlePage();
+  assert.equal(f.element('enable-device').textContent,'关闭通话');
+  assert.equal(captures,0);
+  await f.element('enable-device').events.click();
+  const count=f.requests.filter(v=>v.endsWith('/api/token')).length;
+  await f.pollStatus();for(const timer of f.pendingTimeouts(0))timer.fire();await settlePage();
+  assert.equal(f.requests.filter(v=>v.endsWith('/api/token')).length,count,'manual close disables automatic registration');
+  f.pagehide();
+});
+
+test('closing a desktop page during automatic token acquisition prevents a late Device from reopening it', async () => {
+  const token=deferred();
+  const f=await pageFixture(async()=>streamFixture().stream,undefined,{locationHash:'#token=offline-test-access-only&online=1',skipManualEnable:true,beforeResponse:async path=>{if(path==='/api/token')await token.promise;}});
+  for(const timer of f.pendingTimeouts(0))timer.fire();await settlePage();
+  f.pagehide();token.resolve();await settlePage();
+  assert.equal(f.requestBodies.filter(v=>v.path==='/api/presence' && v.body.available===true).length,0,'no late online heartbeat');
+  assert.equal(f.currentDevice(),undefined);
 });

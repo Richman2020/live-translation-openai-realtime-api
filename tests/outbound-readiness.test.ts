@@ -128,6 +128,24 @@ async function fixture(
   return { app, manager, calls, events, store, envPath };
 }
 
+test('idle connection maintenance blocks new calls and settings but preserves its own verification and private lease', async (t) => {
+  const f = await fixture(t, async () => ready, async () => ({ name:'pocketCaptions',status:'passed',code:'POCKET_CAPTIONS_READY' }), async (_config, engine) => ({ checkedAt:new Date().toISOString(), realCallTested:false, translationEngine:engine, checks:[] }));
+  const headers = { host:'127.0.0.1:5050',origin:'http://127.0.0.1:5050',authorization:`Bearer ${config.LOCAL_ACCESS_TOKEN}` };
+  const request = (url:string,payload:unknown,extra:Record<string,string>={})=>f.app.inject({method:'POST',url,headers:{...headers,...extra},payload});
+  const begin=await request('/api/connection-maintenance',{action:'begin'});assert.equal(begin.statusCode,200);
+  const lease=begin.json().lease;assert.equal(typeof lease,'string');
+  const status=await f.app.inject({method:'GET',url:'/api/status',headers});assert.equal(status.json().connectionMaintenance,true);assert.ok(!JSON.stringify(status.json()).includes(lease));
+  assert.equal((await request('/api/calls',{to:'+12125551234'})).statusCode,409);
+  assert.equal((await request('/api/settings',{OPENAI_PROXY_URL:''})).statusCode,409);
+  assert.equal((await request('/api/verify',{translationEngine:'pocket-captions'})).statusCode,409);
+  assert.equal((await request('/api/verify',{translationEngine:'pocket-captions'},{'x-phone-maintenance':lease})).statusCode,200);
+  assert.equal((await request('/api/connection-maintenance',{action:'end',lease:'wrong'})).statusCode,409);
+  assert.equal((await request('/api/connection-maintenance',{action:'renew',lease})).statusCode,200);
+  assert.equal((await request('/api/connection-maintenance',{action:'end',lease})).statusCode,200);
+  assert.equal((await request('/api/calls',{to:'+12125551234'})).statusCode,200);
+  assert.equal((await request('/api/connection-maintenance',{action:'begin'})).statusCode,409,'an existing session cannot be interrupted by maintenance');
+});
+
 for (const result of [
   unreachable,
   { status: 'wrong_service', code: 'PUBLIC_CALLBACK_WRONG_SERVICE' },

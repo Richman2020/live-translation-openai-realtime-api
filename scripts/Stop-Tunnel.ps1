@@ -1,4 +1,4 @@
-﻿param([switch]$Quiet)
+﻿param([switch]$Quiet, [switch]$RequireMaintenance)
 $ErrorActionPreference = 'Stop'
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $runtimeDir = [System.IO.Path]::GetFullPath((Join-Path $repoRoot '.runtime'))
@@ -39,7 +39,10 @@ function Test-ServiceListening([int]$portNumber) {
 function Assert-NoActiveCall([int]$portNumber, [string]$token) {
     # Only a refused loopback connection establishes that the service is offline.
     # Authentication errors, timeouts and malformed responses never mean idle.
-    if (-not (Test-ServiceListening $portNumber)) { return }
+    if (-not (Test-ServiceListening $portNumber)) {
+        if ($RequireMaintenance) { throw '电话服务离线，线路维护保护不可确认。' }
+        return
+    }
     if ($token.Length -lt 32) { throw '本机访问凭据不可用，无法确认通话是否结束；隧道保持运行。' }
     $response = $null
     try {
@@ -60,6 +63,7 @@ function Assert-NoActiveCall([int]$portNumber, [string]$token) {
     if ($null -ne $status.activeSession) {
         throw '当前仍有通话或待确认的线路清理。请先在 AI 电话工作台挂断，确认线路结束后再停止公网隧道。'
     }
+    if ($RequireMaintenance -and $status.connectionMaintenance -ne $true) { throw '未取得空闲线路维护保护，隧道保持运行。' }
 }
 
 function Get-MatchingTunnel([int]$processNumber, [DateTime]$expectedStart) {
@@ -87,6 +91,10 @@ try {
     if ((Test-Path -LiteralPath $runtimeDir) -and ((Get-Item -LiteralPath $runtimeDir -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
         throw '运行目录是链接，无法确认隧道记录归属；未执行停止操作。'
     }
+    if (-not $RequireMaintenance) {
+        New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $runtimeDir 'desktop-online-paused'), 'Stopped by user')
+    }
     if (Test-Path -LiteralPath $statePath -PathType Leaf) {
         if ((Get-Item -LiteralPath $statePath -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
             throw '隧道记录是链接，未执行停止操作。'
@@ -100,7 +108,7 @@ try {
         if (-not $record.binary -or [System.IO.Path]::GetFullPath([string]$record.binary) -ne $expectedBinary -or -not $record.startedAt) {
             throw '隧道记录不属于本项目，未停止任何程序。'
         }
-        $expectedStart = [DateTime]::Parse([string]$record.startedAt, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime()
+        $expectedStart = if ($record.startedAt -is [DateTime]) { $record.startedAt.ToUniversalTime() } else { [DateTime]::ParseExact([string]$record.startedAt, 'o', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime() }
         $matching = Get-MatchingTunnel $tunnelProcessNumber $expectedStart
         if ($null -ne $matching) {
             $localToken = Read-PrivateToken

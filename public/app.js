@@ -99,6 +99,10 @@
   let incomingCall = null;
   let registered = false;
   let enabling = false;
+  let enableEpoch = 0;
+  let registrationRetryTimer = null;
+  let registrationRetryAttempt = 0;
+  let desktopEngine = null;
   let dialing = false;
   let acceptingAttempt = null;
   let ending = false;
@@ -134,12 +138,17 @@
   const callPhases = { preparing: '正在准备电话线路', checking: '正在检查公网电话入口', microphone: '等待麦克风授权，请查看地址栏的麦克风或权限图标', signaling: '麦克风已就绪，正在连接电话线路', connected: '浏览器线路已连接，等待电话音频', reconnecting: '电话音频连接中断，正在恢复' };
   const safeRead = (key, fallback) => { try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; } };
   let preferences = { saveHistory: false, showOriginal: true, ...safeRead(preferencesKey, {}) };
-  preferences = { saveHistory: preferences.saveHistory === true, showOriginal: preferences.showOriginal !== false };
+  preferences = { saveHistory: preferences.saveHistory === true, showOriginal: preferences.showOriginal !== false, keepOnline: preferences.keepOnline === true };
   let historyRecords = safeRead(historyKey, []);
   historyRecords = Array.isArray(historyRecords) ? historyRecords.filter(r => r && typeof r.id === 'string' && Array.isArray(r.lines)).slice(0, 30) : [];
   try {
     const fragment = new URLSearchParams(location.hash.slice(1));
     accessToken = fragment.get('token') || sessionStorage.getItem(tokenKey) || '';
+    if (accessToken && fragment.get('online') === '1') {
+      preferences.keepOnline = true;
+      saveLocal(preferencesKey, preferences);
+      if (fragment.get('engine') === 'pocket-captions') desktopEngine = 'pocket-captions';
+    }
     if (fragment.has('token')) {
       // Remove the credential from browser history even if storage is unavailable.
       window.history.replaceState(null, '', location.pathname + location.search);
@@ -294,6 +303,9 @@
 
   function renderStatus() {
     const configured = state?.configured === true;
+    const restoring = Boolean(state?.connectionMaintenance || preferences.keepOnline && ['starting', 'recovering', 'offline'].includes(state?.desktopConnection?.state));
+    $('keep-online-toggle').classList.toggle('on', preferences.keepOnline);
+    $('keep-online-toggle').setAttribute('aria-checked', String(preferences.keepOnline));
     const cleanupPending = requiresCleanup(activeSession);
     const accessNotice = !accessToken
       ? { title: '本机访问权限缺失', badge: '需要从桌面打开', copy: missingAccessMessage }
@@ -308,7 +320,7 @@
     $('enable-device').textContent = enabling ? '正在开启…' : registered ? '关闭通话' : '开启通话';
     $('enable-device').disabled = !state || !configured || enabling || busy() || saving || verifying;
     renderTranslationEngine();
-    $('start-call').disabled = !configured || !registered || !eventsOnline || busy() || saving || verifying || audioOutput.snapshot.status !== 'idle';
+    $('start-call').disabled = !configured || !registered || !eventsOnline || busy() || saving || verifying || restoring || audioOutput.snapshot.status !== 'idle';
     $('start-call').querySelector('span').textContent = dialing
       ? (usesLocalVoice(translationEngine.snapshot.value) && callLifecycle.current?.phase === 'checking' ? (usesPocketVoice(translationEngine.snapshot.value) ? '正在准备 Pocket 男声…' : '正在准备本人声线…') : '正在拨号…')
       : busy() ? '通话进行中' : '拨打电话';
@@ -330,8 +342,13 @@
     $('accept-call').disabled = !incomingCall || ending || Boolean(acceptingAttempt); $('reject-call').disabled = !incomingCall || ending;
     $('incoming-banner').hidden = !incomingCall;
     $('save-settings').disabled = !state || busy() || saving || verifying;
-    $('verify-connections').disabled = !state || !configured || busy() || saving || verifying;
+    $('verify-connections').disabled = !state || !configured || busy() || saving || verifying || state.connectionMaintenance;
     $('verify-connections').textContent = verifying ? '正在验证…' : '验证 API 连接';
+    if (restoring && !busy()) {
+      $('readiness-title').textContent = '电话线路正在自动恢复';
+      $('readiness-copy').textContent = '后台正在恢复公网连接并核对电话回调，完成后即可拨号。';
+    }
+    scheduleRegistration();
     $('settings-fields').querySelectorAll('input').forEach(input => { input.disabled = busy() || saving; });
     $('export-current').disabled = !record?.lines.length;
     const currentState = activeSession?.status || (record?.endedAt ? record.status : '');
@@ -522,7 +539,11 @@
         const next = await api('/api/status');
         if (disposed || localAccessRejected) return next;
         state = next; if (displayedErrorSource === 'local-connection') clearError();
-        applySession(next.activeSession || null); renderChecks(); renderStatus(); connectEvents(); return next;
+        applySession(next.activeSession || null); renderChecks(); renderStatus(); connectEvents();
+        if (desktopEngine && !busy()) {
+          if (translationEngine.select(desktopEngine)) { desktopEngine = null; renderTranslationEngine(); }
+        }
+        return next;
       }
       catch (error) { state = null; renderStatus(); throw error; }
       finally { refreshPending = null; }
@@ -563,7 +584,7 @@
       // CONNECTING streams already have browser-managed retry. CLOSED streams do not.
       if (source.readyState !== EventSource.CLOSED) return;
       source.close(); eventSource = null;
-      const delay = [1000, 3000, 10000][eventRetryAttempt++];
+      const delay = [1000, 3000, 10000][eventRetryAttempt++] ?? (preferences.keepOnline ? 60000 : undefined);
       if (delay === undefined) {
         eventRetriesExhausted = true;
         showError({ message: '状态连接未能恢复，请点击「刷新状态」重试；电话音频使用独立连接，断开期间的文字记录可能不完整。', recoverableEventConnection: true });
@@ -807,17 +828,36 @@
     try { oldDevice?.destroy(); } catch { /* Already destroyed. */ }
     await presence(false).catch(() => {}); renderStatus();
   }
-  async function enableDevice() {
+  function scheduleRegistration() {
+    if (!preferences.keepOnline || registrationRetryTimer || registered || enabling || disposed || localAccessRejected || !accessToken || !state?.configured || state.connectionMaintenance || busy()) return;
+    const delay = [0, 1000, 3000, 10000, 30000, 60000][Math.min(registrationRetryAttempt++, 5)];
+    registrationRetryTimer = setTimeout(() => {
+      registrationRetryTimer = null;
+      if (preferences.keepOnline && !registered && !busy() && !disposed && !localAccessRejected) enableDevice({ automatic: true });
+    }, delay);
+  }
+  async function enableDevice({ automatic = false } = {}) {
     if (busy() || enabling) return;
+    if (automatic && (!preferences.keepOnline || registered || disposed || localAccessRejected)) return;
     clearError();
-    if (registered) { await destroyDevice(); return; }
+    if (registered) {
+      preferences.keepOnline = false; saveLocal(preferencesKey, preferences);
+      clearTimeout(registrationRetryTimer); registrationRetryTimer = null;
+      enableEpoch += 1;
+      await destroyDevice(); return;
+    }
+    clearTimeout(registrationRetryTimer); registrationRetryTimer = null;
+    const epoch = ++enableEpoch;
+    const current = () => epoch === enableEpoch && !disposed && !localAccessRejected && (!automatic || preferences.keepOnline);
     enabling = true; renderStatus();
     try {
       await refreshStatus();
+      if (!current()) return;
       if (!state.configured) throw new Error('请先完成连接设置。');
       if (!window.Twilio?.Device) throw new Error('电话组件尚未加载，请重新启动桌面工作台。');
       if (device) await destroyDevice();
       const data = await api('/api/token');
+      if (!current()) return;
       // Official DeviceOptions.getUserMedia receives constraints and returns Promise<MediaStream>.
       // https://www.twilio.com/docs/voice/sdks/javascript/twiliodevice#deviceoptions
       const mediaOwner = createDeviceMediaOwner(callLifecycle);
@@ -830,9 +870,10 @@
         getUserMedia: constraints => mediaOwner.getUserMedia(constraints),
       });
       device = next; deviceMediaOwner = mediaOwner;
+      let registrationCompleted = false;
       audioOutput.bind(next.audio || null);
       next.on('registered', () => {
-        if (device !== next) return; registered = true; clearInterval(heartbeat);
+        if (device !== next || disposed || localAccessRejected || !registrationCompleted && !current()) return; registrationCompleted = true; registered = true; registrationRetryAttempt = 0; clearTimeout(registrationRetryTimer); registrationRetryTimer = null; clearInterval(heartbeat);
         logSdkEvent('device-registered', null, null, readDeviceEdge(next)); audioOutput.refresh();
         presence(true).catch(error => showError(error.message));
         heartbeat = setInterval(() => presence(true).catch(error => showError(error.message)), 15000); renderStatus();
@@ -842,7 +883,8 @@
       next.on('error', error => { if (device !== next) return; logSdkEvent('device-error', error); showError(sdkFailureMessage(error)); });
       next.on('incoming', receiveIncoming);
       await next.register();
-    } catch (error) { showError(error); await destroyDevice(); }
+      if (!current() && device === next) await destroyDevice();
+    } catch (error) { if (current()) { showError(error); await destroyDevice(); } }
     finally { enabling = false; renderStatus(); }
   }
   function bindCall(call, attempt) {
@@ -1103,6 +1145,12 @@
   document.querySelectorAll('[data-navigate]').forEach(button => button.addEventListener('click', () => navigate(button.dataset.navigate)));
   document.querySelector('.brand').addEventListener('click', event => { event.preventDefault(); navigate('workspace'); });
   $('enable-device').addEventListener('click', enableDevice); $('start-call').addEventListener('click', startCall); $('end-call').addEventListener('click', () => endCall());
+  $('keep-online-toggle').addEventListener('click', () => {
+    preferences.keepOnline = !preferences.keepOnline; saveLocal(preferencesKey, preferences);
+    registrationRetryAttempt = 0;
+    if (!preferences.keepOnline) { enableEpoch += 1; clearTimeout(registrationRetryTimer); registrationRetryTimer = null; }
+    renderStatus();
+  });
   $('translation-engine').addEventListener('change', () => {
     if (translationEngine.select($('translation-engine').value)) {
       $('verification-results').replaceChildren(element('p', 'form-intro', `已切换为${translationEngineLabel(translationEngine.snapshot.selected)}，请重新验证此版本；其他版本的结果不能代替。`));
@@ -1130,7 +1178,7 @@
   for (const [id, key] of [['save-history-toggle', 'saveHistory'], ['show-original-toggle', 'showOriginal']]) $(id).addEventListener('click', () => { preferences[key] = !preferences[key]; saveLocal(preferencesKey, preferences); applyPreferences(); });
   window.addEventListener('beforeunload', event => { if (busy()) { event.preventDefault(); event.returnValue = ''; } });
   window.addEventListener('pagehide', () => {
-    disposed = true; clearInterval(heartbeat); stopEvents(); cancelTokenRenewal();
+    disposed = true; enableEpoch += 1; clearTimeout(registrationRetryTimer); registrationRetryTimer = null; clearInterval(heartbeat); stopEvents(); cancelTokenRenewal();
     transcriptRows.clear(); transcriptOrderEngine = null;
     audioOutput.bind(null);
     microphoneInput.dispose();

@@ -7,6 +7,8 @@ import websocket from '@fastify/websocket';
 import twilio from 'twilio';
 import type WebSocket from 'ws';
 
+import { desktopConnectivity } from './desktop-connectivity';
+import { ConnectionMaintenance } from './connection-maintenance';
 import { ConfigStore } from './config';
 import {
   isLocalRequest,
@@ -54,6 +56,7 @@ export async function buildSoloServer(
   let verifying = false;
   let checkingOutbound = false;
   let lastVerifyAttempt = 0;
+  const maintenance = new ConnectionMaintenance();
   const broadcast = (event: { event: string; data: unknown }) => {
     for (const subscriber of subscribers) subscriber(event);
   };
@@ -72,6 +75,8 @@ export async function buildSoloServer(
     defaultTranslationEngine: 'legacy',
     nanoVoice: nanoVoiceStatus(),
     pocketVoice: pocketVoiceStatus(),
+    connectionMaintenance: maintenance.active,
+    desktopConnection: desktopConnectivity(),
   });
   function requestedEngine(body: unknown): TranslationEngine {
     if (
@@ -134,7 +139,37 @@ export async function buildSoloServer(
     ok: true,
   }));
   app.get('/api/status', async () => status());
+  app.post<{ Body: { action: string; lease?: string } }>(
+    '/api/connection-maintenance',
+    async (req) => {
+      try {
+        if (req.body?.action === 'begin') {
+          const lease = maintenance.begin(
+            Boolean(manager.activeSession || verifying || checkingOutbound),
+          );
+          return { lease, expiresInMs: 180000 };
+        }
+        if (req.body?.action === 'renew') maintenance.renew(req.body.lease);
+        else if (req.body?.action === 'end') maintenance.end(req.body.lease);
+        else throw new Error('INVALID_MAINTENANCE_LEASE');
+        return { ok: true };
+      } catch (error) {
+        throw new SessionError(
+          error instanceof Error &&
+          error.message === 'CONNECTION_MAINTENANCE_BUSY'
+            ? 'CONNECTION_MAINTENANCE_BUSY'
+            : 'INVALID_MAINTENANCE_LEASE',
+          409,
+        );
+      }
+    },
+  );
   app.post<{ Body: Record<string, unknown> }>('/api/settings', async (req) => {
+    if (
+      maintenance.active &&
+      !maintenance.matches(req.headers['x-phone-maintenance'])
+    )
+      throw new SessionError('CONNECTION_MAINTENANCE_BUSY', 409);
     if (manager.activeSession || verifying || checkingOutbound)
       throw new SessionError('CALL_OR_VERIFICATION_IN_PROGRESS', 409);
     if (!req.body || Array.isArray(req.body) || typeof req.body !== 'object')
@@ -154,6 +189,11 @@ export async function buildSoloServer(
     return { ok: true, ...status() };
   });
   app.post('/api/verify', async (req) => {
+    if (
+      maintenance.active &&
+      !maintenance.matches(req.headers['x-phone-maintenance'])
+    )
+      throw new SessionError('CONNECTION_MAINTENANCE_BUSY', 409);
     const engine = requestedEngine(req.body);
     if (manager.activeSession || verifying || checkingOutbound)
       throw new SessionError('CALL_OR_VERIFICATION_IN_PROGRESS', 409);
@@ -208,6 +248,8 @@ export async function buildSoloServer(
     '/api/calls',
     async (req) => {
       const engine = requestedEngine(req.body);
+      if (maintenance.active)
+        throw new SessionError('CONNECTION_MAINTENANCE_BUSY', 409);
       if (verifying || checkingOutbound)
         throw new SessionError('VERIFICATION_IN_PROGRESS', 409);
       requireConfigured();
@@ -295,7 +337,7 @@ export async function buildSoloServer(
     '/voice/incoming',
     async (req, reply) => {
       requireConfigured();
-      if (verifying) {
+      if (verifying || maintenance.active) {
         const response = new twilio.twiml.VoiceResponse();
         response.reject({ reason: 'busy' });
         return reply.type('text/xml').send(response.toString());
