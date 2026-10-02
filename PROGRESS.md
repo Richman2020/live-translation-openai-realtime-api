@@ -1,8 +1,17 @@
 # 项目进度与交接
 
-更新日期：2026-09-29。共享仓库：<https://github.com/Richman2020/live-translation-openai-realtime-api>。
+更新日期：2026-10-02。共享仓库：<https://github.com/Richman2020/live-translation-openai-realtime-api>。
 
 需求见 [PROJECT_BRIEF.md](PROJECT_BRIEF.md)，工作规则见 [AGENTS.md](AGENTS.md)，运行步骤见 [LOCAL_SETUP.md](LOCAL_SETUP.md)，后续执行入口见 [LOCAL_CODEX_HANDOFF.md](LOCAL_CODEX_HANDOFF.md)。
+
+## 最新：固定美式男声的两组六句长段试听（2026-10-02）
+
+- 用户放弃本人音色优先级，批准 Nano 与 Pocket TTS 原生流式比较，要求至少五句英文和五句中文对应的英文译文。本轮生成两组各六句，完整稿与中英对照保存在 `fixtures/fixed-voice-long-form.v1.json`；第二组为助手固定译文，不冒充实时 ASR/翻译测试。
+- 使用许可明确的公共 Michael/VCTK p360 美式成年男声：Nano 使用 WAV，Pocket 使用官方公开预设状态，参考处理路径不同；沉稳成熟程度、自然度和逐词完整性待本人试听。安装 Pocket 3.3.0 独立 CPU 环境，通过公开模型/预设 LFS SHA256、tokenizer Git blob 哈希及 wheel 校验，不使用受限克隆权重，不上传本人声音。
+- 每引擎预热一次、两段各三遍。理想 FIFO 首次有声中位：英文稿 Nano 1.285 s / Pocket 1.170 s；中文译文稿 1.403 s / 0.937 s。Pocket 首块约 0.14 s，但自身开头低能量段 0.80–1.03 s，不能把首块当作人耳出声。Nano 总合成吞吐更快；此为不同本机设备/资源条件的候选观察，不是纯算法排名或真实电话延迟。
+- 独立检查 84 个生成音频、28 组标准库 μ-law 回解、2,273 块及全部时间轴通过；全部原始输出和证据留本机。正式理想回放无断供不等于真人通话稳定，音质/漏词仍待试听。新 Python 脚本的定向验证与限制见 [完整对照记录](FIXED_US_VOICE_AB_2026-10-02.md)。
+- 最终定向回归 10/10 通过，Pocket 环境依赖检查通过；最终试听目录 72 个音频副本重算哈希全部一致，浏览器抽验两组电话/原始样本可播放、暂停和音量匹配可操作，页面无 error。试听反馈待本人填写，未冒充自然度或内容准确度通过。
+- 试听入口 `http://127.0.0.1:5081/` 为独立 loopback 静态页，两组六句均提供原始/电话音质、重复样本与包含初始等待的理想回放。默认只在播放器近似匹配音量，不修改原波形。没有拨号、收费调用、购买、电话默认切换；本轮 5050 服务未连接，不宣称电话工作台已恢复。仓库交接仍为 `codex/local-phone-workbench`，不代表 main；最终 commit/远端状态以本轮回读为准。
 
 ## 最新实施：离线淘汰无收益发送方案，减少字幕更新开销（2026-09-29）
 
