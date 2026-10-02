@@ -279,10 +279,75 @@ JS = """
 const players=[...document.querySelectorAll('audio')];
 const matchVolume=document.getElementById('match-volume');
 const setVolume=player=>{player.volume=matchVolume.checked?Number(player.dataset.matchVolume):1};
+const outputSelect=document.getElementById('audio-output');
+const chooseOutput=document.getElementById('choose-output');
+const testOutput=document.getElementById('test-output');
+const outputStatus=document.getElementById('output-status');
+const mediaDevices=navigator.mediaDevices;
+const canRoute=players.every(player=>typeof player.setSinkId==='function');
+let routeReady=true,busy=false,selectedSink='',selectedLabel='系统默认输出';
+let savedMuted=null,testPlayer=null,testTimer=null;
+const describeError=error=>({NotAllowedError:'设备权限被拒绝，请在浏览器权限中允许后重试。',NotFoundError:'没有找到该音频设备，请检查耳麦连接。',NotReadableError:'设备被占用或系统无法访问，请检查其他音频程序。',AbortError:'设备选择或切换被取消。',SecurityError:'浏览器安全设置阻止了设备访问。'}[error.name]||('设备操作失败：'+error.name+(error.message?' · '+error.message:'')));
+function stopTest(){const current=testPlayer;testPlayer=null;if(testTimer!==null)clearTimeout(testTimer);testTimer=null;if(current)current.pause()}
+function pauseAll(){stopTest();players.forEach(player=>player.pause())}
+function updateOutputButtons(){outputSelect.disabled=busy||!canRoute;chooseOutput.disabled=busy||!canRoute||!mediaDevices;testOutput.disabled=busy||!routeReady}
+function lockPlayback(){if(routeReady)savedMuted=players.map(player=>player.muted);routeReady=false;pauseAll();players.forEach(player=>{player.muted=true;player.controls=false});updateOutputButtons()}
+function unlockPlayback(){players.forEach((player,index)=>{player.muted=savedMuted?savedMuted[index]:player.muted;player.controls=true});savedMuted=null;routeReady=true;busy=false;updateOutputButtons()}
+function routeFailure(error){busy=false;routeReady=false;outputStatus.textContent=describeError(error)+' 播放已暂停并锁定；请重新选择输出设备，不会自动改用其他设备。';updateOutputButtons()}
+function addOutput(id,label){if([...outputSelect.options].every(option=>option.value!==id)){const option=document.createElement('option');option.value=id;option.textContent=label;outputSelect.append(option)}}
+async function refreshOutputs(){
+  if(!mediaDevices||typeof mediaDevices.enumerateDevices!=='function')return [];
+  const devices=(await mediaDevices.enumerateDevices()).filter(device=>device.kind==='audiooutput');
+  const current=outputSelect.value;outputSelect.replaceChildren();addOutput('','系统默认输出（跟随 Windows 设置）');
+  devices.filter(device=>device.deviceId&&device.deviceId!=='default').forEach((device,index)=>addOutput(device.deviceId,device.label||('未命名输出设备 '+(index+1))));
+  if(current&&![...outputSelect.options].some(option=>option.value===current))addOutput(current,'此前选择的设备（当前未枚举到）');
+  outputSelect.value=current;
+  return devices;
+}
+async function applyOutput(id,label){
+  const results=await Promise.allSettled(players.map(player=>player.setSinkId(id)));
+  const failed=results.find(result=>result.status==='rejected');
+  if(failed)throw failed.reason;
+  if(players.some(player=>player.sinkId!==id))throw new Error('部分播放器未确认目标设备');
+  selectedSink=id;selectedLabel=label;outputSelect.value=id;unlockPlayback();outputStatus.textContent='当前输出：'+selectedLabel+'。点击“试听 6 秒”检查声音。';
+}
+outputSelect.addEventListener('change',async()=>{if(busy||!canRoute)return;const id=outputSelect.value;const label=outputSelect.selectedOptions[0].textContent;busy=true;lockPlayback();outputStatus.textContent='正在切换输出设备，播放暂时锁定……';try{await applyOutput(id,label)}catch(error){routeFailure(error)}});
+chooseOutput.addEventListener('click',async()=>{
+  if(busy||!canRoute||!mediaDevices)return;
+  const wasReady=routeReady;busy=true;lockPlayback();let attemptedRoute=false;
+  try{
+    if(typeof mediaDevices.selectAudioOutput==='function'){
+      outputStatus.textContent='请在浏览器设备选择器中选择耳麦；选择期间不会播放。';
+      const device=await mediaDevices.selectAudioOutput();addOutput(device.deviceId,device.label||'已授权输出设备');attemptedRoute=true;await applyOutput(device.deviceId,device.label||'已授权输出设备');
+    }else{
+      outputStatus.textContent='仅请求麦克风权限以显示耳麦名称；取得设备后立即关闭，不录音、不上传。';
+      const stream=await mediaDevices.getUserMedia({audio:true});
+      try{stream.getTracks().forEach(track=>track.stop())}finally{stream.getTracks().forEach(track=>{if(track.readyState!=='ended')track.stop()})}
+      await refreshOutputs();
+      if(wasReady)unlockPlayback();else{busy=false;updateOutputButtons()}
+      outputStatus.textContent='设备列表已更新，请从“声音输出”选择耳麦。'+(wasReady?'当前仍使用：'+selectedLabel+'。':'播放仍锁定，选择成功后才可试听。');
+    }
+  }catch(error){
+    if(attemptedRoute){routeFailure(error);return}
+    if(wasReady)unlockPlayback();else{busy=false;updateOutputButtons()}
+    outputStatus.textContent=describeError(error)+(wasReady?' 当前输出未改变：'+selectedLabel+'。':' 播放仍锁定，请重新选择输出设备。');
+  }
+});
+testOutput.addEventListener('click',async()=>{
+  if(busy||!routeReady)return;pauseAll();const player=players.find(item=>item.id.endsWith('-phone'));if(!player)return;
+  player.currentTime=0;testPlayer=player;setVolume(player);
+  try{await player.play();if(testPlayer===player&&!player.paused)testTimer=setTimeout(()=>{stopTest();outputStatus.textContent='6 秒试听结束。当前输出：'+selectedLabel+'。'},6000)}catch(error){stopTest();outputStatus.textContent='试听未开始：'+describeError(error)}
+});
+if(canRoute&&mediaDevices){
+  if(typeof mediaDevices.selectAudioOutput==='function')chooseOutput.textContent='选择耳麦（系统设备选择器）';
+  refreshOutputs().catch(error=>{outputStatus.textContent='无法读取输出设备：'+describeError(error)+' 当前保留系统默认输出。'});
+  if(typeof mediaDevices.addEventListener==='function')mediaDevices.addEventListener('devicechange',async()=>{if(busy)return;try{const devices=await refreshOutputs();if(selectedSink&&!devices.some(device=>device.deviceId===selectedSink)){lockPlayback();routeFailure({name:'NotFoundError'})}}catch(error){outputStatus.textContent='设备列表刷新失败：'+describeError(error)}});
+}else outputStatus.textContent='此浏览器不支持网页指定输出设备，当前使用系统默认输出。请在 Windows 音量设置中选择耳麦。';
+updateOutputButtons();
 players.forEach(setVolume);matchVolume.addEventListener('change',()=>players.forEach(setVolume));
-players.forEach(player=>player.addEventListener('play',()=>{setVolume(player);players.forEach(other=>{if(other!==player)other.pause()});document.getElementById('play-status').textContent=player.getAttribute('aria-label')+' 正在播放'}));
-players.forEach(player=>{player.addEventListener('pause',()=>{if(players.every(item=>item.paused))document.getElementById('play-status').textContent='全部已暂停'});player.addEventListener('ended',()=>{if(players.every(item=>item.paused))document.getElementById('play-status').textContent='本段已播放完毕'})});
-document.getElementById('pause-all').addEventListener('click',()=>{players.forEach(player=>player.pause());document.getElementById('play-status').textContent='全部已暂停'});
+players.forEach(player=>player.addEventListener('play',()=>{if(busy||!routeReady){player.pause();document.getElementById('play-status').textContent='输出设备尚未就绪，播放已暂停';return}if(testPlayer&&player!==testPlayer)stopTest();setVolume(player);players.forEach(other=>{if(other!==player)other.pause()});document.getElementById('play-status').textContent=player.getAttribute('aria-label')+' 正在播放'}));
+players.forEach(player=>{player.addEventListener('pause',()=>{if(testPlayer===player){testPlayer=null;if(testTimer!==null)clearTimeout(testTimer);testTimer=null}if(players.every(item=>item.paused))document.getElementById('play-status').textContent='全部已暂停'});player.addEventListener('ended',()=>{if(players.every(item=>item.paused))document.getElementById('play-status').textContent='本段已播放完毕'});player.addEventListener('error',()=>{document.getElementById('play-status').textContent='音频加载或解码失败，请刷新页面。错误码：'+(player.error?player.error.code:'未知')})});
+document.getElementById('pause-all').addEventListener('click',()=>{pauseAll();document.getElementById('play-status').textContent='全部已暂停'});
 const storageKey='fixed-voice-review-v1-'+document.body.dataset.fixture;
 let saved={};try{saved=JSON.parse(localStorage.getItem(storageKey)||'{}')}catch(e){}
 document.querySelectorAll('[data-feedback]').forEach(field=>{if(Object.hasOwn(saved,field.id)){if(field.type==='checkbox')field.checked=saved[field.id]===true;else if(typeof saved[field.id]==='string')field.value=saved[field.id]}
@@ -311,6 +376,7 @@ def page_html(pair, manifest):
     <body data-fixture="{esc(report["fixtures_sha256"][:16])}"><header class="topbar"><div class="brand">AI 电话 · 声音实验室<small>固定英文稿 / 六句连贯讲话 / 本机试听</small></div><div><span class="status" id="play-status" role="status" aria-live="polite">等待试听</span><button type="button" id="pause-all">全部暂停</button></div></header><main class="wrap">
     <div class="intro"><h1>一段话，听清楚，也听完整。</h1><p>先听电话音质，再对照原始声音。两组材料使用相同的英文句子与同名公开男声，比较 Nano 和 Pocket TTS 的长段清晰度、衔接与等待。</p><div class="voice"><span>Michael · 美国新泽西口音男声</span><span>VCTK p360 · 录制时 19 岁</span><span>成熟感仍待本人试听确认</span></div></div>
     <aside class="guide"><div><strong>默认：只比较听感</strong>下方播放器保留生成音频的原有停顿，将返回的音频直接连接；没有插入计算等待，也没有加速或删词。</div><div><strong>另看：计算等待是否打断讲话</strong>展开“等待过程模拟”才会听到开头等待与缓冲耗尽的静音。所有指标排除热身，来源于本机文本就绪后的合成。</div></aside>
+    <section aria-labelledby="output-title" style="padding:18px 21px;margin-bottom:22px;border:1px solid #d4e2f5;border-radius:10px;background:#fff"><h2 id="output-title" style="font-size:18px;margin-bottom:10px">先确认声音输出</h2><label for="audio-output">声音输出</label> <select id="audio-output" style="max-width:100%;min-height:42px;margin:4px 8px 10px 0;padding:6px"><option value="">系统默认输出（跟随 Windows 设置）</option></select><div style="display:flex;gap:10px;flex-wrap:wrap"><button type="button" id="choose-output">查找耳麦（需要麦克风权限）</button><button type="button" id="test-output">试听 6 秒</button></div><p id="output-status" role="status" aria-live="polite" style="margin-top:10px;font-size:13px">当前使用系统默认输出；没有声音时，请选择实际佩戴的耳麦。</p><p style="font-size:12px;color:var(--muted);margin-top:6px">查找耳麦仅临时访问麦克风以显示设备名称，随后立即关闭；不录音、不上传。试听播放下方已有的 Nano 电话音质片段，不重新生成，也不产生费用。</p></section>
     <div class="check-grid"><label><input id="match-volume" type="checkbox" checked>按相近音量试听 <small>只调播放器音量，不改音频文件</small></label></div>
     {''.join(sections)}<footer class="footnote"><details><summary>测试方法、速度指标与适用范围</summary><p><strong>如何读速度：</strong>“首段有效声音”是连续 20 毫秒、10 毫秒窗口 RMS ≥ 0.01 的能量判定；它不验证说了什么。耗时比小于 1，表示这些句子的合成总耗时小于音频时长；仍不能单独证明连续电话流畅。模拟中断不含开头等待。</p>
     <p><strong>首次可听与数据可用：</strong>生成的第一个音频块可能只有静音；数据里已有有效声音，也不表示播放已经越过前面的静音。“理想播放首次可听”包含这些原有静音，仍是理想队列的模拟时刻。</p><p><strong>音量对照：</strong>默认根据同一段、同一次、同种音质的完整音频 RMS，把较响的一版在浏览器里调低。只衰减，不放大；等待模拟沿用对应原始音频的音量比例，避免额外静音影响计算。RMS 只是近似能量匹配，不是 LUFS 或感知响度校准；取消勾选可听原始音量。</p>
