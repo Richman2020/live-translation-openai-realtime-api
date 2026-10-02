@@ -16,9 +16,11 @@ import {
 import {
   usesRemoteCaptions,
   usesNanoVoice,
+  usesPocketVoice,
   type TranslationEngine,
 } from './translation-engine';
 import { checkNanoVoice, checkNanoCaptionVoice } from './nano-runtime';
+import { checkPocketVoice } from './pocket-runtime';
 import { checkRemoteCaption } from './remote-caption-client';
 
 type Check = {
@@ -199,8 +201,13 @@ export async function checkTranslationEngine(
   createSocket?: CreateSocket,
   timeoutMs = 15000,
   nanoChecks = { voice: checkNanoVoice, captionVoice: checkNanoCaptionVoice },
+  pocketCheck: () => Promise<Check> = checkPocketVoice,
 ): Promise<Check> {
   if (usesRemoteCaptions(engine)) {
+    if (usesPocketVoice(engine)) {
+      const local = await pocketCheck();
+      if (local.status !== 'passed') return local;
+    }
     if (usesNanoVoice(engine)) {
       const local = await nanoChecks.captionVoice();
       if (local.status !== 'passed') return local;
@@ -211,6 +218,12 @@ export async function checkTranslationEngine(
     ]);
     if (translation.status !== 'passed') return translation;
     if (caption.status !== 'passed') return caption;
+    if (usesPocketVoice(engine))
+      return {
+        name: 'pocketCaptions',
+        status: 'passed',
+        code: 'POCKET_CAPTIONS_READY',
+      };
     return {
       name: usesNanoVoice(engine) ? 'nanoCaptions' : 'continuousCaptions',
       status: 'passed',
@@ -368,6 +381,7 @@ export async function verifyProviders(
       : {
           name: {
             'nano-captions': 'nanoCaptions',
+            'pocket-captions': 'pocketCaptions',
             'continuous-captions': 'continuousCaptions',
             'continuous-nano': 'nanoTranslation',
             continuous: 'openaiContinuous',

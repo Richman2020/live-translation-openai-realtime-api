@@ -8,12 +8,17 @@ import RequestClient from 'twilio/lib/base/RequestClient';
 import type { SoloConfig } from './config';
 import { safeEqual } from './security';
 import { TranslationBridge } from './translation-bridge';
-import { ContinuousTranslationBridge } from './continuous-translation-bridge';
+import {
+  ContinuousTranslationBridge,
+  type LocalVoiceSynthesizer,
+} from './continuous-translation-bridge';
 import { getNanoVoiceWorker, getNanoCaptionVoice } from './nano-runtime';
+import { getPocketVoiceWorker } from './pocket-runtime';
 import {
   isTranslationEngine,
   usesRemoteCaptions,
   usesNanoVoice,
+  usesPocketVoice,
   type TranslationEngine,
 } from './translation-engine';
 
@@ -55,16 +60,28 @@ export type BridgeOptions = ConstructorParameters<
 /** Route capabilities independently: captions never imply a local voice model. */
 export function createSessionBridge(
   settings: BridgeOptions,
-  voices = { nano: getNanoVoiceWorker, nanoCaption: getNanoCaptionVoice },
+  voices: {
+    nano: () => LocalVoiceSynthesizer;
+    nanoCaption: () => LocalVoiceSynthesizer;
+    pocket?: () => LocalVoiceSynthesizer;
+  } = {
+    nano: getNanoVoiceWorker,
+    nanoCaption: getNanoCaptionVoice,
+    pocket: getPocketVoiceWorker,
+  },
 ): BridgeLike {
-  if (usesRemoteCaptions(settings.translationEngine))
+  if (usesRemoteCaptions(settings.translationEngine)) {
+    let localVoice: LocalVoiceSynthesizer | undefined;
+    if (usesNanoVoice(settings.translationEngine))
+      localVoice = voices.nanoCaption();
+    if (usesPocketVoice(settings.translationEngine))
+      localVoice = (voices.pocket || getPocketVoiceWorker)();
     return new ContinuousTranslationBridge({
       ...settings,
       remoteCaptions: true,
-      ...(usesNanoVoice(settings.translationEngine)
-        ? { localVoice: voices.nanoCaption() }
-        : {}),
+      ...(localVoice ? { localVoice } : {}),
     });
+  }
   if (settings.translationEngine === 'continuous-nano')
     return new ContinuousTranslationBridge({
       ...settings,
@@ -576,9 +593,14 @@ export class SessionManager extends EventEmitter {
         clearTimeout(session.timer);
         session.view.status = 'active';
         this.publish(session);
-        session.timer = setTimeout(() => {
-          this.end(session.view.id, 'CALL_DURATION_LIMIT');
-        }, this.maxCallMs);
+        session.timer = setTimeout(
+          () => {
+            this.end(session.view.id, 'CALL_DURATION_LIMIT');
+          },
+          usesPocketVoice(session.view.translationEngine)
+            ? Math.min(this.maxCallMs, 5 * 60 * 1000)
+            : this.maxCallMs,
+        );
         session.timer.unref?.();
       } else if (
         (session.view.direction === 'outbound' && role === 'local') ||

@@ -223,7 +223,11 @@ test('continuous success snapshots the chosen engine and a busy request cannot c
   assert.equal(manager.activeSession?.translationEngine, 'continuous');
 });
 
-for (const engine of ['nano-captions', 'continuous-captions'] as const)
+for (const engine of [
+  'nano-captions',
+  'continuous-captions',
+  'pocket-captions',
+] as const)
   test(`${engine} must pass its selected provider check before any phone session`, async (t) => {
     let passed = false;
     const engines: string[] = [];
@@ -232,15 +236,18 @@ for (const engine of ['nano-captions', 'continuous-captions'] as const)
       async () => ready,
       async (_config, engine) => {
         engines.push(engine);
+        const selected = {
+          'nano-captions': ['nanoCaptions', 'NANO_CAPTIONS_READY'],
+          'continuous-captions': [
+            'continuousCaptions',
+            'CONTINUOUS_CAPTIONS_READY',
+          ],
+          'pocket-captions': ['pocketCaptions', 'POCKET_CAPTIONS_READY'],
+        }[engine];
         return {
-          name:
-            engine === 'nano-captions' ? 'nanoCaptions' : 'continuousCaptions',
+          name: selected[0],
           status: passed ? 'passed' : 'failed',
-          code: passed
-            ? engine === 'nano-captions'
-              ? 'NANO_CAPTIONS_READY'
-              : 'CONTINUOUS_CAPTIONS_READY'
-            : 'CAPTION_UNAVAILABLE',
+          code: passed ? selected[1] : 'CAPTION_UNAVAILABLE',
         };
       },
     );
@@ -420,7 +427,12 @@ test('provider verification records the selected engine separately from the defa
     'continuous-nano',
     'nano-captions',
     'continuous-captions',
+    'pocket-captions',
   ]);
+  assert.deepEqual(status.json().pocketVoice, {
+    state: 'not_started',
+    pendingJobs: 0,
+  });
   assert.equal(status.json().lastVerification.translationEngine, 'continuous');
 });
 

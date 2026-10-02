@@ -20,7 +20,11 @@ export type TranslationMetric = {
   name:
     | 'speech_stop_to_first_audio_ms'
     | 'nano_text_to_audio_ms'
-    | 'nano_boundary_wait_ms';
+    | 'nano_boundary_wait_ms'
+    | 'pocket_boundary_wait_ms'
+    | 'pocket_text_to_first_chunk_ms'
+    | 'pocket_text_to_first_voiced_ms'
+    | 'pocket_synthesis_complete_ms';
   value: number;
   at: number;
   scope: 'provider_generation' | 'local_synthesis' | 'text_boundary';

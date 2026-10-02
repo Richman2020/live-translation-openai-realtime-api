@@ -4,6 +4,7 @@ export const TRANSLATION_ENGINES = [
   'continuous-nano',
   'nano-captions',
   'continuous-captions',
+  'pocket-captions',
 ] as const;
 export type TranslationEngine = (typeof TRANSLATION_ENGINES)[number];
 
@@ -14,7 +15,15 @@ export function isTranslationEngine(
 }
 
 export function usesRemoteCaptions(value: unknown): boolean {
-  return value === 'nano-captions' || value === 'continuous-captions';
+  return (
+    value === 'nano-captions' ||
+    value === 'continuous-captions' ||
+    value === 'pocket-captions'
+  );
+}
+
+export function usesPocketVoice(value: unknown): boolean {
+  return value === 'pocket-captions';
 }
 
 export function usesNanoVoice(value: unknown): boolean {

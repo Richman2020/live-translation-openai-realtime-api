@@ -454,3 +454,85 @@ test('continuous captions cannot pass when the return caption handshake fails', 
     code: 'CONFIGURATION_REQUIRED',
   });
 });
+
+test('Pocket preflight warms the fixed voice before any provider handshake and fails closed if unavailable', async () => {
+  let networkCalls = 0;
+  let pocketCalls = 0;
+  const result = await checkTranslationEngine(
+    config,
+    'pocket-captions',
+    () => {
+      networkCalls += 1;
+      throw new Error('NO_NETWORK_ON_FAILED_LOCAL_PREFLIGHT');
+    },
+    1000,
+    undefined,
+    async () => {
+      pocketCalls += 1;
+      return {
+        name: 'pocketVoice',
+        status: 'failed',
+        code: 'POCKETVOICE_UNAVAILABLE',
+      };
+    },
+  );
+  assert.equal(pocketCalls, 1);
+  assert.equal(networkCalls, 0);
+  assert.deepEqual(result, {
+    name: 'pocketVoice',
+    status: 'failed',
+    code: 'POCKETVOICE_UNAVAILABLE',
+  });
+});
+
+test('Pocket preflight preserves English original plus independent Chinese caption chain and names the selected engine', async () => {
+  let ready = false;
+  const sockets: { url: string; socket: FakeSocket }[] = [];
+  const forbidNano = async () => {
+    throw new Error('NANO_MUST_NOT_RUN');
+  };
+  const result = await checkTranslationEngine(
+    { ...config, OPENAI_REALTIME_MODEL: 'gpt-realtime-1.5' },
+    'pocket-captions',
+    (url) => {
+      assert.equal(ready, true);
+      const socket = new FakeSocket();
+      sockets.push({ url, socket });
+      queueMicrotask(() => {
+        if (socket.readyState === WebSocket.CLOSED) return;
+        socket.open();
+        if (url.includes('/translations?')) acknowledgeContinuous(socket);
+        else socket.acknowledge();
+      });
+      return socket as unknown as WebSocket;
+    },
+    1000,
+    { voice: forbidNano, captionVoice: forbidNano },
+    async () => {
+      ready = true;
+      return { name: 'pocketVoice', status: 'passed', code: 'POCKET_READY' };
+    },
+  );
+  assert.deepEqual(result, {
+    name: 'pocketCaptions',
+    status: 'passed',
+    code: 'POCKET_CAPTIONS_READY',
+  });
+  assert.equal(sockets.length, 3);
+  assert.equal(
+    sockets.filter(({ url }) => url.includes('/translations?')).length,
+    1,
+  );
+  assert.ok(
+    sockets.every(({ socket }) => socket.readyState === WebSocket.CLOSED),
+  );
+  const missing = await verifyProviders(
+    { ...config, OPENAI_API_KEY: '' },
+    'pocket-captions',
+  );
+  assert.deepEqual(missing.checks.at(-1), {
+    name: 'pocketCaptions',
+    status: 'missing',
+    code: 'CONFIGURATION_REQUIRED',
+  });
+});

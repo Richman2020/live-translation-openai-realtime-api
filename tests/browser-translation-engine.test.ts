@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { createTranslationEngineSelection, translationEngineLabel, translationReadiness, usesNanoVoice, usesRemoteCaptions } from '../public/translation-engine.js';
+import { createTranslationEngineSelection, translationEngineLabel, translationReadiness, usesNanoVoice, usesPocketVoice, usesLocalVoice, usesRemoteCaptions } from '../public/translation-engine.js';
 import { isTranslationEngine } from '../src/solo/translation-engine.js';
 
 const engines = ['legacy', 'continuous'];
@@ -72,6 +72,7 @@ test('history labels distinguish both engines and avoid inferring old missing me
   assert.equal(translationEngineLabel('continuous-nano'), '本人声线实验版');
   assert.equal(translationEngineLabel('nano-captions'), '英文原声＋中文字幕');
   assert.equal(translationEngineLabel('continuous-captions'), '连续直出＋中文字幕（测试候选）');
+  assert.equal(translationEngineLabel('pocket-captions'), 'Pocket 美式男声＋中文字幕（测试候选）');
   assert.equal(translationEngineLabel(undefined), '版本未记录');
 });
 
@@ -160,4 +161,38 @@ test('native caption audio readiness requires translation readiness and never pr
   assert.equal(ready.label, '连续直出与英文原声已就绪');
   assert.match(ready.instruction, /模型声音.*直接听英文原声.*中英字幕.*字幕状态单独显示/);
   assert.doesNotMatch(ready.instruction, /本人声线|本人英文本音|分句合成/);
+});
+
+test('Pocket is an opt-in local preset voice with captions, not Nano or a changed default', () => {
+  const selection = createTranslationEngineSelection();
+  selection.update({ engines: [...engines, 'nano-captions'], session: null, locked: false });
+  assert.equal(selection.select('pocket-captions'), false);
+  const available = [...engines, 'pocket-captions'];
+  selection.update({ engines: available, session: null, locked: false });
+  assert.equal(selection.snapshot.value, 'legacy');
+  assert.equal(selection.select('pocket-captions'), true);
+  selection.update({ engines: available, session: { translationEngine: 'pocket-captions' }, locked: false });
+  assert.equal(selection.snapshot.value, 'pocket-captions');
+  assert.equal(selection.select('legacy'), false);
+  assert.equal(createTranslationEngineSelection().snapshot.value, 'legacy');
+  assert.equal(usesNanoVoice('pocket-captions'), false);
+  assert.equal(usesPocketVoice('pocket-captions'), true);
+  assert.equal(usesLocalVoice('pocket-captions'), true);
+  assert.equal(usesRemoteCaptions('pocket-captions'), true);
+  for (const engine of ['legacy', 'continuous', 'continuous-captions', 'invented', undefined]) {
+    assert.equal(usesLocalVoice(engine), false);
+    assert.equal(usesPocketVoice(engine), false);
+  }
+});
+
+test('Pocket audio readiness is explicit and independent of return captions', () => {
+  const session = { status: 'active', translationEngine: 'pocket-captions', captionState: 'failed' };
+  const pending = translationReadiness(session);
+  assert.equal(pending.ready, false);
+  assert.match(pending.label, /Pocket 男声准备中/);
+  const ready = translationReadiness({ ...session, translationReady: true });
+  assert.equal(ready.ready, true);
+  assert.equal(ready.label, 'Pocket 男声与英文原声已就绪');
+  assert.match(ready.instruction, /Michael 固定美式男声.*小节确认后开始流式播放.*英文原声.*中英字幕/);
+  assert.doesNotMatch(ready.instruction + pending.instruction, /本人声线|本人英文本音|0\.46/);
 });

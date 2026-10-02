@@ -24,6 +24,12 @@ import type {
 
 export type LocalVoiceSynthesizer = {
   ready: Promise<void>;
+  diagnosticPrefix?: 'nano' | 'pocket';
+  /** Native PCM chunks, available before synthesis of the complete text ends. */
+  synthesizeStream?(
+    text: string,
+    signal?: AbortSignal,
+  ): AsyncIterable<{ pcm: Buffer; sampleRate: 24000 }>;
   /** The B tempo preset can expand a 20-second generated waveform to <22s. */
   maxOutputSeconds?: 20 | 22;
   synthesize(
@@ -226,14 +232,18 @@ export class ContinuousTranslationBridge {
           if (!this.options.remoteCaptions) return;
           this.options.onMetric?.({
             role: 'local',
-            name: 'nano_boundary_wait_ms',
+            name:
+              this.voicePrefix === 'pocket'
+                ? 'pocket_boundary_wait_ms'
+                : 'nano_boundary_wait_ms',
             scope: 'text_boundary',
             value: bufferWaitMs,
             at: (this.options.now || Date.now)(),
           });
         },
         onCommit: (text) => this.enqueueNano(text),
-        onError: () => this.shutdown('nano_text_boundary_failed:local'),
+        onError: () =>
+          this.shutdown(`${this.voicePrefix}_text_boundary_failed:local`),
       });
     }
   }
@@ -696,12 +706,12 @@ export class ContinuousTranslationBridge {
       this.nanoQueue.length + Number(this.nanoBusy) >= jobLimit ||
       textChars + text.length > 960
     ) {
-      this.shutdown('nano_synthesis_queue_full:local');
+      this.shutdown(`${this.voicePrefix}_synthesis_queue_full:local`);
       return;
     }
     this.nanoQueue.push({ text, at: (this.options.now || Date.now)() });
     this.processNano().catch(() =>
-      this.shutdown('nano_synthesis_failed:local'),
+      this.shutdown(`${this.voicePrefix}_synthesis_failed:local`),
     );
   }
 
@@ -712,6 +722,13 @@ export class ContinuousTranslationBridge {
       while (!this.closed && this.nanoQueue.length) {
         const job = this.nanoQueue.shift();
         this.nanoActiveChars = job.text.length;
+        if (this.options.localVoice.synthesizeStream) {
+          // Consume actual native chunks. Never wait for a whole sentence WAV.
+          // eslint-disable-next-line no-await-in-loop -- Preserve clause order.
+          await this.streamLocalVoice(job);
+          // eslint-disable-next-line no-continue -- Keep the existing complete-wave Nano path unchanged.
+          continue;
+        }
         // eslint-disable-next-line no-await-in-loop -- One FIFO synthesis at a time preserves spoken order.
         const generated = await this.options.localVoice.synthesize(
           job.text,
@@ -769,10 +786,129 @@ export class ContinuousTranslationBridge {
         }
       }
     } catch {
-      if (!this.closed) this.shutdown('nano_synthesis_failed:local');
+      if (!this.closed)
+        this.shutdown(`${this.voicePrefix}_synthesis_failed:local`);
     } finally {
       this.nanoBusy = false;
       this.nanoActiveChars = 0;
+    }
+  }
+
+  private get voicePrefix(): 'nano' | 'pocket' {
+    return this.options.localVoice?.diagnosticPrefix === 'pocket'
+      ? 'pocket'
+      : 'nano';
+  }
+
+  private async streamLocalVoice(job: {
+    text: string;
+    at: number;
+  }): Promise<void> {
+    const voice = this.options.localVoice;
+    const converter = new Pcm24kToPcmu();
+    const startedAt = (this.options.now || Date.now)();
+    let totalBytes = 0;
+    let firstChunk = true;
+    let voiced = false;
+    let frameSamples = 0;
+    let frameSquares = 0;
+    let voicedFrames = 0;
+    const metric = (
+      name:
+        | 'pocket_text_to_first_chunk_ms'
+        | 'pocket_text_to_first_voiced_ms'
+        | 'pocket_synthesis_complete_ms',
+    ) => {
+      if (this.voicePrefix !== 'pocket') return;
+      const at = (this.options.now || Date.now)();
+      try {
+        this.options.onMetric?.({
+          role: 'local',
+          name,
+          scope: 'local_synthesis',
+          value: Math.max(0, at - job.at),
+          queueMs: Math.max(0, startedAt - job.at),
+          generationMs: Math.max(0, at - startedAt),
+          at,
+        });
+      } catch {
+        /* Diagnostics cannot interrupt speech. */
+      }
+    };
+    // The converter and energy frame carry persist across native chunks.
+    for await (const generated of voice.synthesizeStream(
+      job.text,
+      this.nanoAbort.signal,
+    )) {
+      if (this.closed) return;
+      if (
+        generated.sampleRate !== 24000 ||
+        !Buffer.isBuffer(generated.pcm) ||
+        !generated.pcm.length ||
+        generated.pcm.length % 2 ||
+        generated.pcm.length > 96000 ||
+        totalBytes + generated.pcm.length >
+          48000 * (voice.maxOutputSeconds ?? 20)
+      )
+        throw new Error('LOCAL_VOICE_INVALID_STREAM');
+      totalBytes += generated.pcm.length;
+      if (firstChunk) {
+        firstChunk = false;
+        metric('pocket_text_to_first_chunk_ms');
+      }
+      // Match the offline comparison: two consecutive 10ms RMS >= 0.01 frames.
+      // This identifies audio energy, not a semantic word or sound at the ear.
+      if (!voiced) {
+        for (let offset = 0; offset < generated.pcm.length; offset += 2) {
+          const sample = generated.pcm.readInt16LE(offset);
+          frameSquares += sample * sample;
+          frameSamples += 1;
+          if (frameSamples === 240) {
+            voicedFrames =
+              frameSquares / 240 >= (32768 * 0.01) ** 2 ? voicedFrames + 1 : 0;
+            frameSamples = 0;
+            frameSquares = 0;
+            if (voicedFrames >= 2) {
+              voiced = true;
+              metric('pocket_text_to_first_voiced_ms');
+              break;
+            }
+          }
+        }
+      }
+      // Waiting on phone marks also stops pulling new native chunks. The worker
+      // separately bounds pending output; overload fails instead of losing words.
+      // eslint-disable-next-line no-await-in-loop -- Stream FIFO backpressure.
+      await this.forwardLocalVoice(converter.push(generated.pcm));
+    }
+    if (this.closed) return;
+    if (!totalBytes) throw new Error('LOCAL_VOICE_EMPTY_STREAM');
+    // Flush once, only on a clean end. No padding between native chunks.
+    await this.forwardLocalVoice(converter.push(Buffer.alloc(384)));
+    // Completion is bridge consumption, including queue/phone backpressure; it
+    // is not an isolated measure of Python computation or actual phone hearing.
+    if (!this.closed) metric('pocket_synthesis_complete_ms');
+  }
+
+  private async forwardLocalVoice(audio: Buffer): Promise<void> {
+    for (
+      let offset = 0;
+      offset < audio.length && !this.closed;
+      offset += DELIVERY_BYTES
+    ) {
+      const chunk = audio.subarray(offset, offset + DELIVERY_BYTES);
+      while (
+        !this.closed &&
+        (this.phones.get('remote')?.outstandingBytes ?? 0) + chunk.length >
+          32000
+      ) {
+        // eslint-disable-next-line no-await-in-loop -- Playback marks release capacity.
+        await new Promise<void>((resolve) => {
+          this.nanoPlaybackWaiters.add(resolve);
+        });
+      }
+      if (this.closed) return;
+      this.forward('local', chunk);
     }
   }
 

@@ -18,6 +18,7 @@ import { SessionError, SessionManager, type Role } from './session-manager';
 import { verifyProviders, checkTranslationEngine } from './provider-checks';
 import { checkPublicReadiness } from './public-readiness';
 import { closeNanoVoiceWorker, nanoVoiceStatus } from './nano-runtime';
+import { closePocketVoiceWorker, pocketVoiceStatus } from './pocket-runtime';
 import {
   isTranslationEngine,
   TRANSLATION_ENGINES,
@@ -70,6 +71,7 @@ export async function buildSoloServer(
     translationEngines: TRANSLATION_ENGINES,
     defaultTranslationEngine: 'legacy',
     nanoVoice: nanoVoiceStatus(),
+    pocketVoice: pocketVoiceStatus(),
   });
   function requestedEngine(body: unknown): TranslationEngine {
     if (
@@ -395,6 +397,7 @@ export async function buildSoloServer(
   app.addHook('onClose', async () => {
     manager.off('event', broadcast);
     closeNanoVoiceWorker();
+    closePocketVoiceWorker();
   });
   return app;
 }

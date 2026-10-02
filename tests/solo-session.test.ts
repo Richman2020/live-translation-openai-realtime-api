@@ -38,6 +38,7 @@ function fixture(
     create?: CallProvider['create'];
     hangup?: CallProvider['hangup'];
     setupTimeoutMs?: number;
+    maxCallMs?: number;
     now?: () => number;
   } = {},
 ) {
@@ -46,6 +47,7 @@ function fixture(
   const attached: Role[] = [];
   const events: any[] = [];
   let bridgeOptions: BridgeOptions;
+  let bridgeClosed = 0;
   const provider: CallProvider = {
     create: async (args) => {
       created.push(args);
@@ -62,9 +64,15 @@ function fixture(
     providerFactory: () => provider,
     bridgeFactory: (args) => {
       bridgeOptions = args;
-      return { attach: (role) => attached.push(role), close() {} };
+      return {
+        attach: (role) => attached.push(role),
+        close() {
+          bridgeClosed += 1;
+        },
+      };
     },
     setupTimeoutMs: options.setupTimeoutMs,
+    maxCallMs: options.maxCallMs,
     now: options.now,
   });
   manager.on('event', (event) => events.push(event));
@@ -79,6 +87,7 @@ function fixture(
     attached,
     events,
     bridge: () => bridgeOptions,
+    bridgeClosed: () => bridgeClosed,
   };
 }
 function attach(
@@ -110,7 +119,11 @@ function browser(f: ReturnType<typeof fixture>) {
   return call;
 }
 
-for (const engine of ['nano-captions', 'continuous-captions'] as const)
+for (const engine of [
+  'nano-captions',
+  'continuous-captions',
+  'pocket-captions',
+] as const)
   test(`${engine}: caption failure is visible in reconnect snapshots but never blocks voice readiness or ends the session`, async (t) => {
     const f = fixture(t);
     const call = f.manager.createOutbound(config, '+14155550123', engine);
@@ -440,6 +453,43 @@ test('ambiguous failed create is reconciled by a late authenticated status callb
   await tick();
   assert.equal(f.ended.filter((sid) => sid === remoteSid).length, 1);
 });
+
+for (const engine of [
+  'legacy',
+  'continuous-captions',
+  'pocket-captions',
+] as const)
+  test(`${engine}: five-minute limit applies only to the Pocket pilot and cleans up both legs`, async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const f = fixture(t);
+    const call = f.manager.createOutbound(config, '+14155550123', engine);
+    f.manager.connectBrowser({
+      ...call.connectionParams,
+      From: 'client:ai-phone',
+      CallSid: localSid,
+    });
+    attach(f.manager, call.id, 'local', call.connectionParams.nonce, localSid);
+    await tick();
+    const nonce = new URL(f.created[0].url).searchParams.get('nonce');
+    f.manager.connectLeg(call.id, 'remote', nonce, remoteSid);
+    attach(f.manager, call.id, 'remote', nonce, remoteSid);
+    assert.equal(f.manager.activeSession.status, 'active');
+    t.mock.timers.tick(299999);
+    await tick();
+    assert.equal(f.manager.activeSession.status, 'active');
+    t.mock.timers.tick(1);
+    await tick();
+    if (engine === 'pocket-captions') {
+      assert.equal(f.manager.activeSession, null);
+      assert.deepEqual([...f.ended].sort(), [localSid, remoteSid].sort());
+      assert.equal(f.bridgeClosed(), 1);
+      assert.equal(f.events.at(-1).data.error, 'CALL_DURATION_LIMIT');
+    } else {
+      assert.equal(f.manager.activeSession.status, 'active');
+      assert.deepEqual(f.ended, []);
+      assert.equal(f.bridgeClosed(), 0);
+    }
+  });
 
 test('unaccepted calls expire, free the single-call slot, and malformed destination never dials', async (t) => {
   const f = fixture(t, { setupTimeoutMs: 15 });
