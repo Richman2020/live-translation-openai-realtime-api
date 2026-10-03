@@ -53,3 +53,16 @@ gpt-live-transcribe有实时delta、中文语言提示与delay参数，但没有
 - [Twilio媒体协议](https://www.twilio.com/docs/voice/media-streams/websocket-messages)：顺序播放与mark含义。
 
 本轮交付为已核对的新通数据和方案；提交到codex/local-phone-workbench，不代表main或新候选已部署。
+
+## 用户进一步明确：首个可靠前缀边讲边起声
+
+用户要求在说到「明天下午三点」时，手机已听见前面的Hello / I would like开头，期望0.5–1秒的跟随感。此前「讲房间细节时播预约」目标仍偏晚；本节更新验收，不表示实现已完成。
+需区分首个正确前缀起声、时间/否定等关键信息到达、整句尾部等待。0.5–1秒按对应短语结束至手机听到该译语测，是简单明确前缀的实验目标，不是所有句子的稳定保证。
+
+- 连续译音直出作为速度基准：跳过小节文字提交与Pocket再次合成；仍受上下文与电话线路影响，声线与Michael不同。
+- 保留Michael的候选改为「实时中文识别→可靠英文短前缀→Pocket音频流」：确认问候/预约意图后可先发第一批，后文继续；需验证短前缀衔接、重复启动开销、识别修订和否定/时间保护。
+- 现有完整小节路线只能去掉自身额外等待，不能据此保证词组级0.5–1秒。Pocket公开接口不能持续追加文字到同一正在生成的会话。
+- 如果试验缓存已确认的问候，必须等用户确实说了问候，单独标记缓存命中；不能据提前Hello宣称整个翻译已达0.5秒，更不能猜后文或加填充。
+
+推荐同一现有自然长录音比较连续直出与Pocket短前缀候选，测真正预约内容的跟随、关键意思完整和后段积压；保持当前电话版本。本轮仅讨论/交接，未创建候选或调用接口。
+[OpenAI连续翻译设计与限制](https://developers.openai.com/cookbook/examples/voice_solutions/realtime_translation_guide)说明连续输出及上下文取舍；[Pocket接口](https://github.com/kyutai-labs/pocket-tts/blob/main/docs/API%20Reference/python-api.md)说明字符串输入和音频块输出。
