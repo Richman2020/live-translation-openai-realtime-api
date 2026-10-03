@@ -16,3 +16,7 @@ dist/
 output.yaml
 
 coverage
+.runtime/
+public/vendor/
+.env.*
+!.env.sample
