@@ -59,18 +59,30 @@ export function diagnosticLogRecord(
       'pocket_text_to_first_chunk_ms',
       'pocket_text_to_first_voiced_ms',
       'pocket_synthesis_complete_ms',
+      'prefix_source_wait_ms',
+      'prefix_translation_ms',
+      'prefix_source_to_submit_ms',
     ]);
     choice('scope', [
       'provider_generation',
       'local_synthesis',
       'text_boundary',
     ]);
-    numbers(['value', 'transcriptionMs', 'queueMs', 'generationMs']);
+    numbers([
+      'value',
+      'transcriptionMs',
+      'queueMs',
+      'generationMs',
+      'prefixSequence',
+    ]);
   }
   if (
-    ['translation-audio', 'translation-provider', 'translation-input'].includes(
-      event,
-    )
+    [
+      'translation-audio',
+      'translation-provider',
+      'translation-input',
+      'translation-metric',
+    ].includes(event)
   ) {
     // This is generated locally for a bridge, never a provider/account/call SID.
     if (
@@ -95,6 +107,7 @@ export function diagnosticLogRecord(
     numbers([
       'generatedBytes',
       'sentBytes',
+      'prefixSequence',
       'createdAtMs',
       'sentAtMs',
       'acknowledgedAtMs',

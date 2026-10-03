@@ -11,6 +11,10 @@ import {
 import { muLawToPcm16, Pcm24kToPcmu, PcmuToPcm24k } from './translation-pcm';
 import { createNanoTextCommitter } from './nano-text-committer';
 import {
+  createOutgoingPrefixClient,
+  type OutgoingPrefixOptions,
+} from './outgoing-prefix-client';
+import {
   createRemoteCaptionClient,
   type RemoteCaptionClient,
   type RemoteCaptionOptions,
@@ -49,6 +53,9 @@ export type ContinuousTranslationBridgeOptions = TranslationBridgeOptions & {
   /** Explicit one-way candidate. The local provider audio is never forwarded. */
   localVoice?: LocalVoiceSynthesizer;
   sentenceBoundaryDelayMs?: number;
+  /** Chinese ASR/text prefix candidate; never gate on continuous translated audio. */
+  outgoingPrefixes?: boolean;
+  createPrefixClient?: typeof createOutgoingPrefixClient;
   /** Remote PCMU goes straight to the headset; ASR/text is an independent branch. */
   remoteCaptions?: boolean;
   createCaptionClient?: (options: RemoteCaptionOptions) => RemoteCaptionClient;
@@ -87,6 +94,7 @@ type Delivery = {
   energySamples: number;
   peak: number;
   providerElapsedMs?: number;
+  prefixSequence?: number;
   sealed: boolean;
   timer: ReturnType<typeof setTimeout>;
 };
@@ -189,7 +197,13 @@ export class ContinuousTranslationBridge {
 
   private readonly nanoPlaybackWaiters = new Set<() => void>();
 
-  private readonly nanoQueue: { text: string; at: number }[] = [];
+  private readonly nanoQueue: {
+    text: string;
+    at: number;
+    prefixSequence?: number;
+  }[] = [];
+
+  private prefixSequence = 0;
 
   private nanoBusy = false;
 
@@ -223,7 +237,12 @@ export class ContinuousTranslationBridge {
     } catch {
       // A diagnostic clock is never an audio dependency.
     }
-    if (options.localVoice) {
+    if (
+      options.outgoingPrefixes &&
+      (!options.localVoice || !options.remoteCaptions)
+    )
+      throw new Error('INVALID_PREFIX_BRIDGE_OPTIONS');
+    if (options.localVoice && !options.outgoingPrefixes) {
       this.nanoCommitter = createNanoTextCommitter({
         boundaryDelayMs: options.sentenceBoundaryDelayMs,
         clauseBoundaries: options.remoteCaptions === true,
@@ -392,13 +411,23 @@ export class ContinuousTranslationBridge {
     this.listen(socket, 'error', () =>
       this.shutdown(`continuous_phone_error:${role}`),
     );
+    // Prepare the new local text pipeline while the destination is ringing.
+    // Microphone packets remain ignored until both authenticated legs attach.
+    if (
+      role === 'local' &&
+      this.options.outgoingPrefixes &&
+      !this.providers.has('local')
+    )
+      this.startProvider('local');
     if (this.phones.size === 2 && !this.started) {
       this.started = true;
       for (const source of ROLES) {
         if (this.closed) break;
-        if (source === 'remote' && this.options.remoteCaptions)
-          this.startCaptions();
-        else this.startProvider(source);
+        if (!this.providers.has(source)) {
+          if (source === 'remote' && this.options.remoteCaptions)
+            this.startCaptions();
+          else this.startProvider(source);
+        }
       }
     }
   }
@@ -435,38 +464,41 @@ export class ContinuousTranslationBridge {
     };
     this.providers.set(role, provider);
     try {
-      const client = (
-        this.options.createClient || createContinuousTranslationClient
-      )({
-        apiKey: this.options.apiKey,
-        targetLanguage: role === 'local' ? 'en' : 'zh',
-        proxyUrl: this.options.proxyUrl,
-        timeoutMs: this.options.sessionTimeoutMs,
-        createWebSocket: this.options.createWebSocket,
-        onAudio: (pcm, metadata) => this.onAudio(role, provider, pcm, metadata),
-        onSessionMetadata: (metadata) => {
-          if (this.closed) return;
-          try {
-            this.options.onProviderDiagnostic?.({
-              pipelineId: this.pipelineId,
-              role,
-              ...metadata,
-              observedAtMs: this.diagnosticTime(),
+      const client =
+        role === 'local' && this.options.outgoingPrefixes
+          ? this.startPrefixClient(provider)
+          : (this.options.createClient || createContinuousTranslationClient)({
+              apiKey: this.options.apiKey,
+              targetLanguage: role === 'local' ? 'en' : 'zh',
+              proxyUrl: this.options.proxyUrl,
+              timeoutMs: this.options.sessionTimeoutMs,
+              createWebSocket: this.options.createWebSocket,
+              onAudio: (pcm, metadata) =>
+                this.onAudio(role, provider, pcm, metadata),
+              onSessionMetadata: (metadata) => {
+                if (this.closed) return;
+                try {
+                  this.options.onProviderDiagnostic?.({
+                    pipelineId: this.pipelineId,
+                    role,
+                    ...metadata,
+                    observedAtMs: this.diagnosticTime(),
+                  });
+                } catch {
+                  // Metadata reporting must never interrupt audio or readiness.
+                }
+              },
+              onTranscript: (delta) => this.onTranscript(role, provider, delta),
+              ...(role === 'local' && this.nanoCommitter
+                ? {
+                    onTranslatedText: (delta: string) =>
+                      this.nanoCommitter.append(delta),
+                  }
+                : {}),
+              // Never expose provider errors, credentials, audio or transcripts.
+              onError: () =>
+                this.shutdown(`continuous_provider_failed:${role}`),
             });
-          } catch {
-            // Metadata reporting must never interrupt audio or readiness.
-          }
-        },
-        onTranscript: (delta) => this.onTranscript(role, provider, delta),
-        ...(role === 'local' && this.nanoCommitter
-          ? {
-              onTranslatedText: (delta: string) =>
-                this.nanoCommitter.append(delta),
-            }
-          : {}),
-        // Never expose provider errors, credentials, audio or transcripts.
-        onError: () => this.shutdown(`continuous_provider_failed:${role}`),
-      });
       provider.client = client;
       if (this.closed) {
         client.abort();
@@ -495,6 +527,66 @@ export class ContinuousTranslationBridge {
     } catch {
       this.shutdown(`continuous_provider_failed:${role}`);
     }
+  }
+
+  private startPrefixClient(provider: Provider): ContinuousTranslationClient {
+    const prefixOptions: OutgoingPrefixOptions = {
+      apiKey: this.options.apiKey,
+      proxyUrl: this.options.proxyUrl,
+      textModel: this.options.model,
+      timeoutMs: this.options.sessionTimeoutMs,
+      createWebSocket: this.options.createWebSocket,
+      now: this.options.now,
+      onTranscript: (event) => {
+        if (this.closed || this.providers.get('local') !== provider) return;
+        try {
+          this.options.onTranscript(event);
+        } catch {
+          /* UI only. */
+        }
+      },
+      onCommit: (segment) => {
+        if (this.closed || this.providers.get('local') !== provider) return;
+        this.prefixSequence += 1;
+        this.enqueueNano(segment.text, this.prefixSequence);
+        try {
+          const at = (this.options.now || Date.now)();
+          this.options.onMetric?.({
+            role: 'local',
+            name: 'prefix_source_to_submit_ms',
+            scope: 'text_boundary',
+            at,
+            pipelineId: this.pipelineId,
+            prefixSequence: this.prefixSequence,
+            value: Math.max(0, at - segment.firstDeltaAt),
+          });
+        } catch {
+          /* Diagnostics cannot delay voice. */
+        }
+      },
+      onTiming: ({ name, value }) => {
+        if (this.closed) return;
+        try {
+          this.options.onMetric?.({
+            role: 'local',
+            name,
+            value,
+            scope:
+              name === 'prefix_translation_ms'
+                ? 'provider_generation'
+                : 'text_boundary',
+            at: (this.options.now || Date.now)(),
+            pipelineId: this.pipelineId,
+          });
+        } catch {
+          /* Diagnostics only. */
+        }
+      },
+      onError: () => this.shutdown('prefix_provider_failed:local'),
+    };
+    return (this.options.createPrefixClient || createOutgoingPrefixClient)(
+      prefixOptions,
+    );
   }
 
   private captionState(state: 'connecting' | 'ready' | 'failed'): void {
@@ -692,7 +784,7 @@ export class ContinuousTranslationBridge {
     // together with all remaining audio rather than speaking after departure.
   }
 
-  private enqueueNano(text: string): void {
+  private enqueueNano(text: string, prefixSequence?: number): void {
     if (this.closed) return;
     // Old mode keeps four whole-sentence jobs. Finer live clauses use the same
     // maximum text allowance (4 * 240 chars) with a separate bounded job count;
@@ -709,7 +801,11 @@ export class ContinuousTranslationBridge {
       this.shutdown(`${this.voicePrefix}_synthesis_queue_full:local`);
       return;
     }
-    this.nanoQueue.push({ text, at: (this.options.now || Date.now)() });
+    this.nanoQueue.push({
+      text,
+      at: (this.options.now || Date.now)(),
+      ...(prefixSequence === undefined ? {} : { prefixSequence }),
+    });
     this.processNano().catch(() =>
       this.shutdown(`${this.voicePrefix}_synthesis_failed:local`),
     );
@@ -803,6 +899,7 @@ export class ContinuousTranslationBridge {
   private async streamLocalVoice(job: {
     text: string;
     at: number;
+    prefixSequence?: number;
   }): Promise<void> {
     const voice = this.options.localVoice;
     const converter = new Pcm24kToPcmu();
@@ -829,6 +926,10 @@ export class ContinuousTranslationBridge {
           value: Math.max(0, at - job.at),
           queueMs: Math.max(0, startedAt - job.at),
           generationMs: Math.max(0, at - startedAt),
+          pipelineId: this.pipelineId,
+          ...(job.prefixSequence === undefined
+            ? {}
+            : { prefixSequence: job.prefixSequence }),
           at,
         });
       } catch {
@@ -879,18 +980,27 @@ export class ContinuousTranslationBridge {
       // Waiting on phone marks also stops pulling new native chunks. The worker
       // separately bounds pending output; overload fails instead of losing words.
       // eslint-disable-next-line no-await-in-loop -- Stream FIFO backpressure.
-      await this.forwardLocalVoice(converter.push(generated.pcm));
+      await this.forwardLocalVoice(
+        converter.push(generated.pcm),
+        job.prefixSequence,
+      );
     }
     if (this.closed) return;
     if (!totalBytes) throw new Error('LOCAL_VOICE_EMPTY_STREAM');
     // Flush once, only on a clean end. No padding between native chunks.
-    await this.forwardLocalVoice(converter.push(Buffer.alloc(384)));
+    await this.forwardLocalVoice(
+      converter.push(Buffer.alloc(384)),
+      job.prefixSequence,
+    );
     // Completion is bridge consumption, including queue/phone backpressure; it
     // is not an isolated measure of Python computation or actual phone hearing.
     if (!this.closed) metric('pocket_synthesis_complete_ms');
   }
 
-  private async forwardLocalVoice(audio: Buffer): Promise<void> {
+  private async forwardLocalVoice(
+    audio: Buffer,
+    prefixSequence?: number,
+  ): Promise<void> {
     for (
       let offset = 0;
       offset < audio.length && !this.closed;
@@ -908,7 +1018,7 @@ export class ContinuousTranslationBridge {
         });
       }
       if (this.closed) return;
-      this.forward('local', chunk);
+      this.forward('local', chunk, undefined, prefixSequence);
     }
   }
 
@@ -1012,6 +1122,7 @@ export class ContinuousTranslationBridge {
     role: TranslationRole,
     audio: Buffer,
     metadata?: ContinuousTranslationAudioMetadata,
+    prefixSequence?: number,
   ): void {
     if (this.closed || !audio.length) return;
     const recipientRole = opposite(role);
@@ -1049,6 +1160,7 @@ export class ContinuousTranslationBridge {
         energySquares: 0,
         energySamples: 0,
         peak: 0,
+        ...(prefixSequence === undefined ? {} : { prefixSequence }),
         ...(Number.isSafeInteger(metadata?.providerElapsedMs) &&
         metadata.providerElapsedMs >= 0 &&
         metadata.providerElapsedMs <= 7 * 24 * 60 * 60 * 1000
@@ -1138,6 +1250,9 @@ export class ContinuousTranslationBridge {
         sentBytes: delivery.sentBytes,
         pipelineId: this.pipelineId,
         deliveryId: delivery.name,
+        ...(delivery.prefixSequence === undefined
+          ? {}
+          : { prefixSequence: delivery.prefixSequence }),
         clock: 'bridge_monotonic',
         observedAtMs: this.diagnosticTime(),
         createdAtMs: delivery.createdAtMs,

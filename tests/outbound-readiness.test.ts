@@ -446,6 +446,7 @@ test('provider verification records the selected engine separately from the defa
     'nano-captions',
     'continuous-captions',
     'pocket-captions',
+    'pocket-prefix',
   ]);
   assert.deepEqual(status.json().pocketVoice, {
     state: 'not_started',

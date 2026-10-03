@@ -143,7 +143,7 @@ try {
         & (Join-Path $PSScriptRoot 'Start-PhoneOnline.ps1')
     }
     if (-not $NoOpen) {
-        $desktopUrl = $baseUrl + '/#token=' + [Uri]::EscapeDataString($localToken) + '&online=1&engine=pocket-captions'
+        $desktopUrl = $baseUrl + '/#token=' + [Uri]::EscapeDataString($localToken) + '&online=1&engine=pocket-prefix'
         $browserCandidates = @(
             (Join-Path ${env:ProgramFiles(x86)} 'Microsoft\Edge\Application\msedge.exe'),
             (Join-Path $env:ProgramFiles 'Microsoft\Edge\Application\msedge.exe'),

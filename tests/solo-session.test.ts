@@ -130,6 +130,7 @@ for (const engine of [
   'nano-captions',
   'continuous-captions',
   'pocket-captions',
+  'pocket-prefix',
 ] as const)
   test(`${engine}: caption failure is visible in reconnect snapshots but never blocks voice readiness or ends the session`, async (t) => {
     const f = fixture(t);
@@ -465,6 +466,7 @@ for (const engine of [
   'legacy',
   'continuous-captions',
   'pocket-captions',
+  'pocket-prefix',
 ] as const)
   test(`${engine}: five-minute limit applies only to the Pocket pilot and cleans up both legs`, async (t) => {
     t.mock.timers.enable({ apis: ['setTimeout'] });
@@ -486,7 +488,7 @@ for (const engine of [
     assert.equal(f.manager.activeSession.status, 'active');
     t.mock.timers.tick(1);
     await tick();
-    if (engine === 'pocket-captions') {
+    if (engine === 'pocket-captions' || engine === 'pocket-prefix') {
       assert.equal(f.manager.activeSession, null);
       assert.deepEqual([...f.ended].sort(), [localSid, remoteSid].sort());
       assert.equal(f.bridgeClosed(), 1);

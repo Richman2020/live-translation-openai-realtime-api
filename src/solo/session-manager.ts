@@ -79,6 +79,7 @@ export function createSessionBridge(
     return new ContinuousTranslationBridge({
       ...settings,
       remoteCaptions: true,
+      outgoingPrefixes: settings.translationEngine === 'pocket-prefix',
       ...(localVoice ? { localVoice } : {}),
     });
   }

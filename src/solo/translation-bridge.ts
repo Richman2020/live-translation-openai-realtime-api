@@ -24,9 +24,14 @@ export type TranslationMetric = {
     | 'pocket_boundary_wait_ms'
     | 'pocket_text_to_first_chunk_ms'
     | 'pocket_text_to_first_voiced_ms'
-    | 'pocket_synthesis_complete_ms';
+    | 'pocket_synthesis_complete_ms'
+    | 'prefix_source_wait_ms'
+    | 'prefix_translation_ms'
+    | 'prefix_source_to_submit_ms';
   value: number;
   at: number;
+  pipelineId?: string;
+  prefixSequence?: number;
   scope: 'provider_generation' | 'local_synthesis' | 'text_boundary';
   transcriptionMs?: number;
   queueMs?: number;
@@ -46,6 +51,7 @@ export type CaptionState = {
 
 export type TranslationAudioDiagnostic = {
   audioKind?: 'original' | 'translation';
+  prefixSequence?: number;
   role: TranslationRole;
   recipientRole: TranslationRole;
   stage: 'generated' | 'sent' | 'playback_confirmed' | 'unconfirmed';

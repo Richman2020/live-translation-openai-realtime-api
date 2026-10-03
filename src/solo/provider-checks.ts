@@ -22,6 +22,10 @@ import {
 import { checkNanoVoice, checkNanoCaptionVoice } from './nano-runtime';
 import { checkPocketVoice } from './pocket-runtime';
 import { checkRemoteCaption } from './remote-caption-client';
+import {
+  createOutgoingPrefixClient,
+  type OutgoingPrefixClient,
+} from './outgoing-prefix-client';
 
 type Check = {
   name: string;
@@ -195,6 +199,52 @@ export function checkRealtime(
   });
 }
 
+/** Check prefix recognition and text translation handshakes; never submit audio. */
+export async function checkPrefixRealtime(
+  config: SoloConfig,
+  createSocket?: CreateSocket,
+  timeoutMs = 15000,
+): Promise<Check> {
+  let client: OutgoingPrefixClient | undefined;
+  try {
+    client = createOutgoingPrefixClient({
+      apiKey: config.OPENAI_API_KEY,
+      proxyUrl: config.OPENAI_PROXY_URL,
+      createWebSocket: createSocket,
+      timeoutMs,
+      onTranscript: () => {},
+      onCommit: () => {},
+      onError: () => {},
+    });
+    await client.ready;
+    return {
+      name: 'openaiPrefix',
+      status: 'passed',
+      code: 'PREFIX_SESSION_READY',
+    };
+  } catch (error) {
+    const safeCodes = new Set([
+      'PREFIX_READY_TIMEOUT',
+      'PREFIX_ASR_SESSION_MISMATCH',
+      'PREFIX_TEXT_SESSION_MISMATCH',
+      'PREFIX_ASR_REJECTED',
+      'PREFIX_TRANSLATION_REJECTED',
+      'PREFIX_CONNECTION_FAILED',
+      'PREFIX_HANDSHAKE_REJECTED',
+      'PREFIX_CLOSED_UNEXPECTEDLY',
+      'PREFIX_SEND_FAILED',
+      'PREFIX_SEND_UNAVAILABLE',
+    ]);
+    const code =
+      error instanceof Error && safeCodes.has(error.message)
+        ? error.message
+        : 'PREFIX_CONNECTION_FAILED';
+    return { name: 'openaiPrefix', status: 'failed', code };
+  } finally {
+    client?.abort();
+  }
+}
+
 export async function checkTranslationEngine(
   config: SoloConfig,
   engine: TranslationEngine,
@@ -213,16 +263,21 @@ export async function checkTranslationEngine(
       if (local.status !== 'passed') return local;
     }
     const [translation, caption] = await Promise.all([
-      checkContinuousRealtime(config, createSocket, timeoutMs, ['en']),
+      engine === 'pocket-prefix'
+        ? checkPrefixRealtime(config, createSocket, timeoutMs)
+        : checkContinuousRealtime(config, createSocket, timeoutMs, ['en']),
       checkRemoteCaption(config, createSocket, timeoutMs),
     ]);
     if (translation.status !== 'passed') return translation;
     if (caption.status !== 'passed') return caption;
     if (usesPocketVoice(engine))
       return {
-        name: 'pocketCaptions',
+        name: engine === 'pocket-prefix' ? 'pocketPrefix' : 'pocketCaptions',
         status: 'passed',
-        code: 'POCKET_CAPTIONS_READY',
+        code:
+          engine === 'pocket-prefix'
+            ? 'POCKET_PREFIX_READY'
+            : 'POCKET_CAPTIONS_READY',
       };
     return {
       name: usesNanoVoice(engine) ? 'nanoCaptions' : 'continuousCaptions',
@@ -382,6 +437,7 @@ export async function verifyProviders(
           name: {
             'nano-captions': 'nanoCaptions',
             'pocket-captions': 'pocketCaptions',
+            'pocket-prefix': 'pocketPrefix',
             'continuous-captions': 'continuousCaptions',
             'continuous-nano': 'nanoTranslation',
             continuous: 'openaiContinuous',

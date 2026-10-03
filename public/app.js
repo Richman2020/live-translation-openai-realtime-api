@@ -147,7 +147,7 @@
     if (accessToken && fragment.get('online') === '1') {
       preferences.keepOnline = true;
       saveLocal(preferencesKey, preferences);
-      if (fragment.get('engine') === 'pocket-captions') desktopEngine = 'pocket-captions';
+      if (['pocket-captions', 'pocket-prefix'].includes(fragment.get('engine'))) desktopEngine = fragment.get('engine');
     }
     if (fragment.has('token')) {
       // Remove the credential from browser history even if storage is unavailable.
@@ -168,6 +168,8 @@
     if (typeof value !== 'string' || !value.trim()) return fallback;
     if (errorMessages[value]) return errorMessages[value];
     if (/^CAPTION_[A-Z_]+$/.test(value)) return '回程字幕连接未通过验证，请检查语音识别和文字翻译的模型权限与网络后重试。';
+    if (value === 'POCKET_PREFIX_READY') return 'Pocket 边讲边播、固定男声与回程字幕连接已就绪；实际起声等待仍需电话测试。';
+    if (/^(?:PREFIX_|prefix_)/i.test(value)) return '边讲边播连接或短词组处理未通过，请结束后重新验证新测试版；也可选择原 Pocket 版对照。';
     if (value === 'POCKET_CAPTIONS_READY') return 'Pocket 固定男声已预热，出程翻译与回程字幕连接已就绪。';
     if (value === 'POCKETVOICE_READY') return 'Pocket 固定男声服务已预热。';
     if (/^(?:POCKETVOICE_|pocket_)/i.test(value)) {
@@ -392,12 +394,15 @@
       ? (usesPocketVoice(snapshot.value) ? '正在检查翻译与本机 Pocket 固定男声，首次准备可能需要约 2 分钟；尚未拨出，请等待。' : '正在检查翻译与本机本人声线，首次准备可能需要约 2 分钟；尚未拨出，请等待。')
       : snapshot.sessionEngine
       ? `本通电话使用：${translationEngineLabel(snapshot.sessionEngine)}。通话结束后才能换版本。`
+      : snapshot.selected === 'pocket-prefix' ? '下一通使用 Pocket 边讲边播新测试版：已确认的短词组依次配音，后文继续接收；你听英文原声、看中英字幕。实际起声等待与衔接需测试，接通后最多 5 分钟。'
       : snapshot.selected === 'pocket-captions' ? '下一通：对方听 Michael 固定美式男声，完整英文小节确认后流式播放；你听英文原声、看中英字幕。本轮电话测试接通后最多 5 分钟，到时自动挂断。'
       : snapshot.selected === 'continuous-captions' ? '下一通使用连续直出＋中文字幕测试候选：对方听模型声音的连续英文；你听英文原声、看中英字幕。'
       : snapshot.selected === 'nano-captions' ? '下一通：你听英文原声、看中英字幕；对方听本人英文 B 版，逐句输出、稍慢且音量增强。'
       : snapshot.selected === 'continuous-nano' ? '下一通使用本人声线实验版。分句合成会增加等待，请用完整短句测试。'
       : snapshot.selected === 'continuous' ? '下一通使用连续翻译实验版。请与当前版本分两次通话比较效果。' : '下一通使用当前版本。';
-    $('translation-engine-help').textContent = snapshot.value === 'pocket-captions'
+    $('translation-engine-help').textContent = snapshot.value === 'pocket-prefix'
+      ? '电脑中文 → 实时识别 → 已确认的英文短词组 → Pocket 固定美式男声流式播放。无需等整段讲完；否定、数字和时间仍需足够上下文。实际等待与短词组衔接待本轮验收，尚不保证 0.5–1 秒。回程保持英文原声与中英字幕。拨号前选择，通话中不能切换；来电保持当前版本。'
+      : snapshot.value === 'pocket-captions'
       ? '电脑中文 → 手机英文采用 Pocket TTS 的 Michael 固定美式男声。译文按明确意思小节提交，声音生成一块就发送一块，后文继续接收。对方英文原声直接送到电脑，同步中英字幕，不生成中文声音；字幕故障不阻断原声。拨号前选择，通话中不能切换；来电保持当前版本。'
       : snapshot.value === 'continuous-captions'
       ? '电脑中文 → 手机英文使用模型声音，连续译音直接送到电话，不使用本人声线。回程保持英文原声直接送到电脑，同步中英字幕，不生成中文声音；字幕故障不阻断原声。请比较实际开始出声、持续跟随和句尾等待。拨号前选择，通话中不能切换；来电保持当前版本。'
@@ -620,7 +625,9 @@
     const ownVoice = usesNanoVoice(engine);
     const pocketVoice = usesPocketVoice(engine);
     const continuous = ownVoice || captions || engine === 'continuous';
-    $('translation-timing-note').textContent = pocketVoice
+    $('translation-timing-note').textContent = engine === 'pocket-prefix'
+      ? '边讲边播按已确认的中文短词组翻译并合成固定男声，后文继续接收。识别累计计时从当前识别条目的首段文字出现开始，同一条目后续词组也从该时刻计，不是每个词组单独等待。英文生成计时为本词组提交到英文完成；首个有声数据包含合成排队。各项为最近一次记录，不能直接相加，也不包含此前识别、电话线路和耳机播放；不等于实际听见的等待。回程直接听英文原声、看中文字幕。'
+      : pocketVoice
       ? 'Pocket 在完整英文小节确认后流式合成。分节等待从首个译文字开始计；首块数据可能含静音，首个有声数据按音量能量判定。各项分别显示最近一次记录；本机计时包含排队，小节输出完成还包含播放回压，不含此前模型听译，也不等于电话传输及设备播放用时，不等于实际听见的等待。回程直接听英文原声、看中文字幕。'
       : captions && !ownVoice
       ? '出程采用模型声音的连续英文译音，直接送到电话；回程保持英文原声与中英字幕。请比较实际开始出声、持续讲话落后和句尾等待；数据块数不代表已听清，本页尚无完整电话延迟测量。'
@@ -645,7 +652,7 @@
       const timing = translationTiming.get(role);
       const seconds = value => `${(value / 1000).toFixed(2)} 秒`;
       $(`translation-timing-${role}`).textContent = pocketVoice && role === 'local'
-        ? `${target}：${timing?.boundaryWaitMs !== undefined ? `最近一次分节等待 ${seconds(timing.boundaryWaitMs)}；` : ''}${timing?.firstChunkMs !== undefined ? `首块数据 ${seconds(timing.firstChunkMs)}；` : ''}${timing?.firstVoicedMs !== undefined ? `首个有声数据 ${seconds(timing.firstVoicedMs)}（能量判定）；` : ''}${timing?.synthesisCompleteMs !== undefined ? `小节输出完成 ${seconds(timing.synthesisCompleteMs)}（含排队与播放回压）；` : ''}${timing?.firstChunkMs !== undefined || timing?.firstVoicedMs !== undefined || timing?.synthesisCompleteMs !== undefined ? '均含合成排队，不代表已听到' : '等待译文小节与流式合成计时'}`
+        ? `${target}：${timing?.sourceWaitMs !== undefined ? `识别条目首段文字 → 本词组确认 ${seconds(timing.sourceWaitMs)}（累计）；` : ''}${timing?.prefixTranslationMs !== undefined ? `英文生成 ${seconds(timing.prefixTranslationMs)}；` : ''}${timing?.sourceToSubmitMs !== undefined ? `识别条目首段文字 → 本词组提交配音 ${seconds(timing.sourceToSubmitMs)}（累计）；` : ''}${timing?.boundaryWaitMs !== undefined ? `最近一次分节等待 ${seconds(timing.boundaryWaitMs)}；` : ''}${timing?.firstChunkMs !== undefined ? `首块数据 ${seconds(timing.firstChunkMs)}；` : ''}${timing?.firstVoicedMs !== undefined ? `首个有声数据 ${seconds(timing.firstVoicedMs)}（能量判定）；` : ''}${timing?.synthesisCompleteMs !== undefined ? `小节输出完成 ${seconds(timing.synthesisCompleteMs)}（含排队与播放回压）；` : ''}${timing?.firstChunkMs !== undefined || timing?.firstVoicedMs !== undefined || timing?.synthesisCompleteMs !== undefined ? '配音计时含合成排队，不代表已听到' : engine === 'pocket-prefix' ? '等待短词组与流式合成计时' : '等待译文小节与流式合成计时'}`
         : ownVoice && role === 'local'
         ? `${target}：${timing?.boundaryWaitMs !== undefined ? `最近一次分节等待 ${seconds(timing.boundaryWaitMs)}；` : ''}${Number.isFinite(timing?.value) ? `本人声线合成 ${seconds(timing.value)}（含合成排队）` : captions ? '等待完整译文小节后合成本人声线，尚无合成计时' : '等待完整译文句子后合成本人声线，尚无合成计时'}`
         : continuous ? `${target}：${ownVoice ? '连续翻译原声' : '连续翻译'}，不使用旧版逐句停说计时` : !timing ? `${target}：尚无服务端计时` :
@@ -658,6 +665,11 @@
     if (usesPocketVoice(activeSession.translationEngine)) {
       if (value.role !== 'local' || !Number.isFinite(value.value) || value.value < 0 || !Number.isFinite(value.at)) return;
       const metrics = {
+        ...(activeSession.translationEngine === 'pocket-prefix' ? {
+          prefix_source_wait_ms: ['text_boundary', 'sourceWaitMs'],
+          prefix_translation_ms: ['provider_generation', 'prefixTranslationMs'],
+          prefix_source_to_submit_ms: ['text_boundary', 'sourceToSubmitMs'],
+        } : {}),
         pocket_boundary_wait_ms: ['text_boundary', 'boundaryWaitMs'],
         pocket_text_to_first_chunk_ms: ['local_synthesis', 'firstChunkMs'],
         pocket_text_to_first_voiced_ms: ['local_synthesis', 'firstVoicedMs'],
