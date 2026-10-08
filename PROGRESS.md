@@ -1,8 +1,14 @@
 # 项目进度与交接
 
-更新日期：2026-10-03。共享仓库：<https://github.com/Richman2020/live-translation-openai-realtime-api>。
+更新日期：2026-10-08。共享仓库：<https://github.com/Richman2020/live-translation-openai-realtime-api>。
 
 需求见 [PROJECT_BRIEF.md](PROJECT_BRIEF.md)，工作规则见 [AGENTS.md](AGENTS.md)，运行步骤见 [LOCAL_SETUP.md](LOCAL_SETUP.md)，后续执行入口见 [LOCAL_CODEX_HANDOFF.md](LOCAL_CODEX_HANDOFF.md)。
+
+## 最新检查：返回后的通话预检（2026-10-08）
+
+- 用户隔数日返回准备测试。本机及远端开发分支代码均为84279a8，工作区检查无旧未提交修改；后台CONNECTED、Pocket ready、号码仍尾号5995、无活动通话，没有重启或拨号。
+- 10:31（北京时间）重新验证pocket-prefix：账户、号码、TwiML App和POCKET_PREFIX_READY四项全部通过，公网PUBLIC_CALLBACK_READY，实际页面HTML和API均包含新候选。只验证资源及会话握手，未提交音频、生成模型输出或占电话测试分钟。
+- 可从桌面真实AI电话入口进入测试；浏览器注册/耳麦实际状态未由本轮后台检查证明，页面显示已连接/已注册后再拨号，选择「Pocket 边讲边播（新测试版）」。继续用五句长稿，接通后最多五分钟；真实耳听、持续跟随与尾部积压仍待验收，不能沿用10月3日重放数字作为本次通话成绩。
 
 ## 最新实施：Pocket 边讲边播电话候选（2026-10-03）
 
