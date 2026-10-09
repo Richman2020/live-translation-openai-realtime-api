@@ -34,14 +34,18 @@ let nextId = 0;
 const pending = new Map();
 const faults = [];
 const requests = [];
+let browserStderr = '';
 const pause = ms => new Promise(done => setTimeout(done, ms));
-async function eventually(action, timeout = 10000) {
+async function eventually(action, timeout = 10000, stage = 'Page') {
   const end = Date.now() + timeout;
+  let lastError;
   while (Date.now() < end) {
-    try { const value = await action(); if (value) return value; } catch { /* Boot is asynchronous. */ }
+    try { const value = await action(); if (value) return value; } catch (error) { lastError = error.message; }
+    if (chrome && (chrome.exitCode !== null || chrome.signalCode !== null))
+      throw new Error(`${stage}: Chromium exited (${chrome.exitCode ?? chrome.signalCode}). ${browserStderr}`);
     await pause(50);
   }
-  throw new Error('Offline browser readiness timed out');
+  throw new Error(`${stage}: offline browser readiness timed out after ${timeout} ms. ${lastError || ''} ${browserStderr}`);
 }
 function send(method, params = {}) {
   const id = ++nextId;
@@ -58,10 +62,14 @@ async function evaluate(expression) {
 }
 
 try {
-  chrome = spawn(executable, ['--headless', '--disable-gpu', '--no-sandbox', '--disable-dev-shm-usage', '--disable-background-networking', '--no-first-run', '--no-default-browser-check', '--remote-debugging-port=0', `--user-data-dir=${profile}`, 'about:blank'], { stdio: 'ignore', detached: process.platform !== 'win32' });
+  chrome = spawn(executable, ['--headless', '--disable-gpu', '--no-sandbox', '--disable-dev-shm-usage', '--disable-background-networking', '--no-first-run', '--no-default-browser-check', '--remote-debugging-port=0', `--user-data-dir=${profile}`, 'about:blank'], { stdio: ['ignore', 'ignore', 'pipe'], detached: process.platform !== 'win32' });
+  chrome.stderr.on('data', bytes => {
+    // Fresh synthetic profile only. Omit the debugging websocket capability.
+    browserStderr = (browserStderr + String(bytes).replace(/DevTools listening on[^\r\n]*/g, '[DevTools ready]')).slice(-4000);
+  });
   chrome.on('error', error => faults.push(String(error)));
-  const port = await eventually(async () => Number((await readFile(join(profile, 'DevToolsActivePort'), 'utf8')).split('\n')[0]));
-  const target = await eventually(async () => (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()).find(item => item.type === 'page'));
+  const port = await eventually(async () => Number((await readFile(join(profile, 'DevToolsActivePort'), 'utf8')).split('\n')[0]), 30000, 'Chromium startup');
+  const target = await eventually(async () => (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()).find(item => item.type === 'page'), 10000, 'DevTools target');
   socket = new WebSocket(target.webSocketDebuggerUrl);
   await new Promise((done, reject) => { socket.once('open', done); socket.once('error', reject); });
   socket.on('message', data => {
@@ -75,7 +83,7 @@ try {
   await send('Runtime.enable'); await send('Network.enable'); await send('Page.enable');
   await send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
   await send('Page.navigate', { url: `${origin}/conversation-demo.html` });
-  await eventually(() => evaluate('window.conversationDemo ? true : false'));
+  await eventually(() => evaluate('window.conversationDemo ? true : false'), 10000, 'Conversation module');
   const checks = [];
   function equal(actual, expected, label) { assert.deepEqual(actual, expected, label); checks.push(label); }
   await evaluate(`document.getElementById('demo-step').click(); window.firstConversationRow = document.querySelector('[data-utterance-id="greeting"]');`);
