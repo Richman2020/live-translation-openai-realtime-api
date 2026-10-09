@@ -26,6 +26,11 @@ export async function startControlledWorkbench() {
   let canonicalConversation = false;
   let captionState = null;
   let localError = '';
+  let loginAvailable = false;
+  let authPending = false;
+  let authCancelling = false;
+  let authGeneration = 0;
+  let loginAbort = null;
   const history = [];
   const terminal = status => ['completed', 'failed', 'canceled', 'busy', 'no-answer', 'rejected'].includes(status);
   const statusNames = { connecting: '正在连接', ringing: '等待对方接听', active: '通话中', ending: '线路清理中', completed: '通话已结束', failed: '通话未完成' };
@@ -35,6 +40,7 @@ export async function startControlledWorkbench() {
     preparing: '正在准备通话', microphone: '正在准备麦克风', creating: '正在准备电话许可',
     voice: '正在准备 Voice 加入许可', connecting: '正在连接浏览器电话', ending: '正在确认线路清理',
     releasing: '正在释放控制权', cleanup: '正在确认线路清理',
+    'logging-out': '正在退出登录',
   };
   const conversation = createConversationView({
     container: $('transcript'), scrollContainer: $('transcript-scroll'), emptyNode: $('empty-conversation'),
@@ -83,6 +89,14 @@ export async function startControlledWorkbench() {
 
   function render(snapshot) {
     if (!snapshot || disposed) return;
+    if ($('google-login')) {
+      $('google-login').hidden = !loginAvailable || snapshot.authenticated;
+      $('google-login').disabled = authPending;
+      $('google-logout').hidden = !loginAvailable || !snapshot.authenticated && !authPending;
+      $('google-logout').disabled = authPending || !snapshot.authenticated;
+      $('google-login-cancel').hidden = !authPending || snapshot.phase === 'logging-out';
+      $('google-login-cancel').disabled = authCancelling;
+    }
     document.documentElement.dataset.controllerPhase = snapshot.phase;
     const pending = Boolean(phaseNames[snapshot.phase]);
     const lease = snapshot.lease;
@@ -118,7 +132,7 @@ export async function startControlledWorkbench() {
     document.querySelector('.availability').classList.toggle('ready', Boolean(lease));
     text('readiness-title', phaseNames[snapshot.phase] || controlText);
     text('readiness-copy', snapshot.cleanupPending ? '两腿线路结束尚未确认；退出或刷新不能证明已挂断。'
-      : !snapshot.authenticated ? '需要已验证的登录会话。此页面不提供或猜测登录方式。'
+      : !snapshot.authenticated ? loginAvailable ? '使用 Google 登录；仅服务端允许的已验证账号可进入。' : '需要已验证的登录会话。此入口尚未配置登录。'
         : snapshot.connection !== 'connected' ? '状态中断会暂停续租；重连只读状态，不会延长控制权。'
           : snapshot.busy && !live && !pending ? '服务仍在确认准备或清理状态，暂不能开始下一通。请刷新状态。'
           : lease ? `${Math.max(0, Math.ceil((lease.expiresAt - Date.now()) / 1000))} 秒内有效。页面可见且状态连接时按租约续租；返回页面后须显式续约。`
@@ -299,6 +313,10 @@ export async function startControlledWorkbench() {
   document.querySelector('.preference-row p').textContent = '可见且状态连接时续租；其他标签只读。退出工作台会结束并释放控制。';
   const renew = document.createElement('button'); renew.id = 'renew-control'; renew.className = 'secondary-button'; renew.textContent = '续约控制权'; renew.disabled = true;
   $('enable-device').before(renew);
+  for (const [id, label] of [['google-login', 'Google 登录'], ['google-logout', '退出登录'], ['google-login-cancel', '取消登录']]) {
+    const button = document.createElement('button'); button.id = id; button.className = 'secondary-button'; button.textContent = label; button.hidden = true;
+    renew.before(button);
+  }
   const refresh = document.querySelector('.preview-notice .text-button'); refresh.removeAttribute('data-navigate'); refresh.id = 'refresh-controlled-state'; refresh.textContent = '刷新状态';
   const engine = $('translation-engine'); engine.replaceChildren(new Option('Pocket Michael 边讲边播', 'pocket-prefix')); engine.disabled = true;
   text('translation-engine-help', '中文按可靠小节译成英文，由固定 Michael 声音输出。对方英文原声直达，中文字幕独立更新。');
@@ -313,7 +331,7 @@ export async function startControlledWorkbench() {
   $('history-view').querySelector('.page-heading p').textContent = '只保留当前页面收到的文字；不写入浏览器存储，刷新后不会恢复。';
   text('clear-history', '清空过去记录');
   $('settings-view').querySelector('.page-heading h1').textContent = '准备受控电话接入。';
-  $('settings-view').querySelector('.page-heading p').textContent = '登录与持久存储方案尚待决定，此页面不编辑凭据或创建新权限。';
+  $('settings-view').querySelector('.page-heading p').textContent = '登录由服务端明确配置；本页不编辑凭据或创建新权限。持久电话许可与恢复仍须完成。';
   $('settings-view').querySelector('.settings-grid').hidden = true;
   document.querySelector('[data-view="settings"]').lastChild.textContent = '接入说明';
   $('help-dialog').querySelector('h2').textContent = '先取得控制权，再开始通话。';
@@ -340,6 +358,54 @@ export async function startControlledWorkbench() {
     localError = ''; eventRetries = 0; stopEvents(); client.setConnectionState(false);
     client.refresh().then(() => connectEvents()).catch(() => {});
   };
+  const loginRequest = async (path, signal) => {
+    const response = await fetch(path, { method: 'POST', credentials: 'same-origin', cache: 'no-store',
+      headers: { 'content-type': 'application/json', 'x-phone-login': 'start' }, body: '{}', signal });
+    const value = await response.json();
+    if (!response.ok) throw new Error('登录请求未能确认，请刷新后重试。');
+    return value;
+  };
+  const cancelLogin = async () => {
+    if (authCancelling || disposed) return;
+    const generation = ++authGeneration; loginAbort?.abort();
+    const controller = new AbortController(); loginAbort = controller;
+    authPending = true; authCancelling = true; render(client.state);
+    const timeout = setTimeout(() => controller.abort(), 10000);
+    try { await loginRequest('/auth/google/cancel', controller.signal); }
+    catch { if (!disposed && generation === authGeneration) note('登录取消尚未确认，请刷新后重新开始。'); }
+    finally {
+      clearTimeout(timeout);
+      if (!disposed && generation === authGeneration) { loginAbort = null; authPending = false; authCancelling = false; render(client.state); }
+    }
+  };
+  $('google-login').addEventListener('click', async () => {
+    if (!loginAvailable || authPending || client.state.authenticated || disposed) return;
+    const generation = ++authGeneration;
+    const controller = new AbortController(); let navigating = false;
+    authPending = true; localError = ''; loginAbort = controller; render(client.state);
+    const timeout = setTimeout(() => controller.abort(), 10000);
+    try {
+      const value = await loginRequest('/auth/google/start', controller.signal);
+      if (disposed || generation !== authGeneration || !authPending) return;
+      const destination = new URL(value.authorizationUrl);
+      if (destination.protocol !== 'https:' || destination.host !== 'accounts.google.com' || destination.pathname !== '/o/oauth2/v2/auth' || destination.username || destination.password || destination.hash)
+        throw new Error('登录提供方响应未能确认，请刷新后重试。');
+      window.location.assign(destination.href); navigating = true;
+    } catch (error) {
+      if (!disposed && generation === authGeneration) note(error.name === 'AbortError' ? '登录准备已取消或超时，请重新开始。' : '登录请求未能确认，请刷新后重试。');
+    } finally {
+      clearTimeout(timeout);
+      if (!disposed && generation === authGeneration && !navigating) { loginAbort = null; authPending = false; render(client.state); }
+    }
+  });
+  $('google-login-cancel').addEventListener('click', cancelLogin);
+  $('google-logout').addEventListener('click', async () => {
+    if (authPending || !client.state.authenticated || disposed) return;
+    authPending = true; authGeneration += 1; localError = ''; stopEvents(); clearMedia(); render(client.state);
+    try { await client.logout(); note('已退出登录。线路清理由服务器继续，未确认前不能视为挂断成功。'); }
+    catch { note('本页已停止控制，退出尚未确认。请检查连接后重新登录。'); }
+    finally { if (!disposed) { authPending = false; render(client.state); } }
+  });
   refresh.addEventListener('click', refreshState); $('refresh-status').addEventListener('click', refreshState);
   $('start-call').addEventListener('click', startCall);
   $('end-call').addEventListener('click', () => { if (!$('end-call').disabled) { localError = ''; clearMedia(); client.cancel({ releaseControl: false }).catch(() => {}); } });
@@ -366,6 +432,7 @@ export async function startControlledWorkbench() {
   window.addEventListener('offline', () => client.setConnectionState(false));
   window.addEventListener('pagehide', () => {
     if (disposed) return;
+    authGeneration += 1; loginAbort?.abort(); loginAbort = null;
     disposed = true; stopEvents(); clearInterval(clock); clearMedia(); microphone.dispose(); conversation.dispose();
     client.dispose(); document.documentElement.dataset.phoneReady = 'false';
   });
@@ -381,6 +448,13 @@ export async function startControlledWorkbench() {
     }
   }, 1000);
   client = createControllerClient({ onChange: render });
+  const statusAbort = new AbortController();
+  const statusTimeout = setTimeout(() => statusAbort.abort(), 5000);
+  try {
+    const response = await fetch('/auth/status', { credentials: 'same-origin', cache: 'no-store', signal: statusAbort.signal });
+    if (response.ok && !disposed) { const status = await response.json(); loginAvailable = status.provider === 'google' && status.enabled === true; }
+  } catch { /* Missing configuration cannot invent a login provider. */ }
+  finally { clearTimeout(statusTimeout); }
   render(client.state); renderHistory();
   await client.boot().catch(() => {});
   if (!disposed) { document.documentElement.dataset.phoneReady = 'true'; connectEvents(); }

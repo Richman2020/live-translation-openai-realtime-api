@@ -1,6 +1,6 @@
 # Pocket 云端运行兼容基础
 
-日期：2026-10-09。本轮只实现运行路径与进程清理兼容，在云端用假 worker 和离线材料验证。未下载模型、安装 Pocket Python 环境、部署服务、改 Twilio 回调或拨打电话；不能据此宣称 Linux 上真实合成、浏览器麦克风或手机通话已通过。
+日期：2026-10-09。既有里程碑实现运行路径与进程清理兼容，在云端用假 worker 和离线材料验证。最新授权允许在现有云端环境从官方来源重新取得 Pocket 必要材料，结果见 [官方材料审计](POCKET_CLOUD_MATERIALS_2026-10-09.md)：已取得固定软件包/配置/许可并解析新的依赖候选，模型入口被环境代理阻塞。未安装 Pocket Python 环境、部署服务、改 Twilio 回调或拨打电话；不能据此宣称 Linux 上真实合成、浏览器麦克风或手机通话已通过。
 
 ## 运行路径
 
@@ -29,7 +29,7 @@
 
 ## 固定引擎与离线边界
 
-沿用 [既有固定男声对照](../FIXED_US_VOICE_AB_2026-10-02.md) 的 Python 3.12、Pocket TTS 3.3.0、Torch 2.6.0+cpu 和 NumPy 2.2.6；本轮没有更改锁文件、版本、模型、随机种子、温度、CPU 线程或声音。worker 保留 Pocket/Torch 版本及 Pocket 实现、官方配置哈希检查。完整 Python 依赖冻结清单仍属于历史私有 runtime 材料，没有在当前仓库中；以后制作 Linux 镜像需先取得并审核这份清单，不能用非锁定 `pip install` 冒充可复现环境。本轮不安装或生成一份猜测的清单。
+沿用 [既有固定男声对照](../FIXED_US_VOICE_AB_2026-10-02.md) 的 Python 3.12、Pocket TTS 3.3.0、Torch 2.6.0+cpu 和 NumPy 2.2.6；本轮没有更改 Node 锁文件、引擎版本、模型、随机种子、温度、CPU 线程或声音。worker 保留 Pocket/Torch 版本及 Pocket 实现、官方配置哈希检查。完整历史 Python freeze 不在当前仓库，不从用户电脑提取。最新改为官方来源的全新 Linux binary 依赖候选：49 项精确版本/哈希，metadata 层面闭合但尚未安装和运行验证，不能称为旧 freeze 或 warm-ready 环境。制作 Linux runtime 前须审核候选及许可并另行获准安装，不能用非锁定 `pip install` 冒充可复现环境。
 
 | 本地资产 | 固定校验 |
 | --- | --- |
@@ -39,20 +39,24 @@
 
 Michael 是既有公开固定英语预设。worker 不接受 URL、下载、个人录音、克隆声音或引擎切换参数。缺失/篡改资产立即失败，不下载补齐；worker 环境继续强制 `HF_HUB_OFFLINE=1`、`TRANSFORMERS_OFFLINE=1` 并启用既有 Python socket 审计拦截。这是应用内约束，后续真实运行仍应采用限制出站网络的环境。OpenAI/Twilio 密钥、代理凭据、HF token、`PYTHONPATH` 等不继承到 Pocket 子进程，只额外传入已验证的 runtime 目录和必要系统变量。
 
-## 当前材料阻塞
+## 当前材料取得状态与阻塞
 
-2026-10-09 在云端工作区、基线 `bda4697` 做只读核查：Git 跟踪文件中没有
-Pocket 完整 Python freeze，也没有 `model.safetensors`、`michael.safetensors`、
-`tokenizer.json` 或 `english-public-local.yaml` 资产本体。当前默认
-`.runtime/pocket-tts-lab` 目录不存在；未读取或检查其它环境的私密 runtime。
-`package-lock.json` 锁定的是 Node 依赖，`scripts/rvc-probe-requirements.txt`
-用于另一项 RVC probe，都不能替代 Pocket freeze。worker 和历史记录中的固定
-版本、大小与哈希提供验真依据；资产获取脚本也不代表模型已在本工作区预置。
+2026-10-09 以 `3d4660b` 为基线按最新授权取得官方 Pocket 3.3.0 wheel（86452
+bytes）和 sdist（802539 bytes），校验 PyPI SHA256；wheel 实现和 English 配置
+与现有 worker 锁定哈希完全一致。取得固定源码/许可、Torch CPU metadata 和
+NumPy metadata，并只读解析 49 包的新 Linux 候选，未安装/执行下载代码。
+已在 ignored `.runtime/pocket-tts-lab` 创建审计缓存和仅替换本地路径的 YAML。
 
-因此完整依赖清单及匹配资产仍须作为已审核材料另行提供，之后才可准备可复现
-Linux runtime 和验收真实 warm。此次不从用户电脑提取、不下载模型、不安装或
-凭主要版本号补写 freeze。持久预算/恢复与最少部署输入见
-[事务与恢复门槛](CLOUD_TRANSACTION_RECOVERY.md)。
+`model.safetensors`、`michael.safetensors`、`tokenizer.json` 仍不存在；三项实际
+收到 0 bytes。原始 `huggingface.co` 的 HTTPS CONNECT 被当前环境代理以 403
+拒绝，标准网络权限和自动审查升级执行也无法通过；未到供应方/CDN，未换镜像
+或绕过代理。完整来源、大小、哈希、候选清单及下一步见 [材料审计](POCKET_CLOUD_MATERIALS_2026-10-09.md)。
+
+历史完整 freeze 缺失不再要求用户电脑补取，但新候选必须独立审查/安装/运行
+验证；当前系统没有 Pocket/Torch、NumPy 版本也不匹配。官方访问、资产、完整
+wheelhouse 与安装许可齐备后才可验收真实 Linux warm。`package-lock.json` 和
+另一项 RVC probe requirements 都不能替代此 Python 环境。持久预算/恢复与最少
+部署输入见 [事务与恢复门槛](CLOUD_TRANSACTION_RECOVERY.md)。
 
 ## 常驻与清理
 

@@ -1,8 +1,8 @@
 # 云电话认证、会话隔离与部署准备方案
 
-日期：2026-10-09。状态：**推荐待确认，仅文档；当前 cloud 仍拒绝启动 `CLOUD_AUTH_NOT_IMPLEMENTED`**。配置齐全不等于 ready。本轮不实现公网 API、不生成密码/凭据、不增加依赖、不部署、不改 Twilio 回调、不调用付费接口；本机 loopback 安全边界继续保留。
+日期：2026-10-09。下文保留早期密码方案供历史审查。最新决定已选择Google单个工作账号，并完成 [OIDC代码与离线浏览器验证](GOOGLE_OIDC_MILESTONE.md)，不实施下文scrypt登录推荐；真实OAuth客户端、secret和账号授权仍未完成。当前cloud仍拒绝启动 `CLOUD_AUTH_NOT_IMPLEMENTED`，配置齐全不等于ready；公网、预算和持久恢复门槛保持。
 
-后续获批里程碑实现了 [独立会话/通话授权组件](CLOUD_ACCESS_BOUNDARY.md)、[实际应用的离线接线](CLOUD_PHONE_APPLICATION_INTEGRATION.md)及[控制租约与Voice许可](CLOUD_CONTROLLER_VOICE.md)。它们要求服务端同步查询当前已验证会话，没有选择或实现本文推荐的登录方案，也没有启用生产入口；cloud guard 保持不变。GET/HEAD无Origin时采用严格same-origin Fetch Metadata，写操作/WS继续要求Origin；真实Chromium已观察同源fetch/EventSource头。owner SSE和租约/join有模拟依赖证据，生产签名器、持久预算/intent及异步后端事务仍未实现。
+后续获批里程碑实现了 [独立会话/通话授权组件](CLOUD_ACCESS_BOUNDARY.md)、[实际应用的离线接线](CLOUD_PHONE_APPLICATION_INTEGRATION.md)及[控制租约与Voice许可](CLOUD_CONTROLLER_VOICE.md)。它们要求服务端同步查询当前已验证会话；Google事务另在异步路径完成验证后提交内存当前记录。未启用生产入口，cloud guard保持不变。GET/HEAD无Origin时采用严格same-origin Fetch Metadata，写操作/WS继续要求Origin；真实Chromium已观察同源fetch/EventSource头。owner SSE和租约/join有模拟依赖证据，生产签名器、持久预算/intent及异步后端事务仍未实现。
 
 ## 推荐身份方案与现有基础
 

@@ -13,6 +13,7 @@ const messages = {
   REQUEST_FAILED: '无法完成操作。请检查连接并刷新状态。',
   INVALID_RESPONSE: '服务返回无法使用的许可，已停止本次操作。',
   VOICE_CONNECTION_NOT_READY: '电话连接许可尚未就绪；生产预算与恢复材料仍需完成。',
+  LOGOUT_UNCONFIRMED: '本页已停止控制，服务器退出尚未确认。请检查连接后重新登录。',
   INVALID_TRANSLATION_ENGINE: '请选择固定 Michael 输出的 Pocket 翻译策略。',
 };
 const fail = code => Object.assign(new Error(messages[code] || code), { code });
@@ -43,7 +44,7 @@ export function createControllerClient({
   let csrf = '', authenticated = false, readConfirmed = false, controller = null, lease = null, call = null;
   let phase = 'loading', error = null, connected = false, visible = true, busy = true;
   let cleanupPending = false, cleanupRequests = 0, disposed = false, renewPaused = false, attempt = null;
-  let generation = 0, readSequence = 0, pendingAcquire = false, pendingRenew = false;
+  let generation = 0, readSequence = 0, pendingAcquire = false, pendingRenew = false, pendingLogout = false;
   let deadlineTimer = null, renewalTimer = null;
   let engines = ['pocket-prefix', 'pocket-captions'], defaultEngine = 'pocket-prefix';
   const requests = new Set();
@@ -374,6 +375,26 @@ export function createControllerClient({
       } finally { cleanupRequests -= 1; if (!disposed) emit(); }
     },
     async revoke() { return client.cancel('CALL_CANCELLED'); },
+    async logout() {
+      if (disposed || pendingLogout || !authenticated || !csrf) throw fail('UNAUTHORIZED');
+      const capturedCsrf = csrf;
+      pendingLogout = true; generation += 1; readSequence += 1;
+      // Immediately retire every pending local owner. Server revocation and its
+      // independent call lifecycle handle cleanup even if the response is lost.
+      clearControlTimers(); rejectAttempt(attempt); attempt = null; lease = null;
+      csrf = ''; authenticated = false; readConfirmed = false; connected = false;
+      renewPaused = true; phase = 'logging-out'; error = null; emit();
+      try {
+        const value = await request('/auth/logout', {}, { capturedCsrf });
+        if (value?.ok !== true) throw fail('INVALID_RESPONSE');
+        return snapshot();
+      } catch {
+        error = safeError(fail('LOGOUT_UNCONFIRMED')); throw fail('LOGOUT_UNCONFIRMED');
+      } finally {
+        pendingLogout = false;
+        if (!disposed) { phase = 'readonly'; emit(); }
+      }
+    },
     dispose() {
       if (disposed) return;
       // Start cleanup with the captured capabilities, then erase this document.

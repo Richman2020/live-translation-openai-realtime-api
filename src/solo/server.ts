@@ -21,6 +21,11 @@ import {
 } from './cloud-voice-join';
 import { createOwnedPhoneEventStreams } from './phone-event-stream';
 import {
+  GoogleBrowserLogin,
+  GOOGLE_LOGIN_PATHS,
+  registerGoogleLoginRoutes,
+} from './google-login';
+import {
   isLocalRequest,
   sameOrigin,
   validLocalToken,
@@ -132,6 +137,7 @@ export async function buildSoloServer(
     translationReadinessChecker?: typeof checkTranslationEngine;
     providerVerifier?: typeof verifyProviders;
     browserControl?: CloudPhoneAccess;
+    googleLogin?: GoogleBrowserLogin;
   } = {},
 ) {
   // Exported builders are also entry points: never expose local control APIs by
@@ -140,6 +146,14 @@ export async function buildSoloServer(
     loadPhoneRuntime({ envPath: options.configStore?.envPath }),
   );
   const { browserControl } = options;
+  const { googleLogin } = options;
+  if (
+    googleLogin !== undefined &&
+    (!(googleLogin instanceof GoogleBrowserLogin) ||
+      !browserControl ||
+      googleLogin.policy !== browserControl.policy)
+  )
+    throw new SessionError('CLOUD_PHONE_DEPENDENCIES_REQUIRED', 503);
   if (
     browserControl !== undefined &&
     (!(browserControl instanceof CloudPhoneAccess) ||
@@ -295,6 +309,14 @@ export async function buildSoloServer(
     // never confer controller or Voice authorization.
     if (path === '/api/health' && req.method === 'GET') return undefined;
     if (path.startsWith('/voice/')) return undefined;
+    if (
+      googleLogin &&
+      Object.values(GOOGLE_LOGIN_PATHS).some((loginPath) => loginPath === path)
+    ) {
+      // Login owns its independent fixed-origin source/transaction boundary.
+      // The callback is a Google top-level navigation, never an API read/write.
+      return undefined;
+    }
     if (browserControl && path.startsWith('/api/')) {
       reply
         .header('Cache-Control', 'private, no-store')
@@ -369,6 +391,7 @@ export async function buildSoloServer(
     });
   });
   app.get('/api/health', async () => ({ appId: 'ai-phone-solo' }));
+  if (googleLogin) registerGoogleLoginRoutes(app, googleLogin);
   app.get('/health', async () => ({
     appId: 'ai-phone-solo',
     mode: 'solo',

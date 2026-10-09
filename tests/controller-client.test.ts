@@ -416,3 +416,43 @@ test('read-only cancellation and disposal never send control writes for another 
   assert.equal(posts(f).length, before); assert.equal(reader.state.phase, 'disposed');
   assert.equal(f.client.state.call.id, 'call-1'); assert.equal(f.client.state.cleanupPending, false); await f.close();
 });
+
+test('logout immediately retires local authority and late acquisition without exposing its CSRF', async () => {
+  const f = fixture(); await f.client.boot(); f.client.setConnectionState(true);
+  const acquired = deferred(); const logout = deferred();
+  f.overrides.set('/api/controller/acquire', () => acquired.promise);
+  f.overrides.set('/auth/logout', () => logout.promise);
+  const pendingAcquire = f.client.acquire().catch((error: any) => error); await flush();
+  const ending = f.client.logout(); await flush();
+  assert.equal(f.client.state.authenticated, false); assert.equal(f.client.state.lease, null);
+  assert.equal(f.client.state.canAcquire, false); assert.equal(f.client.state.canStart, false);
+  assert.equal(posts(f, '/auth/logout').length, 1);
+  assert.equal(posts(f, '/auth/logout')[0].options.headers['x-phone-csrf'], f.csrf);
+  assert.equal(JSON.stringify(f.client.state).includes(f.csrf), false);
+  await assert.rejects(f.client.logout(), { code: 'UNAUTHORIZED' });
+  acquired.resolve(response({ tabId: f.client.tabId, leaseId: f.capability, epoch: 1, expiresAt: 31000 }));
+  await pendingAcquire; logout.resolve(response({ ok: true })); await ending;
+  assert.equal(f.client.state.authenticated, false); assert.equal(f.client.state.canControl, false);
+  assert.equal(f.client.state.phase, 'readonly'); await f.close();
+});
+
+test('logout failure or timeout keeps all actions disabled and reports that server logout is unconfirmed', async () => {
+  const f = fixture(); await f.ready();
+  f.overrides.set('/auth/logout', () => response({ error: 'REQUEST_FAILED' }, 503));
+  await assert.rejects(f.client.logout(), { code: 'LOGOUT_UNCONFIRMED' });
+  assert.equal(f.client.state.authenticated, false); assert.equal(f.client.state.error.code, 'LOGOUT_UNCONFIRMED');
+  assert.equal(f.client.state.canStart, false); assert.equal(f.client.state.canRenew, false);
+  assert.equal(f.client.state.canHangup, false); await f.close();
+});
+
+test('an SDK connection resolving after successful logout is disconnected and cannot restore controls', async () => {
+  const f = fixture(); await f.ready(); const connection = deferred();
+  f.overrides.set('/auth/logout', () => response({ ok: true }));
+  const sdk = callFixture();
+  const dialing = f.client.startCall('+15550000000', { connectVoice: () => connection.promise }).catch((error: any) => error);
+  await flush(); assert.equal(f.client.state.phase, 'connecting');
+  await f.client.logout(); connection.resolve(sdk.call); await dialing; await flush();
+  assert.ok(sdk.count() >= 1); assert.equal(f.client.state.authenticated, false);
+  assert.equal(f.client.state.lease, null); assert.equal(f.client.state.canControl, false);
+  assert.equal(f.client.state.canMute, false); assert.equal(f.client.state.phase, 'readonly'); await f.close();
+});

@@ -4,14 +4,39 @@
 
 需求见 [PROJECT_BRIEF.md](PROJECT_BRIEF.md)，工作规则见 [AGENTS.md](AGENTS.md)，运行步骤见 [LOCAL_SETUP.md](LOCAL_SETUP.md)，后续执行入口见 [LOCAL_CODEX_HANDOFF.md](LOCAL_CODEX_HANDOFF.md)。
 
-## 最新实施：实际工作台控制协议与浏览器验收（2026-10-09）
+## 最新实施：Google单账号登录与Pocket官方材料审计（2026-10-09）
+
+- 从真实远端干净基线 `3d4660bcaac1beddc5c74f574329b383b8827dc5` 继续，该头 [CI run 37920837788](https://github.com/Richman2020/live-translation-openai-realtime-api/actions/runs/37920837788) 已成功；沿用 `codex/cloud-phone-conversation-20261009` / [草稿PR #3](https://github.com/Richman2020/live-translation-openai-realtime-api/pull/3)，base仍为PR #2功能分支 `df3c447`。用户明确取消不等于暂停，已选择Google和Railway Hobby；真实账号、测试电话与秘密不写仓库、示例或日志，没有连接用户电脑或覆盖并发修改。
+- 新 `GoogleOidcClient` 使用Node内置能力、固定Google端点、有界异步交换和RSA验签。校验RS256、issuer、audience/azp、时间、nonce、明确唯一邮箱及布尔verified；非Gmail工作身份必须另核验Workspace signed hd或预先确认的固定sub，不能仅相信浏览器邮箱或其后缀。重复JSON字段、非规范编码、JOSE远端密钥和普通对象身份注入拒绝；access/refresh token不保存或交网页。另只读核对官方公开discovery/JWKS，无真实token交换或账号授权。
+- 新 `GoogleBrowserLogin` 通过同一个policy显式DI接到实际服务和页面。服务器生成浏览器绑定、一次性state/nonce/PKCE；短期Lax预登录cookie适配Google跨站导航，正式随机opaque会话cookie为Secure/HttpOnly/Strict/host-only/browser-session。回调只准备结果，在最终同步onSend重新检查flow、代际、期限和旧会话后发布，取消/重新登录/退出不能被迟到回调复活。默认8小时绝对期限、15分钟闲置；读/SSE不续权，CSRF显式续期受绝对期限限制。同步resolver只查询有界当前内存记录，异步身份验证不进媒体循环。
+- 实际工作台新增Google登录、取消及退出；退出立即停止本页控制/媒体并撤销当前服务端会话，未知响应保持未确认，不报告退出成功。生产入口不注入真实客户端，两个cloud guards、loopback、严格来源与供应商验签保持；默认local、Pocket-prefix固定Michael、英文原声/中文字幕回程及配对逐句字幕保持。详见 [Google代码与真实配置门槛](docs/GOOGLE_OIDC_MILESTONE.md)。
+- Pocket按最新授权实际取得13项官方响应体，共 **1,550,363 bytes**；其中固定3.3.0 wheel/sdist共 **888,991 bytes**，逐项SHA256与官方metadata核验，包中实现/English配置与既有worker锁定哈希一致。root独立重算缓存manifest的23项文件大小/哈希通过（包含生成文件，不能把23项都称下载）。只读现有pip官方metadata形成49包精确版本/wheel哈希的新Linux候选，71条依赖关系闭合；它不是旧本机freeze、已安装环境或Linux warm验收。
+- 三项model/Michael/tokenizer实际取得 **0 bytes**，目标文件不存在。原因是当前环境代理在原始 `huggingface.co` HTTPS CONNECT阶段返回403；普通权限与自动审查批准的升级执行均相同，尚未到官方服务/CDN，不能归因为官方授权或付费门槛。已停止重试，未换镜像、清除代理、关TLS或绕过权限。当前Pocket/Torch未安装，候选兼容性/完整许可与wheelhouse仍须审查；[材料审计及完整候选](docs/POCKET_CLOUD_MATERIALS_2026-10-09.md)明确取得、生成、未取得和下一步。
+
+本轮云端Linux使用Node24.19.0/npm11.9.0、Python3.12.14/pip26.2.1和原锁定Node依赖，无新增安装或升级；package/CI只增Google浏览器命令，lock与引擎哈希不变。浏览器身份交换为显式fake RSA/JWKS，Google授权导航由CDP在外部联网前拦截；测试未创建实际Google客户端、secret、账号授权或电话供应商连接。
+
+| 验证 | 实际结果 |
+| --- | --- |
+| 新离线回归 | OIDC24项、登录17项、客户端退出新增3项通过；包含真实Fastify最终onSend等待期间cancel/new-login/logout拒绝旧callback |
+| 完整回归 | 986项：981通过、5个既有Windows专属跳过、0失败；新增44项，未删除原测试 |
+| 类型/构建/lint/语法/diff | 完整源码及全部测试类型检查、生产构建、三处修改源码ESLint、浏览器JS语法和diff通过；新浏览器脚本另作独立类型检查 |
+| Google实际Chromium | 24/24通过：原生跨站导航/Lax、Strict正式cookie、PKCE/RSA验证、CSRF、退出撤销、旧proof及callback重放；拦截Google授权导航1次，实际外部网络0、异常0、真实供应商调用0 |
+| 既有Chromium验收 | 字幕16/16、实际受控工作台47/47通过；各自外部页面请求0、异常0，受控工作台真实供应商调用0 |
+| 独立安全审查 | 最新八文件175/175通过，0失败/跳过；发现的最终发送竞态已修复并进入17项登录回归，无剩余本轮代码阻塞 |
+| Pocket只读审计 | 实际13项下载/23项缓存manifest大小及SHA256、49包候选附录与71条metadata依赖关系通过；模型0字节，未安装/执行下载代码或合成 |
+
+初次并行浏览器验收发生Google同源Other请求失效的CDP `INVALID_INTERCEPTION_ID/-32602`及受控页面控件等待超时；未将其当作通过。Google脚本增加固定安全错误类别、取消观测和拒绝回调完整渲染barrier，未忽略provider/API或其它拦截错误；具体失效请求未证实，不能断言是favicon。最终按CI相同串行方式三套浏览器均通过。
+
+忽略目录 `.runtime/google-login-browser/` 保存三张真实页面截图和验收JSON，登录后截图已实际查看；上述浏览器命令可重建证据。最终提交、精确远端CI与checkout merge映射以Git回读和草稿PR正文为准。真实OAuth客户端/所需同意屏及账号授权、工作身份hd或sub、固定域名/callback、安全secret注入、Railway资源/区域/持久化与预算/恢复仍待确认；官方模型访问和Linux warm仍阻塞。未来真人测试只限本人已提供的美国号码、Twilio+OpenAI合计最多5美元、禁止自动充值；此上限不是已经实现的持久预算，当前没有拨号或付费调用。真实麦克风/普通手机、数字否定、积压、自然度和耳听延迟均未验收；不部署、改回调、合并或自行扩展新里程碑。
+
+## 此前：实际工作台控制协议与浏览器验收（2026-10-09）
 
 - 从真实远端 `bda4697b081cb940772ec601b97dadc563922042` 的干净工作区继续；父线程与本环境已核验 [CI run 37917363596](https://github.com/Richman2020/live-translation-openai-realtime-api/actions/runs/37917363596) 整体成功。沿用 `codex/cloud-phone-conversation-20261009` / [草稿PR #3](https://github.com/Richman2020/live-translation-openai-realtime-api/pull/3)，base仍为PR #2功能分支 `df3c447`；没有切旧main、覆盖用户改动或连接用户电脑。
 - 实际 `index.html` 工作台现通过显式服务端DI的固定 `/controlled` 标记入口调用现有controller、创建、每通Voice及owned SSE协议。新增原生同源只读bootstrap，仅返回当前CSRF、controller提示、本人call及完整busy gate；不回收leaseId、Voice或私密配置。非秘密静态依赖使用独立窄allowlist和loopback/固定Host/原始歧义与转发头检查，API的严格Fetch Metadata规则不放松。默认local根入口和token/presence/设置流程保持；生产入口未注入，两个cloud启动保护继续。
 - 新页面每个document生成独立tabId，能力只留内存。领取、显式续约、释放、麦克风准备、服务器reservation和per-call SDK加入接线；其他标签只读，导航/取消/关闭也不发送无proof的控制写。重复点击、超时、断连/隐藏中的准备、迟到HTTP/麦克风/SDK、旧通话SSE事件均有代际与call ID保护，旧返回不能开启或清掉新电话。
 - SDK加入、对方接通、译音就绪分别显示，不把假准备成功视为接通；最初短票warning不提前结束有效join，已加入电话继续由当前lease/budget控制。隐藏或SSE中断期间真实SDK终止仍清理本页媒体；SSE读取/重连不续权。普通挂断保留未到期proof供幂等重试但暂停自动续租，导航/退出释放；pagehide尽力并发发送挂断/撤销，服务端到期与独立两腿清理仍兜底。结束事件不开放下一通，须fresh bootstrap确认线路和admission全部gate已清；失败继续待确认。
 - 复用既有逐句model/view和麦克风媒体所有权，固定Pocket-prefix/Michael，英文原声和旁路中文字幕回程保持。真实SSE的双向配对原译文在Chromium中显示，阅读历史暂停滚动；当前页记录仅内存，不伪装持久恢复。配对截图已实际查看，位于忽略的 `.runtime/controlled-browser/conversation.png`、`conversation-remote.png`；撤销状态图和验收JSON在同目录，可由 `npm run test:controlled:browser` 重建。
-- 新 [实际工作台说明](docs/CLOUD_CONTROLLED_WORKBENCH.md) 与 [最小事务恢复门槛](docs/CLOUD_TRANSACTION_RECOVERY.md) 区分现有fake证据和待实现的持久预算/intent、签发UNKNOWN、两腿SID、终态并发、清理重试、JWT/供应商迟到责任、release与退款及跨进程恢复。尚不选择或实现store/login。只读核对确认Pocket完整Python freeze、模型/Michael/tokenizer/YAML及默认runtime目录缺失，作为 [材料阻塞](docs/CLOUD_POCKET_RUNTIME.md#当前材料阻塞) 保留，不从用户电脑提取、不下载或安装模型。
+- 新 [实际工作台说明](docs/CLOUD_CONTROLLED_WORKBENCH.md) 与 [最小事务恢复门槛](docs/CLOUD_TRANSACTION_RECOVERY.md) 区分现有fake证据和待实现的持久预算/intent、签发UNKNOWN、两腿SID、终态并发、清理重试、JWT/供应商迟到责任、release与退款及跨进程恢复。该轮尚不选择或实现store/login。只读核对确认Pocket完整Python freeze、模型/Michael/tokenizer/YAML及默认runtime目录缺失，保留 [材料状态](docs/CLOUD_POCKET_RUNTIME.md#当前材料取得状态与阻塞)，该轮未从用户电脑提取、下载或安装模型。
 
 本轮环境为云端Linux、Node24.19.0/npm11.9.0、原锁定依赖，无新增安装或升级；package与CI只新增实际页验收命令，Node和lock不变。实际HTTPS测试证书、身份、SDK、signer、预算许可、provider和bridge均为显式离线fixture，控制路由与签名回调/媒体/SSE使用真实应用。没有真实登录/JWT/麦克风/供应商/普通手机连接。
 

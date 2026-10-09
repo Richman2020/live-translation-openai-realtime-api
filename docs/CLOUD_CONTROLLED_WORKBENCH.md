@@ -58,7 +58,9 @@ pagehide 的通知只能尽力发送，未收到结束确认不能宣称两腿�
 `.runtime/controlled-browser/`，精确结果见 `PROGRESS.md` 和
 草稿 PR #3 对应提交 CI。既有 `test:conversation:browser` 继续独立运行。
 
-真实登录与存储尚未选择，最小事务和恢复要求见
+后续已选择Google单账号登录并实现独立离线准备，见
+[GOOGLE_OIDC_MILESTONE.md](GOOGLE_OIDC_MILESTONE.md)；实际客户端/secret/账号授权
+仍未配置，存储尚未选择。最小事务和恢复要求见
 [CLOUD_TRANSACTION_RECOVERY.md](CLOUD_TRANSACTION_RECOVERY.md)。完整 Python
 freeze、预置模型和 Linux warm 仍缺材料，见
 [CLOUD_POCKET_RUNTIME.md](CLOUD_POCKET_RUNTIME.md)。本轮完成后停在这些部署

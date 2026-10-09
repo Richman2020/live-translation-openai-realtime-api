@@ -40,6 +40,8 @@ jobs:
         run: npm run test:conversation:browser
       - name: Actual controlled workbench with explicit offline Voice suppliers
         run: npm run test:controlled:browser
+      - name: Actual Google login and logout with an intercepted offline provider
+        run: npm run test:google:browser
       - name: Check patch formatting
         # A PR checkout is a merge commit: its first parent is the PR base.
         # Fetch that parent so the check covers this change, not the whole tree.

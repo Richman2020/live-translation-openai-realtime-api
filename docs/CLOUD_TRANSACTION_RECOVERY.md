@@ -99,10 +99,10 @@ socket 关闭或容器强杀都不证明供应商线路终止。强杀后必须�
 
 | 待确认或提供 | 最小输入 |
 | --- | --- |
-| 已验证登录方案 | 用户确认复用的登录/当前会话来源、受保护 cookie 的签发/撤销责任及单人账户范围；当前没有真实身份提供方选择 |
+| 已验证登录配置 | 已选择Google单个工作账号并完成离线代码；仍须核验Workspace域或固定sub、固定callback，以及单独批准真实OAuth客户端、secret注入和账号授权。见 [Google登录门槛](GOOGLE_OIDC_MILESTONE.md) |
 | 持久存储及恢复责任 | 确认可用的存储位置与事务能力、备份/恢复方式、执行恢复和未知供应商结果核对的责任人/进程；没有默认新数据库或配置 |
-| 固定云入口及签名配置 | 确认固定 HTTPS/WSS 入口、单实例 warm 运行位置及代理/停机责任；核对既有公开账户/号码/应用标识。真实会话与 Voice signer 所需密钥必须另经批准注入运行环境，不在聊天、仓库或浏览器 fixture 中提交 |
-| Pocket 既有材料 | 提供已审核的完整 Python 依赖 freeze/包完整性材料及匹配模型、Michael 状态、tokenizer 和本地 YAML；版本/哈希说明与 npm lock 不是完整 Python freeze，也不是资产本体。现状见 [Pocket 材料阻塞](CLOUD_POCKET_RUNTIME.md#当前材料阻塞) |
+| 固定云入口及签名配置 | 已选择Railway Hobby，仍需资源/区域/固定HTTPS与WSS入口、持久化及代理/停机责任；核对既有公开账户/号码/应用标识。真实会话与Voice signer所需秘密另经批准注入运行环境，不提交聊天、仓库或浏览器fixture |
+| Pocket 新可重建材料 | 已取得13项官方软件包/配置/许可，形成49包精确版本和哈希候选；不是旧freeze或已安装验收。三项模型0字节，官方入口被环境代理CONNECT 403阻塞。须恢复官方访问、审核资产和完整wheelhouse并获准安装后独立验证Linux warm；不要求从用户电脑补取。见 [Pocket材料现状](CLOUD_POCKET_RUNTIME.md#当前材料取得状态与阻塞) |
 
 材料齐备和方案确认后仍需单独验收真实登录、签名、持久恢复、Linux warm 及
 浏览器麦克风到普通手机通话。固定 Pocket Michael 出程、英文原声回程与逐句
