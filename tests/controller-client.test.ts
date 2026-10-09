@@ -319,6 +319,38 @@ test('page disposal sends hangup and revoke independently even when hangup never
   assert.equal(f.client.state.canControl, false); hanging.resolve(response({ ok: true })); await flush(); await f.close();
 });
 
+test('hidden connecting cancellation retains private cleanup proof until disposal dispatches revoke synchronously', async () => {
+  const f = fixture(); await f.ready(); const hangup = deferred();
+  f.overrides.set('/api/calls/call-1/hangup', () => hangup.promise);
+  await f.client.startCall('+15550000000', { connectVoice: async () => callFixture().call });
+  assert.equal(f.client.state.phase, 'connecting');
+  f.client.setVisible(false);
+  assert.equal(f.client.state.lease, null); assert.equal(f.client.state.canControl, false);
+  assert.equal(posts(f, '/api/calls/call-1/hangup').length, 1);
+  assert.equal(posts(f, '/api/controller/revoke').length, 0);
+  f.client.dispose();
+  // No microtask flush or hangup reply is needed to dispatch the unsent revoke.
+  assert.equal(posts(f, '/api/controller/revoke').length, 1);
+  assert.equal(posts(f, '/api/calls/call-1/hangup').length, 1);
+  assert.equal(posts(f, '/api/controller/revoke')[0].body.epoch, 1);
+  assert.equal(posts(f, '/api/controller/revoke')[0].options.keepalive, true);
+  assert.equal(f.client.state.phase, 'disposed');
+  assert.equal(JSON.stringify(f.client.state).includes(f.capability), false);
+  assert.equal(JSON.stringify(f.client.state).includes(f.csrf), false);
+  hangup.resolve(response({ ok: true })); await flush();
+  assert.equal(posts(f, '/api/controller/revoke').length, 1);
+  assert.equal(f.client.state.canAcquire, false); await f.close();
+});
+
+test('synchronous cleanup fetch failures cannot interrupt disposal or restore local authority', async () => {
+  const f = fixture(); await f.ready();
+  f.overrides.set('/api/controller/revoke', () => { throw new Error('Explicit synchronous offline transport failure'); });
+  assert.doesNotThrow(() => f.client.dispose()); await flush();
+  assert.equal(posts(f, '/api/controller/revoke').length, 1);
+  assert.equal(f.client.state.phase, 'disposed'); assert.equal(f.client.state.lease, null);
+  assert.equal(f.client.state.canControl, false); await f.close();
+});
+
 test('brief disconnect during Voice preparation fences the old attempt even after immediate reconnect', async () => {
   const f = fixture(); await f.ready(); const preparing = deferred(); let connected = 0;
   f.overrides.set('/api/calls/call-1/voice', () => preparing.promise);

@@ -433,8 +433,9 @@ export async function startControlledWorkbench() {
   window.addEventListener('pagehide', () => {
     if (disposed) return;
     authGeneration += 1; loginAbort?.abort(); loginAbort = null;
-    disposed = true; stopEvents(); clearInterval(clock); clearMedia(); microphone.dispose(); conversation.dispose();
-    client.dispose(); document.documentElement.dataset.phoneReady = 'false';
+    disposed = true; client.dispose();
+    stopEvents(); clearInterval(clock); clearMedia(); microphone.dispose(); conversation.dispose();
+    document.documentElement.dataset.phoneReady = 'false';
   });
   window.addEventListener('pageshow', event => {
     // A bfcache-restored document must not resurrect an expired proof or SDK.

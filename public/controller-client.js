@@ -48,6 +48,9 @@ export function createControllerClient({
   let deadlineTimer = null, renewalTimer = null;
   let engines = ['pocket-prefix', 'pocket-captions'], defaultEngine = 'pocket-prefix';
   const requests = new Set();
+  // Only in-flight cleanup retains these capabilities. They cannot restore a
+  // lease or authorize a new call; each request keeps its existing timeout.
+  const cleanupTasks = new Set();
   const retiredCalls = new Set();
   const retireCall = id => { retiredCalls.add(id); if (retiredCalls.size > 100) retiredCalls.delete(retiredCalls.values().next().value); };
   const liveLease = () => Boolean(!disposed && authenticated && lease && now() < lease.expiresAt);
@@ -95,10 +98,15 @@ export function createControllerClient({
       item?.aborters.add(cancelRequest);
       timer = setTimer(() => { abort.abort(); finish(false, fail('REQUEST_TIMEOUT')); }, requestTimeoutMs);
       const headers = body === undefined ? {} : { 'content-type': 'application/json', 'x-phone-csrf': capturedCsrf };
-      Promise.resolve().then(() => fetchImpl(path, {
-        method: body === undefined ? 'GET' : 'POST', credentials: 'same-origin', cache: 'no-store',
-        headers, ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: abort.signal, keepalive,
-      })).then(async response => {
+      let received;
+      try {
+        // Dispatch keepalive while the pagehide handler still owns this document.
+        received = fetchImpl(path, {
+          method: body === undefined ? 'GET' : 'POST', credentials: 'same-origin', cache: 'no-store',
+          headers, ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: abort.signal, keepalive,
+        });
+      } catch (failure) { finish(false, failure); return; }
+      Promise.resolve(received).then(async response => {
         let value;
         try { value = await response.json(); } catch { throw fail('INVALID_RESPONSE'); }
         if (!response.ok) throw fail(typeof value?.error === 'string' ? value.error : typeof value?.code === 'string' ? value.code : response.status === 401 ? 'UNAUTHORIZED' : response.status === 403 ? 'FORBIDDEN' : 'REQUEST_FAILED');
@@ -107,15 +115,21 @@ export function createControllerClient({
     });
   }
   const bestEffort = (path, body, capturedCsrf) => request(path, body, { capturedCsrf, keepalive: true }).catch(() => null);
-  async function cleanupCaptured({ proof, callId, capturedCsrf }, revoke = true, parallel = false) {
+  async function cleanupCaptured(captured, revoke = true, parallel = false) {
+    const { proof, callId, capturedCsrf } = captured;
     if (!proof) return;
-    if (parallel) {
-      await Promise.all([callId ? bestEffort(`/api/calls/${encodeURIComponent(callId)}/hangup`, { controller: proof }, capturedCsrf) : null,
-        revoke && proof ? bestEffort('/api/controller/revoke', proof, capturedCsrf) : null]);
-      return;
+    let task = [...cleanupTasks].find(item => item.captured.callId === callId && item.captured.capturedCsrf === capturedCsrf &&
+      item.captured.proof.tabId === proof.tabId && item.captured.proof.leaseId === proof.leaseId && item.captured.proof.epoch === proof.epoch);
+    if (!task) { task = { captured, users: 0, hangup: null, revoke: null }; cleanupTasks.add(task); }
+    task.users += 1;
+    const hangup = () => task.hangup ||= callId ? bestEffort(`/api/calls/${encodeURIComponent(callId)}/hangup`, { controller: proof }, capturedCsrf) : Promise.resolve(null);
+    const release = () => task.revoke ||= bestEffort('/api/controller/revoke', proof, capturedCsrf);
+    try {
+      if (parallel) await Promise.all([hangup(), revoke ? release() : null]);
+      else { await hangup(); if (revoke) await release(); }
+    } finally {
+      task.users -= 1; if (!task.users) cleanupTasks.delete(task);
     }
-    if (callId) await bestEffort(`/api/calls/${encodeURIComponent(callId)}/hangup`, { controller: proof }, capturedCsrf);
-    if (revoke && proof) await bestEffort('/api/controller/revoke', proof, capturedCsrf);
   }
   const validLease = value => value && value.tabId === tabId && typeof value.leaseId === 'string' &&
     /^[A-Za-z0-9_-]{43}$/.test(value.leaseId) && Number.isSafeInteger(value.epoch) && value.epoch > 0 &&
@@ -398,6 +412,10 @@ export function createControllerClient({
     dispose() {
       if (disposed) return;
       // Start cleanup with the captured capabilities, then erase this document.
+      // Visibility/offline cancellation may already have removed the public
+      // lease while awaiting hangup. Dispatch its still-unsent revoke now;
+      // neither a later network response nor unloaded JS is required to start it.
+      for (const task of [...cleanupTasks]) void cleanupCaptured(task.captured, true, true);
       void client.cancel({ releaseControl: true, parallelCleanup: true }); disposed = true; generation += 1; readSequence += 1;
       for (const abort of requests) abort.abort();
       requests.clear(); clearControlTimers(); rejectAttempt(attempt); attempt = null; lease = null; csrf = ''; authenticated = false; phase = 'disposed'; emit();

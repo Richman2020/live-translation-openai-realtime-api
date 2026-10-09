@@ -10,6 +10,7 @@
 - 新 `GoogleOidcClient` 使用Node内置能力、固定Google端点、有界异步交换和RSA验签。校验RS256、issuer、audience/azp、时间、nonce、明确唯一邮箱及布尔verified；非Gmail工作身份必须另核验Workspace signed hd或预先确认的固定sub，不能仅相信浏览器邮箱或其后缀。重复JSON字段、非规范编码、JOSE远端密钥和普通对象身份注入拒绝；access/refresh token不保存或交网页。另只读核对官方公开discovery/JWKS，无真实token交换或账号授权。
 - 新 `GoogleBrowserLogin` 通过同一个policy显式DI接到实际服务和页面。服务器生成浏览器绑定、一次性state/nonce/PKCE；短期Lax预登录cookie适配Google跨站导航，正式随机opaque会话cookie为Secure/HttpOnly/Strict/host-only/browser-session。回调只准备结果，在最终同步onSend重新检查flow、代际、期限和旧会话后发布，取消/重新登录/退出不能被迟到回调复活。默认8小时绝对期限、15分钟闲置；读/SSE不续权，CSRF显式续期受绝对期限限制。同步resolver只查询有界当前内存记录，异步身份验证不进媒体循环。
 - 实际工作台新增Google登录、取消及退出；退出立即停止本页控制/媒体并撤销当前服务端会话，未知响应保持未确认，不报告退出成功。生产入口不注入真实客户端，两个cloud guards、loopback、严格来源与供应商验签保持；默认local、Pocket-prefix固定Michael、英文原声/中文字幕回程及配对逐句字幕保持。详见 [Google代码与真实配置门槛](docs/GOOGLE_OIDC_MILESTONE.md)。
+- 远端CI进一步发现真实卸载窗口：服务端已active但SDK尚未确认，原生hidden先取消并清空页面lease，顺序hangup尚未完成时pagehide无法取得原proof，revoke可能随旧document丢失。最小修复让私有在途cleanup task保留原call/proof/CSRF并共享hangup/revoke Promise；dispose即时发起缺失revoke，fetch在当前handler内同步dispatch，同步throw仍安全失败；pagehide先dispose客户端再销毁媒体。任务不进入snapshot、不恢复lease或新通话权限，完成/原请求期限后回收，服务端仍严格核验当前cookie/proof/epoch。
 - Pocket按最新授权实际取得13项官方响应体，共 **1,550,363 bytes**；其中固定3.3.0 wheel/sdist共 **888,991 bytes**，逐项SHA256与官方metadata核验，包中实现/English配置与既有worker锁定哈希一致。root独立重算缓存manifest的23项文件大小/哈希通过（包含生成文件，不能把23项都称下载）。只读现有pip官方metadata形成49包精确版本/wheel哈希的新Linux候选，71条依赖关系闭合；它不是旧本机freeze、已安装环境或Linux warm验收。
 - 三项model/Michael/tokenizer实际取得 **0 bytes**，目标文件不存在。原因是当前环境代理在原始 `huggingface.co` HTTPS CONNECT阶段返回403；普通权限与自动审查批准的升级执行均相同，尚未到官方服务/CDN，不能归因为官方授权或付费门槛。已停止重试，未换镜像、清除代理、关TLS或绕过权限。当前Pocket/Torch未安装，候选兼容性/完整许可与wheelhouse仍须审查；[材料审计及完整候选](docs/POCKET_CLOUD_MATERIALS_2026-10-09.md)明确取得、生成、未取得和下一步。
 
@@ -17,17 +18,19 @@
 
 | 验证 | 实际结果 |
 | --- | --- |
-| 新离线回归 | OIDC24项、登录17项、客户端退出新增3项及刷新先读旧lease新增1项通过；包含真实Fastify最终onSend等待期间cancel/new-login/logout拒绝旧callback |
-| 完整回归 | 987项：982通过、5个既有Windows专属跳过、0失败；新增45项，未删除原测试 |
+| 新离线回归 | OIDC24项、登录17项、客户端退出新增3项、刷新先读旧lease新增1项及hidden/dispose卸载新增2项通过；包含真实Fastify最终onSend等待期间cancel/new-login/logout拒绝旧callback |
+| 完整回归 | 989项：984通过、5个既有Windows专属跳过、0失败；新增47项，未删除原测试 |
 | 类型/构建/lint/语法/diff | 完整源码及全部测试类型检查、生产构建、三处修改源码ESLint、浏览器JS语法和diff通过；新浏览器脚本另作独立类型检查 |
 | Google实际Chromium | 24/24通过：原生跨站导航/Lax、Strict正式cookie、PKCE/RSA验证、CSRF、退出撤销、旧proof及callback重放；拦截Google授权导航1次，实际外部网络0、异常0、真实供应商调用0 |
-| 既有Chromium验收 | 字幕16/16、实际受控工作台49/49通过（新增刷新竞态2项）；各自外部页面请求0、异常0，受控工作台真实供应商调用0 |
-| 独立安全审查 | 最新八文件175/175通过，0失败/跳过；发现的最终发送竞态已修复并进入17项登录回归，无剩余本轮代码阻塞 |
+| 既有Chromium验收 | 字幕16/16、实际受控工作台50/50通过（新增刷新/卸载竞态3项）；各自外部页面请求0、异常0，受控工作台真实供应商调用0 |
+| 独立安全审查 | 八文件175/175及最终cleanup窄回归5/5分别通过，0失败/跳过，不把重叠计数相加；最终发送及卸载竞态已进入对应回归，无剩余本轮代码阻塞 |
 | Pocket只读审计 | 实际13项下载/23项缓存manifest大小及SHA256、49包候选附录与71条metadata依赖关系通过；模型0字节，未安装/执行下载代码或合成 |
 
 初次并行浏览器验收发生Google同源Other请求失效的CDP `INVALID_INTERCEPTION_ID/-32602`及受控页面控件等待超时；未将其当作通过。Google脚本增加固定安全错误类别、取消观测和拒绝回调完整渲染barrier，未忽略provider/API或其它拦截错误；具体失效请求未证实，不能断言是favicon。
 
 提交 `9a5675e` 的 [首次CI run 37931414975](https://github.com/Richman2020/live-translation-openai-realtime-api/actions/runs/37931414975) 在同一个刷新控件场景失败，构建/类型/986项回归/字幕浏览器均通过，Google步骤未执行。定位到旧pagehide的hangup与revoke并发：manager清理完成不代表controller已释放，新document先读到held是正确只读状态，SSE不能猜测或授予available。验收主动在离线proxy延迟真实revoke转发，允许两腿hangup完成和新document读held；先验证真实DOM不能领取/拨号，再放行原请求并确认200完整响应及真实leaseavailable，通过真实“刷新状态”读取后才显式领取。新增2项浏览器断言及1项客户端回归；不增加超时、不替换后端响应或改生产恢复/认证逻辑，确认当前状态前不能写或恢复旧capability。精确修正提交的完整CI另行核验。
+
+提交 `6c5fb47` 的 [第二次CI run 37932555632](https://github.com/Richman2020/live-translation-openai-realtime-api/actions/runs/37932555632) 在等待真实revoke到达时失败，构建/类型/987项回归/字幕浏览器均通过，Google步骤未执行。证明此前仅验收屏障的解释不完整；真实client独立复现`connecting→hidden→hangup未回复→dispose`，修前只有hangup请求、修后即时发出两种请求。已按上述私有cleanup任务修产品窗口并加两项单元回归，最终完整989项通过。浏览器50/50进一步强制SDK未accept、原生hidden和真实backend hangup已执行但HTTP响应暂扣；reload后新document读held、pagehide只发一次原revoke且只复用一次hangup。两个gate释放后，确认200及available，通过真实刷新状态再显式领取；断言证明revoke不依赖已卸载页面的后续await。安全计数、阶段、timeOrigin和浏览器版本诊断保留，无凭据；未延长等待、自动接管或取消严格失败检查。
 
 父线程收到环境断开通知后，root立即核验pwd、Node24.19.0/npm11.9.0、提交和工作区均可用；随后完整987项回归及类型检查成功。没有因通知重置仓库或假设下载已恢复。
 

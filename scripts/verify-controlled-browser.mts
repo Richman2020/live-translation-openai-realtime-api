@@ -81,6 +81,8 @@ const preparations = { voice: 0, public: 0 };
 let completedControllerRevocations = 0;
 let refreshRevokeGate: ReturnType<typeof deferred> | undefined;
 let heldRefreshRevocations = 0;
+let refreshHangupReplyGate: ReturnType<typeof deferred> | undefined;
+let heldRefreshHangupReplies = 0;
 let voiceGate: ReturnType<typeof deferred> | undefined;
 let publicGate: ReturnType<typeof deferred> | undefined;
 let failHangup = false;
@@ -110,7 +112,7 @@ let config: SoloConfig;
 // An explicitly substituted Voice SDK, served at the page's normal SDK URL.
 // Its connect travels through the real signed callback and media application.
 const fakeSdk = `(() => {
-  const fixture = window.__offlineVoice = { devices: 0, connects: 0, disconnects: 0, registers: 0, muted: false, hold: false, waiting: null, rejectNext: false, mediaTransfers: 0, streams: [] };
+  const fixture = window.__offlineVoice = { devices: 0, connects: 0, disconnects: 0, registers: 0, muted: false, hold: false, waiting: null, deferAccept: false, pendingAccept: null, rejectNext: false, mediaTransfers: 0, streams: [] };
   class Emitter { constructor() { this.listeners = new Map(); } on(name, fn) { const all=this.listeners.get(name)||[]; all.push(fn); this.listeners.set(name,all); return this; } off(name, fn) { this.listeners.set(name,(this.listeners.get(name)||[]).filter(item=>item!==fn)); return this; } removeListener(name, fn) { return this.off(name,fn); } emit(name,...args) { for(const fn of this.listeners.get(name)||[]) fn(...args); } }
   class Call extends Emitter { constructor(stream){super();this.stream=stream;} disconnect() { if(this.closed)return;this.closed=true;for(const track of this.stream?.getTracks()||[])track.stop();fixture.disconnects++;this.emit('disconnect'); } mute(value) { fixture.muted=value;this.emit('mute',value); } status() { return this.closed?'closed':'open'; } }
   class Device extends Emitter {
@@ -123,7 +125,7 @@ const fakeSdk = `(() => {
       const response=await fetch('/__offline_fixture/voice-client',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:this.token,params:options.params})});
       const result=await response.json();if(!response.ok)throw new Error(result.error||'Fixture join rejected');
       if(fixture.hold)await new Promise(done=>{fixture.waiting=done;});
-      const call=new Call(this.stream);fixture.lastCall=call;setTimeout(()=>call.emit('accept'),20);return call;
+      const call=new Call(this.stream);fixture.lastCall=call;if(fixture.deferAccept)fixture.pendingAccept=()=>call.emit('accept');else setTimeout(()=>call.emit('accept'),20);return call;
     }
     destroy() { this.destroyed=true;for(const track of this.stream?.getTracks()||[])track.stop(); }
     disconnectAll() { fixture.lastCall?.disconnect(); }
@@ -403,11 +405,18 @@ const proxy = https.createServer(async (request, response) => {
       path: request.url,
       headers: request.headers,
     },
-    (stream) => {
+    async (stream) => {
       if (path === '/api/controller/revoke' && stream.statusCode === 200)
         stream.once('end', () => {
           completedControllerRevocations += 1;
         });
+      const replyGate = /\/hangup$/.test(path)
+        ? refreshHangupReplyGate
+        : undefined;
+      if (replyGate) {
+        heldRefreshHangupReplies += 1;
+        await replyGate.promise;
+      }
       response.writeHead(stream.statusCode!, stream.headers);
       stream.pipe(response);
       response.once('close', () => stream.destroy());
@@ -1199,15 +1208,32 @@ try {
     async () => (await page.state()).start,
     'Controller before active refresh',
   );
+  // Keep SDK acceptance pending while both real application legs are active.
+  // Reload must preserve cleanup capabilities even in this earlier UI phase.
+  await page.evaluate('window.__offlineVoice.deferAccept = true');
   await dial();
   await eventually(
-    () => manager.activeSession?.status === 'active',
-    'Live call before page reload',
+    async () =>
+      manager.activeSession?.status === 'active' &&
+      (await page.evaluate(
+        "Boolean(window.__offlineVoice.pendingAccept) && document.documentElement.dataset.controllerPhase === 'connecting' && document.getElementById('mute-button').disabled",
+      )),
+    'Both live legs with actual SDK acceptance still pending before reload',
   );
   const refreshHangups = providerHangups.length;
+  const refreshHangupRequests = apiRequests.filter((item) =>
+    /\/hangup$/.test(item.path),
+  ).length;
+  const refreshRevokeRequests = apiRequests.filter(
+    (item) => item.path === '/api/controller/revoke',
+  ).length;
+  const beforeReloadPhase = await page.evaluate(
+    'document.documentElement.dataset.controllerPhase',
+  );
   const oldDocumentTimeOrigin = await page.evaluate('performance.timeOrigin');
   const refreshRevocations = completedControllerRevocations;
   const heldBeforeRefresh = heldRefreshRevocations;
+  const heldRepliesBeforeRefresh = heldRefreshHangupReplies;
   const controllerStatus = () =>
     leases.status(
       policy.authenticate(
@@ -1221,7 +1247,19 @@ try {
       ),
     );
   refreshRevokeGate = deferred();
+  refreshHangupReplyGate = deferred();
   try {
+    // A native visibility change cancels the still-connecting owner. Its real
+    // hangup reaches the backend, but the response remains pending across
+    // unload: disposal must start the captured revoke without awaiting it.
+    await observer.foreground();
+    await eventually(
+      async () =>
+        (await page.evaluate('document.hidden')) &&
+        heldRefreshHangupReplies > heldRepliesBeforeRefresh &&
+        !manager.controlAdmissionBlocked,
+      'Connecting owner becomes hidden with real hangup response still pending',
+    );
     await page.send('Page.reload');
     await eventually(
       async () =>
@@ -1250,9 +1288,58 @@ try {
       { serverMode: 'held', acquire: false, start: false },
       'completed hangup with delayed real revoke leaves refreshed page safely read-only',
     );
+    check(
+      {
+        hangups:
+          apiRequests.filter((item) => /\/hangup$/.test(item.path)).length -
+          refreshHangupRequests,
+        revokes:
+          apiRequests.filter((item) => item.path === '/api/controller/revoke')
+            .length - refreshRevokeRequests,
+      },
+      { hangups: 1, revokes: 1 },
+      'hidden connecting owner unload reuses pending hangup and dispatches one captured revoke',
+    );
+  } catch (error) {
+    const currentTimeOrigin = await page
+      .evaluate('performance.timeOrigin')
+      .catch(() => null);
+    const currentPhase = await page
+      .evaluate('document.documentElement.dataset.controllerPhase')
+      .catch(() => null);
+    const browser = await page.send('Browser.getVersion').catch(() => ({}));
+    console.error(
+      JSON.stringify({
+        controlledRefreshDiagnostic: {
+          heldRevocationDelta: heldRefreshRevocations - heldBeforeRefresh,
+          heldHangupReplyDelta:
+            heldRefreshHangupReplies - heldRepliesBeforeRefresh,
+          controlAdmissionBlocked: manager.controlAdmissionBlocked,
+          controllerMode: controllerStatus().mode,
+          providerHangupDelta: providerHangups.length - refreshHangups,
+          hangupRequestDelta:
+            apiRequests.filter((item) => /\/hangup$/.test(item.path)).length -
+            refreshHangupRequests,
+          revokeRequestDelta:
+            apiRequests.filter((item) => item.path === '/api/controller/revoke')
+              .length - refreshRevokeRequests,
+          completedRevocationDelta:
+            completedControllerRevocations - refreshRevocations,
+          oldDocumentTimeOrigin,
+          currentTimeOrigin,
+          newDocument: currentTimeOrigin !== oldDocumentTimeOrigin,
+          beforeReloadPhase,
+          currentPhase,
+          browser: browser.product || 'unknown',
+        },
+      }),
+    );
+    throw error;
   } finally {
     refreshRevokeGate.resolve();
     refreshRevokeGate = undefined;
+    refreshHangupReplyGate.resolve();
+    refreshHangupReplyGate = undefined;
   }
   // Hangup and revoke are independent keepalive requests. A new document can
   // read the old lease before its revocation completes; that safe read-only
@@ -1471,6 +1558,7 @@ try {
   );
 } finally {
   refreshRevokeGate?.resolve();
+  refreshHangupReplyGate?.resolve();
   identity.revoked = false;
   failHangup = false;
   voiceGate?.resolve();
