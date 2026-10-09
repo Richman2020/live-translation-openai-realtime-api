@@ -71,9 +71,10 @@ call/join记录可拒绝新增权并清理迟到SID，不能据假端口宣称�
 | `GET /api/status` / `events` | 同认证会话其它标签只读；订阅与重连不会续租 |
 | `POST /api/calls/:id/hangup` | 带controller凭证接受同步结束意图；两腿异步清理独立继续 |
 
-没有修改现有生产网页以启用该分支。fake Voice SDK测试使用真实router/签名回调
-和临时回环媒体/SSE，验证准备→加入→bridge就绪→拨出→字幕→挂断的离线闭环；
-真实浏览器UI另保留逐句对话模拟验收，二者不合称供应商实连。
+最初本里程碑没有接网页；后续已将实际工作台接到显式DI的 `/controlled` 入口，
+详见 [实际工作台接入](CLOUD_CONTROLLED_WORKBENCH.md)。真实router、签名回调、
+临时回环媒体/SSE与Chromium共同验证fake SDK的准备、加入、字幕和挂断。
+默认生产入口未启用该分支，这些证据仍不代表供应商实连。
 
 ## 翻译与验收范围
 

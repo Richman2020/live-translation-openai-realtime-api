@@ -1,6 +1,11 @@
 'use strict';
 
 (async () => {
+  if (document.documentElement?.dataset?.phoneSurface === 'controlled') {
+    const { startControlledWorkbench } = await import('./controlled-workbench.js');
+    await startControlledWorkbench();
+    return;
+  }
   const { createCallLifecycle, createDeviceMediaOwner, microphoneMessages } = await import('./call-lifecycle.js');
   const { createAudioOutput } = await import('./audio-output.js');
   const { createMicrophoneInput } = await import('./microphone-input.js');
@@ -1176,7 +1181,9 @@
   else refreshStatus().then(next => { if (!next.configured) navigate('settings'); }).catch(error => { showError(error); navigate('settings'); });
 })().catch(() => {
   const banner = document.getElementById('app-error');
-  if (banner) { banner.textContent = '电话组件加载失败。请从桌面「AI 电话」重新打开；仍未恢复时请重启本机服务。'; banner.hidden = false; }
+  if (banner) { banner.textContent = document.documentElement?.dataset?.phoneSurface === 'controlled'
+    ? '受控电话组件加载失败。请刷新页面；取得有效登录与控制许可前不能拨号。'
+    : '电话组件加载失败。请从桌面「AI 电话」重新打开；仍未恢复时请重启本机服务。'; banner.hidden = false; }
   const view = document.getElementById('workspace-view'); if (view) view.hidden = false;
   for (const id of ['enable-device', 'start-call', 'accept-call']) { const button = document.getElementById(id); if (button) button.disabled = true; }
 });

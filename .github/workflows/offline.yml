@@ -38,6 +38,8 @@ jobs:
           for file in public/*.js; do node --check "$file"; done
       - name: Real browser acceptance with synthetic conversation events
         run: npm run test:conversation:browser
+      - name: Actual controlled workbench with explicit offline Voice suppliers
+        run: npm run test:controlled:browser
       - name: Check patch formatting
         # A PR checkout is a merge commit: its first parent is the PR base.
         # Fetch that parent so the check covers this change, not the whole tree.

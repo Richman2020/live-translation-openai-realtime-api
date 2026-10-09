@@ -21,6 +21,7 @@
     "test": "node --import tsx --test tests/*.test.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test:conversation:browser": "node scripts/verify-conversation-browser.mjs",
+    "test:controlled:browser": "node --import tsx scripts/verify-controlled-browser.mts",
     "predev": "npm run check:config",
     "prestart": "npm run check:config",
     "prebuild": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",

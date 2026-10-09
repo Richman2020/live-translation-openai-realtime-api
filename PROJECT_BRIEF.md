@@ -1,5 +1,7 @@
 # 中英双向电话翻译：项目目标与范围
 
+**最新继续批准：实际工作台控制协议与浏览器验收（2026-10-09）**：从已核验CI的 `bda4697b081cb940772ec601b97dadc563922042` 继续，在同一开发分支/草稿PR内将已实现的控制租约与每通Voice准备/加入接到真实网页。当前页面领取、显式续约及撤销；其它标签只读，刷新、导航、退出、错误与断连不能复活旧权限或迟到SDK结果，SSE读取/重连不续权。显式服务端DI隔离入口使用fake SDK/provider/身份验收，无JWT、secret或真人电话；保留默认local、Pocket Michael、英文原声及配对字幕。补最小持久预算/intent、两腿SID、清理与恢复契约，不选择或实现存储/登录，不改Node/provider。缺完整Python freeze与预置模型列为材料阻塞，不去用户电脑提取或下载。完成真实页验收、推送和精确CI后停止，只交付最小真实部署决策项，不自行开启下个fake里程碑。见 [实际工作台](docs/CLOUD_CONTROLLED_WORKBENCH.md) 和 [事务与恢复门槛](docs/CLOUD_TRANSACTION_RECOVERY.md)。
+
 **最新继续批准：单人网页控制权与Voice加入许可（2026-10-09）**：从已核验CI的 `48ac52237c1e6edd89541876b511fa23c38ec57c` 继续，在原分支/草稿PR内完成提供方无关controller lease与per-call一次性join离线闭环。租约绑定已验证会话和标签页、服务端epoch、期限、显式续约与撤销；其它标签只读，活动/清理未确认拒绝接管，SSE重连不续租。Voice最小grant绑定会话、lease、identity和call，签名器及持久预算/intent预留端口必须显式注入，测试只用假令牌；缺生产持久许可继续拒绝。真实router与fake Voice SDK/provider/bridge验收准备、加入、拨号、字幕、挂断及失联到期两腿清理。云注入默认Pocket-prefix固定Michael，英文原声/中文字幕回程；默认local兼容。两个cloud guard、loopback与供应商签名保留。不选择真实身份提供方、不配置凭据或权限、不新增依赖/模型/资源/费用、不部署/改回调/拨号/合并。见 [控制租约与Voice许可](docs/CLOUD_CONTROLLER_VOICE.md)。
 
 **最新批准：真实电话应用入口的离线集成（2026-10-09）**：从远端 `709806b8c545a725c3f3cba83c28f52972973e8a` 继续，接入实际创建、状态、挂断及字幕SSE路由，验证服务端归属、跨会话拒绝、撤销、断连/重复操作、结束后的事件隔离和现有本机流程。通过显式服务端依赖对象注入模拟身份/provider/bridge，不能用布尔或请求开关伪装认证；cloud总保护和回环限制保留，供应商签名/Origin不弱化。未完成的登录、语音令牌、presence/控制lease、来电归属、持久预算/journal与部署路径继续拒绝或列为明确决策点。本轮不配置真实凭据、扩大实际访问、部署、拨号或调用付费API；提交推送开发分支及草稿PR按既有授权继续。见 [应用集成记录](docs/CLOUD_PHONE_APPLICATION_INTEGRATION.md)。

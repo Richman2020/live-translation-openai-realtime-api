@@ -37,6 +37,92 @@ import {
   type TranslationEngine,
 } from './translation-engine';
 
+// These are public application source/assets, never control or Voice endpoints.
+// The controlled page is the sole HTML entry for an injected browser app.
+const controlledPublicPaths = new Set([
+  '/controlled',
+  '/app.js',
+  '/controller-client.js',
+  '/controlled-workbench.js',
+  '/styles.css',
+  '/favicon.svg',
+  '/vendor/twilio.min.js',
+  '/call-lifecycle.js',
+  '/audio-output.js',
+  '/microphone-input.js',
+  '/rtc-diagnostics.js',
+  '/conversation-model.js',
+  '/conversation-view.js',
+  '/translation-engine.js',
+  '/assets/speaker-test.wav',
+]);
+const publicContentSecurityPolicy =
+  "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' https://*.twilio.com wss://*.twilio.com https://*.twiliocdn.com; img-src 'self' data:; media-src 'self' blob:; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
+
+/** Only public source reads need browser navigation/script Fetch Metadata.
+ * API authorization keeps its stricter native-fetch policy, independently. */
+function controlledPublicRequest(req: FastifyRequest, origin: string): boolean {
+  if (!['GET', 'HEAD'].includes(req.method)) return false;
+  const remote = req.raw.socket.remoteAddress || req.ip;
+  if (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(remote)) return false;
+  const names = new Set([
+    'host',
+    'origin',
+    'forwarded',
+    'x-forwarded-for',
+    'x-forwarded-host',
+    'x-forwarded-proto',
+    'sec-fetch-site',
+    'sec-fetch-mode',
+    'sec-fetch-dest',
+  ]);
+  const raw = req.raw.rawHeaders;
+  if (!Array.isArray(raw) || raw.length % 2) return false;
+  const seen = new Set<string>();
+  for (let index = 0; index < raw.length; index += 2) {
+    const name = raw[index].toLowerCase();
+    if (names.has(name)) {
+      if (seen.has(name) || req.headers[name] !== raw[index + 1]) return false;
+      seen.add(name);
+    }
+  }
+  for (const name of names)
+    if (req.headers[name] !== undefined && !seen.has(name)) return false;
+  if (
+    req.headers.host !== new URL(origin).host ||
+    [
+      'forwarded',
+      'x-forwarded-for',
+      'x-forwarded-host',
+      'x-forwarded-proto',
+    ].some((name) => req.headers[name] !== undefined) ||
+    (req.headers.origin !== undefined && req.headers.origin !== origin)
+  )
+    return false;
+  const site = req.headers['sec-fetch-site'];
+  const mode = req.headers['sec-fetch-mode'];
+  const dest = req.headers['sec-fetch-dest'];
+  if ([site, mode, dest].every((value) => value === undefined)) return true;
+  const path = req.url.split('?')[0];
+  if (path === '/controlled')
+    return (
+      ['none', 'same-origin'].includes(site as string) &&
+      mode === 'navigate' &&
+      dest === 'document'
+    );
+  const destinations: Record<string, string> = {
+    '.js': 'script',
+    '.css': 'style',
+    '.wav': 'audio',
+  };
+  const destination = destinations[extname(path)] || 'image';
+  return (
+    site === 'same-origin' &&
+    ['cors', 'no-cors', 'same-origin'].includes(mode as string) &&
+    dest === destination
+  );
+}
+
 export async function buildSoloServer(
   options: {
     configStore?: ConfigStore;
@@ -205,7 +291,8 @@ export async function buildSoloServer(
       .header('Cache-Control', 'no-store')
       .header('Referrer-Policy', 'no-referrer')
       .header('X-Content-Type-Options', 'nosniff');
-    // Minimal deployment probe is the sole public route outside /voice/.
+    // Health is the sole unauthenticated API; isolated public source reads below
+    // never confer controller or Voice authorization.
     if (path === '/api/health' && req.method === 'GET') return undefined;
     if (path.startsWith('/voice/')) return undefined;
     if (browserControl && path.startsWith('/api/')) {
@@ -221,11 +308,26 @@ export async function buildSoloServer(
       if (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(remote))
         return reply.code(403).send({ error: 'LOCAL_ACCESS_ONLY' });
       if (
-        !['/api/status', '/api/calls', '/api/events'].includes(path) &&
+        ![
+          '/api/status',
+          '/api/browser-session',
+          '/api/calls',
+          '/api/events',
+        ].includes(path) &&
         !/^\/api\/calls\/[^/]+\/(?:hangup|voice)$/.test(path) &&
         !/^\/api\/controller\/(?:acquire|renew|revoke)$/.test(path)
       )
         return reply.code(503).send({ error: 'CLOUD_CONTROL_UNAVAILABLE' });
+      return undefined;
+    }
+    if (browserControl && path !== '/health') {
+      if (
+        !controlledPublicPaths.has(path) ||
+        (path === '/controlled' && req.url !== '/controlled')
+      )
+        return reply.code(404).send({ error: 'NOT_FOUND' });
+      if (!controlledPublicRequest(req, browserControl.policy.publicOrigin))
+        return reply.code(403).send({ error: 'LOCAL_ACCESS_ONLY' });
       return undefined;
     }
     if (!isLocalRequest(req, configStore.value.API_PORT) || !sameOrigin(req))
@@ -285,6 +387,29 @@ export async function buildSoloServer(
     },
   );
   if (browserControl && browserTransport) {
+    app.get<{ Querystring: { tabId?: string } }>(
+      '/api/browser-session',
+      browserTransport.sessionHttpRoute('read'),
+      async (req) =>
+        browserTransport.executeSessionHttp(req, (context) =>
+          browserControl.browserSession(context, req.query.tabId),
+        ),
+    );
+    app.get('/controlled', async (_req, reply) => {
+      const file = resolve(publicDir, 'index.html');
+      if (!existsSync(file) || !statSync(file).isFile())
+        return reply.code(404).send({ error: 'NOT_FOUND' });
+      const html = readFileSync(file, 'utf8').replace(
+        /<html\s+lang="zh-CN">/,
+        '<html lang="zh-CN" data-phone-surface="controlled">',
+      );
+      if (!html.includes('<html lang="zh-CN" data-phone-surface="controlled">'))
+        throw new SessionError('CLOUD_BROWSER_NOT_READY', 503);
+      return reply
+        .header('Content-Security-Policy', publicContentSecurityPolicy)
+        .type('text/html; charset=utf-8')
+        .send(html);
+    });
     app.post<{ Body: { tabId: string } }>(
       '/api/controller/acquire',
       controllerRoute(),
@@ -677,10 +802,7 @@ export async function buildSoloServer(
       '.wav': 'audio/wav',
     };
     if (!types[extname(file)]) return reply.code(404).send();
-    reply.header(
-      'Content-Security-Policy',
-      "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' https://*.twilio.com wss://*.twilio.com https://*.twiliocdn.com; img-src 'self' data:; media-src 'self' blob:; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
-    );
+    reply.header('Content-Security-Policy', publicContentSecurityPolicy);
     return reply.type(types[extname(file)]).send(readFileSync(file));
   });
   app.addHook('preClose', async () => {

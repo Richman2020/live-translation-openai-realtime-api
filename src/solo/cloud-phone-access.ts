@@ -416,6 +416,24 @@ export class CloudPhoneAccess {
     });
   }
 
+  /** Informational browser bootstrap. A claimed tab only selects a read-only
+   * status projection; no controller proof, provider settings or Voice token is
+   * recovered here, and neither this read nor an SSE reconnect renews a lease. */
+  browserSession(context: CloudAccessContext, tabId?: string) {
+    return this.policy.runAuthorizedSession(context, 'read', () => ({
+      mode: 'controlled' as const,
+      csrfToken: this.policy.currentCsrfToken(context),
+      controller: this.controllerLeases.status(context, tabId),
+      activeSession: this.ownedActive(context),
+      busy:
+        this.preparing ||
+        this.manager.controlAdmissionBlocked ||
+        !!this.voiceJoin?.cleanupUnconfirmed,
+      translationEngines: ['pocket-prefix', 'pocket-captions'] as const,
+      defaultTranslationEngine: 'pocket-prefix' as const,
+    }));
+  }
+
   beginHangup(
     context: CloudAccessContext,
     callId: string,

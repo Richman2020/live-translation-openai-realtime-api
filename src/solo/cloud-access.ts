@@ -382,6 +382,16 @@ export class CloudAccessPolicy {
     this.requireAction(action, issued.csrf, session);
   }
 
+  /** Read-only bootstrap for an authenticated same-origin browser. The returned
+   * CSRF token can accompany a NEW POST context; it cannot promote this GET
+   * context to a write capability or return the opaque login credential. */
+  currentCsrfToken(context: CloudAccessContext): string {
+    const { issued, session } = this.refresh(context);
+    this.requireSourceAction(issued.source, issued.originPresent, 'read');
+    this.requireAction('read', issued.csrf, session);
+    return session.csrfToken;
+  }
+
   /** Current server-authenticated deadline; no credential/session fields escape. */
   expiresAt(
     context: CloudAccessContext,

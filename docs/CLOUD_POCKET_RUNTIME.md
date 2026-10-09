@@ -39,6 +39,21 @@
 
 Michael 是既有公开固定英语预设。worker 不接受 URL、下载、个人录音、克隆声音或引擎切换参数。缺失/篡改资产立即失败，不下载补齐；worker 环境继续强制 `HF_HUB_OFFLINE=1`、`TRANSFORMERS_OFFLINE=1` 并启用既有 Python socket 审计拦截。这是应用内约束，后续真实运行仍应采用限制出站网络的环境。OpenAI/Twilio 密钥、代理凭据、HF token、`PYTHONPATH` 等不继承到 Pocket 子进程，只额外传入已验证的 runtime 目录和必要系统变量。
 
+## 当前材料阻塞
+
+2026-10-09 在云端工作区、基线 `bda4697` 做只读核查：Git 跟踪文件中没有
+Pocket 完整 Python freeze，也没有 `model.safetensors`、`michael.safetensors`、
+`tokenizer.json` 或 `english-public-local.yaml` 资产本体。当前默认
+`.runtime/pocket-tts-lab` 目录不存在；未读取或检查其它环境的私密 runtime。
+`package-lock.json` 锁定的是 Node 依赖，`scripts/rvc-probe-requirements.txt`
+用于另一项 RVC probe，都不能替代 Pocket freeze。worker 和历史记录中的固定
+版本、大小与哈希提供验真依据；资产获取脚本也不代表模型已在本工作区预置。
+
+因此完整依赖清单及匹配资产仍须作为已审核材料另行提供，之后才可准备可复现
+Linux runtime 和验收真实 warm。此次不从用户电脑提取、不下载模型、不安装或
+凭主要版本号补写 freeze。持久预算/恢复与最少部署输入见
+[事务与恢复门槛](CLOUD_TRANSACTION_RECOVERY.md)。
+
 ## 常驻与清理
 
 `pocket-runtime.ts` 每个 Node 进程只创建一个 Pocket worker；状态查询不会启动模型。就绪检查等待严格校验、加载和一次预热后才成功；后续通话复用该 worker。推理保持串行，原有待处理作业、PCM 和输出时长上限保留。取消后丢弃迟到音频，仍等待 active 作业已验证结束，防止下一通串入上一通输出。

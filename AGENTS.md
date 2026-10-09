@@ -25,6 +25,8 @@
 
 ### 2026-10-09 云端开发第一里程碑
 
+最新继续授权从已独立核验CI的 `bda4697` 开始，将现有controller与每通Voice协议接到实际工作台网页，通过显式DI隔离入口和fake SDK/provider验收。覆盖领取/续约/撤销、只读标签、刷新/导航/取消/断连及迟到结果；保持默认local、逐句字幕、Pocket Michael和英文原声回程。补最小持久预算/intent、两腿SID与清理事务恢复契约，尚不选择或实现存储与登录。完成提交、推送和精确CI核验后停在真实部署输入门槛，不自行增加后续fake里程碑；完整Python freeze和预置模型缺失仅报告材料阻塞，不访问用户电脑提取或下载。当前接线见 [实际工作台](docs/CLOUD_CONTROLLED_WORKBENCH.md)，停止点见 [事务与恢复门槛](docs/CLOUD_TRANSACTION_RECOVERY.md)。
+
 最新继续授权从已核验 `48ac522` 开始，完成单人标签页controller lease及per-call一次性Voice加入许可的离线闭环。验证过的会话与标签页、服务端epoch、期限、显式续约/撤销绑定；活动或未确认清理时拒绝接管。生产签名器与持久预算/intent没有默认实现，仅预留明确注入端口，测试只用假令牌。cloud两个guard、回环及Twilio验签继续；不选登录提供方、不配置秘密/权限、不新增依赖或模型、不部署/改回调/拨号/合并。实现与剩余门槛见 [控制租约与Voice许可](docs/CLOUD_CONTROLLER_VOICE.md)。
 
 最新已授权里程碑从 `709806b` 继续，将独立授权组件通过显式服务端依赖注入接入真实电话应用路由，并用模拟身份/provider/bridge离线验收。注入不得绕过两个cloud启动保护；默认local流程保持可用，注入应用仍限制回环连接。未决定登录、控制lease、持久预算/journal、语音令牌等路径继续拒绝，不增加真实访问权限，不配置秘密、部署或调用付费服务。记录见 [应用集成](docs/CLOUD_PHONE_APPLICATION_INTEGRATION.md)。
