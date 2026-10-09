@@ -29,6 +29,8 @@ jobs:
         run: npm ci --ignore-scripts --no-audit --no-fund --registry=https://registry.npmjs.org
       - name: Build
         run: npm run build
+      - name: Type-check source and all test fixtures
+        run: npm run typecheck
       - name: Offline regression (mock providers, no model download)
         run: npm test
       - name: Check browser JavaScript syntax

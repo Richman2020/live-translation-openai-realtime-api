@@ -4,6 +4,28 @@
 
 需求见 [PROJECT_BRIEF.md](PROJECT_BRIEF.md)，工作规则见 [AGENTS.md](AGENTS.md)，运行步骤见 [LOCAL_SETUP.md](LOCAL_SETUP.md)，后续执行入口见 [LOCAL_CODEX_HANDOFF.md](LOCAL_CODEX_HANDOFF.md)。
 
+## 最新实施：测试类型清理与云安全方案小里程碑（2026-10-09）
+
+- 父线程及本环境已分别核验第一里程碑头 `a14e7bbd08b0a0cd49fe27f94823654b2b4a8660`、[草稿PR #3](https://github.com/Richman2020/live-translation-openai-realtime-api/pull/3) 和 [CI run 37895082500](https://github.com/Richman2020/live-translation-openai-realtime-api/actions/runs/37895082500) 整体成功，覆盖构建、725通过/5平台跳过/0失败及真实浏览器14项。此次开始工作区干净、真实远端仍为该头，沿用 `codex/cloud-phone-conversation-20261009`，不重建旧main或改用户电脑。
+- 真实复现14个测试源码类型错误后，仅修三个测试文件：Fastify注入payload采用库的公开类型、无值deferred显式`void`、content-type读取保留原值和原断言但收窄静态类型。三文件修改前后TypeScript生成的JavaScript逐字一致，不修改生产代码、运行行为或断言，也不增加any/关闭检查。新增 `npm run typecheck`（`tsc --noEmit -p tsconfig.json`），CI包含源码和所有测试的类型检查；原依赖及package-lock未变。
+- 本轮云工作限于推荐与审查文档：[云认证与部署准备](docs/CLOUD_AUTH_DEPLOYMENT_PLAN.md)。推荐无需新增provider的单用户验证，仍需用户确认及后续独立实现/验收。文档覆盖principal/session/owner/控制lease、cookie/CSRF/Origin/WS、Twilio签名和媒体绑定、密钥存储、计费防滥用、失联与重启清理、单实例warm Pocket资源及具体授权配置清单。它不是已实现的鉴权，不能据变量或文档把cloud标成ready。
+
+本轮实际验证环境与第一里程碑相同（云端Linux、Node24.19.0/npm11.9.0、已锁定依赖），没有额外安装：
+
+| 验证 | 实际结果 |
+| --- | --- |
+| `npm run typecheck` | 通过；既有14个错误全部消除 |
+| `npm run build` | 通过 |
+| 定向测试 | 三个相关测试文件162通过；最终类型注解后安全测试另11通过 |
+| `npm test` | 730项：725通过、5个Windows专属平台跳过、0失败；未增删运行测试 |
+| `npm run test:conversation:browser` | 真实Chromium14项通过；页面0外部请求、0异常；模拟事件，不录音/拨号 |
+| 运行代码、锁文件及模型 | 本小里程碑未修改；三测试生成JS相同 |
+| 独立审查 | 类型修复及完整云方案通过；浏览器票据发出前持久预算/intent、迟到回调cleanup-only、跨设备撤销、旧本机额度不转云授权及Pocket资源/权限边界均明确，无剩余提交阻塞 |
+
+保留local loopback/Host/Origin/token及Twilio签名验证、两个solo入口的 `CLOUD_AUTH_NOT_IMPLEMENTED`。没有创建凭据、外部provider/云资源或访问授权，没有模型下载、部署、Twilio回调修改或付费API/电话调用。完整Python freeze与预置模型、Linux实际合成、独立云鉴权/隔离、真实麦克风/普通手机及实际耳听/数字否定/积压仍待后续验收。下一步只按方案列出的门槛和授权清单逐项推进，不把本次类型清理扩成整套运行改造。
+
+提交及本小里程碑远端CI结果以最终回读及草稿PR正文为准；下方第一里程碑的类型错误与失败CI记录为历史状态，已经由本节和后续成功核验取代，不应继续当作当前阻塞。
+
 ## 最新实施：云端开发的逐句对话第一里程碑（2026-10-09）
 
 - 开始时真实远端 `main=5fabf51`、PR #2 / `codex/local-phone-workbench=df3c447`；工作区干净。从功能基线 `df3c4474013e0612e0d5b20a21d673c0af6489e1` 建立独立 `codex/cloud-phone-conversation-20261009`，保留既有工作；未从旧 main 实现、未修改用户电脑。本节为当前云端开发状态，下方 Windows 电话、部署和回调记录仅为历史环境证据。

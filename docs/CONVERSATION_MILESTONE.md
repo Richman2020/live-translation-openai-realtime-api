@@ -11,6 +11,7 @@ Linux 工作区，不连接用户电脑。
 ```bash
 npm ci --ignore-scripts --no-audit --no-fund --registry=https://registry.npmjs.org
 npm run build
+npm run typecheck
 npm test
 npm run test:conversation:browser
 ```
@@ -62,10 +63,14 @@ UI 每个卡片固定两个文字位置；草稿标为临时，确定文字标�
 追加时位置保持与回到最新。另由离线回归覆盖服务端配对、修订、取消及流控。
 
 本轮生产构建与730项运行回归通过（725通过、5项Windows专属检查在Linux跳过）。
-额外的全仓测试源码 `tsc --noEmit -p tsconfig.json` 尚有14个既有类型错误，位于
+第一里程碑结束时，额外的全仓测试源码 `tsc --noEmit -p tsconfig.json` 有14个既有类型错误，位于
 `outbound-readiness.test.ts` / `solo-security.test.ts` 及浏览器测试的原有
 `deferred.resolve()` 行。同依赖的独立基线worktree也有14个，按文件、错误内容与
 数量比对一致；本轮没有新增错误，该历史检查没有被写成通过。
+
+后续类型清理小里程碑已仅在三个测试中修复上述14项，修改前后生成的JavaScript
+完全一致。新增 `npm run typecheck` 将源码和所有测试一起检查，当前通过，CI也执行
+该步骤；最新验证与云安全方案范围以 `PROGRESS.md` 顶部记录为准。
 
 ## 边界与后续
 

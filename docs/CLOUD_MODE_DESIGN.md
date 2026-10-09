@@ -4,6 +4,8 @@
 
 本轮仅完成云运行配置及拒绝启动保护；**云模式尚不能运行电话**。逐句字幕与浏览器模拟可独立验收，不代表云认证、真实麦克风、普通手机通话或延迟已经通过。未部署云服务、未改 Twilio 回调、未调用付费接口、未下载模型。
 
+下一里程碑的可审查方案见 [云认证、会话隔离与部署准备](CLOUD_AUTH_DEPLOYMENT_PLAN.md)：推荐无需外部 provider 的单账户自托管 scrypt 验证与 opaque 会话 cookie，身份方案及具体配置待确认。本文运行配置和拒绝启动行为保持不变。
+
 原上游 Flex 的 `src/index.ts` / `npm start` 是独立入口，不受此 solo 保护控制。不能用它绕过云模式保护，或把该入口的启动成功当作本方案完成。
 
 ## 已实现的运行配置
@@ -34,7 +36,7 @@ CLOUD_WARM_INSTANCES=1
 
 当前 `server.ts` 固定使用 Twilio 浏览器 identity `ai-phone`，`SessionManager` 共享 presence / activeSession，SSE 订阅者接收全局事件。这些只适用于已受 loopback 保护的本机单人模式。将来独立 cloud server 必须完成下面流程后才能解除拒绝启动保护；不能通过设置 `AUTH_READY=true` 或删除本机检查实现。
 
-1. **浏览器登录与服务端会话。** 采用受信身份提供方的登录流程，服务端验证登录结果并限制允许的账户。登录交付随机、不透明的短期会话 cookie，`HttpOnly`、`Secure`、`SameSite`，设定到期及撤销机制，轮换登录前会话 ID。会话存储仅在服务器保留用户身份与所有权；不将供应商密钥或登录 bearer token 交付页面。具体身份提供方和新增访问权限尚未选定，本轮不安装认证服务。
+1. **浏览器登录与服务端会话。** 第一版推荐单账户自托管验证：使用 Node 内置异步 `crypto.scrypt` 验证独立密码，服务端保存带随机 salt 的验证摘要，不复用本机 token。登录交付随机、不透明的短期会话 cookie，`HttpOnly`、`Secure`、`SameSite`，设定到期及撤销机制，轮换登录前会话 ID；稳定 principal 与登录会话、browser owner、控制 lease 分开。具体参数、标签页控制和授权清单见 [认证方案](CLOUD_AUTH_DEPLOYMENT_PLAN.md)。推荐尚待确认/实现，不生成秘密或安装外部认证服务；外部 IdP 仅作为以后另行授权选项。
 2. **固定 origin 与请求防护。** 浏览器修改状态的请求必须匹配 `CLOUD_PUBLIC_ORIGIN`，并验证独立 CSRF token；服务端按 cookie 会话授权，禁止通配跨域。TLS 由部署入口终止，HTTPS/WSS 外部地址固定；只信任部署入口明确定义的代理来源，不以任意 `X-Forwarded-*` / `Host` 推导签名地址或授权。HTTP 到 HTTPS 跳转及 cookie 不走明文须在实际部署入口验收。
 3. **每浏览器 owner。** 登录会话内部生成稳定 owner ID；每通电话、浏览器 presence、Twilio 浏览器 identity、字幕账本及 SSE 订阅绑定该 owner。浏览器重连可延续所有权，其他标签页默认不自动接管，接管要明确处理。浏览器不能通过传入 `ownerId`、call ID 或 Twilio identity 取得权限。`status`、`events`、`token`、`presence`、`calls` 和 `calls/:id/hangup` 均从已认证 owner 决定可见范围；owner A 不得读取或结束 owner B 的电话。
 4. **单实例不等于单一 owner。** 第一阶段仅一个 warm 进程、一个固定 Pocket worker；可以限制全局仅一通电话，其他 owner 得到 busy，仍必须逐 owner 授权。供应商签发的短期浏览器语音令牌仅包含对应 owner 的 voice identity / 应用 grant；`/voice/client` 必须把已签名的 Twilio identity、owner、通话及角色 nonce 对齐，不能仅凭已知 session ID 使用别人的电话。每腿媒体仍验证账户、call SID、role、nonce、首次 start 消息；禁止跨会话混音。

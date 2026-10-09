@@ -2222,7 +2222,7 @@ test('desktop online entry registers without recording, restores after a transie
 });
 
 test('closing a desktop page during automatic token acquisition prevents a late Device from reopening it', async () => {
-  const token=deferred();
+  const token=deferred<void>();
   const f=await pageFixture(async()=>streamFixture().stream,undefined,{locationHash:'#token=offline-test-access-only&online=1',skipManualEnable:true,beforeResponse:async path=>{if(path==='/api/token')await token.promise;}});
   for(const timer of f.pendingTimeouts(0))timer.fire();await settlePage();
   f.pagehide();token.resolve();await settlePage();

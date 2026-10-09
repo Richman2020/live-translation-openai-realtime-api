@@ -19,6 +19,7 @@
     "quality:analyze": "node --import tsx scripts/analyze-quality-results.ts",
     "quality:silence": "node --import tsx scripts/check-continuous-silence.ts",
     "test": "node --import tsx --test tests/*.test.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
     "test:conversation:browser": "node scripts/verify-conversation-browser.mjs",
     "predev": "npm run check:config",
     "prestart": "npm run check:config",
