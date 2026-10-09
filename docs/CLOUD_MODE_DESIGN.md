@@ -2,11 +2,11 @@
 
 日期：2026-10-09。适用入口：`src/solo/index.ts` / `buildSoloServer()`。
 
-本轮仅完成云运行配置及拒绝启动保护；**云模式尚不能运行电话**。逐句字幕与浏览器模拟可独立验收，不代表云认证、真实麦克风、普通手机通话或延迟已经通过。未部署云服务、未改 Twilio 回调、未调用付费接口、未下载模型。
+本文记录首轮云运行配置及拒绝启动保护；**云模式尚不能运行电话**。后续已完成独立授权组件及真实应用路径的模拟依赖集成，仍不代表生产云认证、真实麦克风、普通手机通话或延迟已经通过。未部署云服务、未改 Twilio 回调、未调用付费接口、未下载模型。
 
 下一里程碑的可审查方案见 [云认证、会话隔离与部署准备](CLOUD_AUTH_DEPLOYMENT_PLAN.md)：推荐无需外部 provider 的单账户自托管 scrypt 验证与 opaque 会话 cookie，身份方案及具体配置待确认。本文运行配置和拒绝启动行为保持不变。
 
-后续独立组件见 [会话/通话授权边界](CLOUD_ACCESS_BOUNDARY.md)：仅提供可测试接口与 HTTP/浏览器 WS 拒绝、归属校验，不注册生产路由、不实现登录或 SSE，不解除本文 cloud guard。
+后续组件见 [会话/通话授权边界](CLOUD_ACCESS_BOUNDARY.md)；最新 [电话应用离线集成](CLOUD_PHONE_APPLICATION_INTEGRATION.md) 通过显式依赖对象保护真实 status/create/hangup/SSE 及关联媒体生命周期。默认生产入口不启用该对象，不实现登录，也不解除本文 cloud guard。
 
 原上游 Flex 的 `src/index.ts` / `npm start` 是独立入口，不受此 solo 保护控制。不能用它绕过云模式保护，或把该入口的启动成功当作本方案完成。
 
@@ -36,7 +36,7 @@ CLOUD_WARM_INSTANCES=1
 
 ## 云认证与通话隔离的实现门槛
 
-当前 `server.ts` 固定使用 Twilio 浏览器 identity `ai-phone`，`SessionManager` 共享 presence / activeSession，SSE 订阅者接收全局事件。这些只适用于已受 loopback 保护的本机单人模式。将来独立 cloud server 必须完成下面流程后才能解除拒绝启动保护；不能通过设置 `AUTH_READY=true` 或删除本机检查实现。
+默认本机路径仍使用 Twilio 浏览器 identity `ai-phone`、共享 presence / activeSession 和全局 SSE，只适用于受 loopback 保护的本机单人模式。新的显式注入路径生成每通服务器 identity、隔离 owner 状态与 SSE；token/presence/lease 和生产启动尚未启用。将来独立 cloud server 必须完成下面流程后才能解除拒绝启动保护；不能通过设置 `AUTH_READY=true` 或删除本机检查实现。
 
 1. **浏览器登录与服务端会话。** 第一版推荐单账户自托管验证：使用 Node 内置异步 `crypto.scrypt` 验证独立密码，服务端保存带随机 salt 的验证摘要，不复用本机 token。登录交付随机、不透明的短期会话 cookie，`HttpOnly`、`Secure`、`SameSite`，设定到期及撤销机制，轮换登录前会话 ID；稳定 principal 与登录会话、browser owner、控制 lease 分开。具体参数、标签页控制和授权清单见 [认证方案](CLOUD_AUTH_DEPLOYMENT_PLAN.md)。推荐尚待确认/实现，不生成秘密或安装外部认证服务；外部 IdP 仅作为以后另行授权选项。
 2. **固定 origin 与请求防护。** 浏览器修改状态的请求必须匹配 `CLOUD_PUBLIC_ORIGIN`，并验证独立 CSRF token；服务端按 cookie 会话授权，禁止通配跨域。TLS 由部署入口终止，HTTPS/WSS 外部地址固定；只信任部署入口明确定义的代理来源，不以任意 `X-Forwarded-*` / `Host` 推导签名地址或授权。HTTP 到 HTTPS 跳转及 cookie 不走明文须在实际部署入口验收。

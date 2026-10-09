@@ -11,6 +11,10 @@ import { desktopConnectivity } from './desktop-connectivity';
 import { ConnectionMaintenance } from './connection-maintenance';
 import { ConfigStore } from './config';
 import { loadPhoneRuntime, requireLocalPhoneRuntime } from './cloud-runtime';
+import { CloudAccessError } from './cloud-access';
+import { createCloudAccessTransport } from './cloud-access-transport';
+import { CloudPhoneAccess } from './cloud-phone-access';
+import { createOwnedPhoneEventStreams } from './phone-event-stream';
 import {
   isLocalRequest,
   sameOrigin,
@@ -36,6 +40,7 @@ export async function buildSoloServer(
     publicReadinessChecker?: typeof checkPublicReadiness;
     translationReadinessChecker?: typeof checkTranslationEngine;
     providerVerifier?: typeof verifyProviders;
+    browserControl?: CloudPhoneAccess;
   } = {},
 ) {
   // Exported builders are also entry points: never expose local control APIs by
@@ -43,8 +48,24 @@ export async function buildSoloServer(
   requireLocalPhoneRuntime(
     loadPhoneRuntime({ envPath: options.configStore?.envPath }),
   );
+  const { browserControl } = options;
+  if (
+    browserControl !== undefined &&
+    (!(browserControl instanceof CloudPhoneAccess) ||
+      !options.configStore ||
+      !options.sessionManager ||
+      browserControl.manager !== options.sessionManager ||
+      options.publicReadinessChecker !== undefined ||
+      options.translationReadinessChecker !== undefined ||
+      options.providerVerifier !== undefined)
+  )
+    throw new SessionError('CLOUD_PHONE_DEPENDENCIES_REQUIRED', 503);
   const configStore = options.configStore || new ConfigStore();
   const manager = options.sessionManager || new SessionManager();
+  browserControl?.assertConfig(configStore.value);
+  const browserTransport = browserControl
+    ? createCloudAccessTransport(browserControl.policy)
+    : null;
   const publicDir = resolve(options.publicDir || 'public');
   // URLs can carry stream nonces/SSE tokens. Never enable automatic HTTP logging.
   const app = fastify({
@@ -53,6 +74,14 @@ export async function buildSoloServer(
     trustProxy: false,
     bodyLimit: 16 * 1024,
   });
+  const ownedEventStreams =
+    browserControl && browserTransport
+      ? createOwnedPhoneEventStreams({
+          access: browserControl,
+          transport: browserTransport,
+          manager,
+        })
+      : null;
   const subscribers = new Set<
     (event: { event: string; data: unknown }) => void
   >();
@@ -111,6 +140,25 @@ export async function buildSoloServer(
     // Minimal deployment probe is the sole public route outside /voice/.
     if (path === '/api/health' && req.method === 'GET') return undefined;
     if (path.startsWith('/voice/')) return undefined;
+    if (browserControl && path.startsWith('/api/')) {
+      reply
+        .header('Cache-Control', 'private, no-store')
+        .header(
+          'Vary',
+          'Origin, Sec-Fetch-Site, Sec-Fetch-Mode, Sec-Fetch-Dest, Cookie',
+        );
+      // This dependency-injected path remains an offline loopback application
+      // boundary. It cannot enable a cloud listener or bypass startup protection.
+      const remote = req.raw.socket.remoteAddress || req.ip;
+      if (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(remote))
+        return reply.code(403).send({ error: 'LOCAL_ACCESS_ONLY' });
+      if (
+        !['/api/status', '/api/calls', '/api/events'].includes(path) &&
+        !/^\/api\/calls\/[^/]+\/hangup$/.test(path)
+      )
+        return reply.code(503).send({ error: 'CLOUD_CONTROL_UNAVAILABLE' });
+      return undefined;
+    }
     if (!isLocalRequest(req, configStore.value.API_PORT) || !sameOrigin(req))
       return reply.code(403).send({ error: 'LOCAL_ACCESS_ONLY' });
     if (path.startsWith('/api/') && !validLocalToken(req, configStore.value))
@@ -126,14 +174,17 @@ export async function buildSoloServer(
     return undefined;
   });
   app.setErrorHandler((error, req, reply) => {
-    const code = error instanceof SessionError ? error.code : 'REQUEST_FAILED';
+    const code =
+      error instanceof SessionError || error instanceof CloudAccessError
+        ? error.code
+        : 'REQUEST_FAILED';
     let statusCode = 500;
     if (error instanceof SessionError) statusCode = error.statusCode;
     else if (error.statusCode && error.statusCode < 500)
       statusCode = error.statusCode;
     reply.code(statusCode).send({
       error: code,
-      ...(code === 'CONFIGURATION_REQUIRED'
+      ...(code === 'CONFIGURATION_REQUIRED' && !browserControl
         ? { checks: configStore.checks() }
         : {}),
     });
@@ -144,7 +195,18 @@ export async function buildSoloServer(
     mode: 'solo',
     ok: true,
   }));
-  app.get('/api/status', async () => status());
+  app.get(
+    '/api/status',
+    browserTransport?.sessionHttpRoute('read') || {},
+    async (req) => {
+      if (browserControl && browserTransport)
+        return browserTransport.executeSessionHttp(req, (context) => ({
+          mode: 'solo',
+          activeSession: browserControl.ownedActive(context),
+        }));
+      return status();
+    },
+  );
   app.post<{ Body: { action: string; lease?: string } }>(
     '/api/connection-maintenance',
     async (req) => {
@@ -252,6 +314,7 @@ export async function buildSoloServer(
   });
   app.post<{ Body: { to: string; translationEngine?: TranslationEngine } }>(
     '/api/calls',
+    browserTransport?.sessionHttpRoute('mutate') || {},
     async (req) => {
       const engine = requestedEngine(req.body);
       if (maintenance.active)
@@ -261,6 +324,15 @@ export async function buildSoloServer(
       requireConfigured();
       if (typeof req.body?.to !== 'string')
         throw new SessionError('INVALID_DESTINATION');
+      if (browserControl && browserTransport) {
+        const prepared = await browserControl.prepareCreate(
+          browserTransport.requestContext(req),
+          configStore.value,
+          req.body.to.trim(),
+          engine,
+        );
+        return browserControl.createPrepared(prepared);
+      }
       if (manager.activeSession) throw new SessionError('BUSY', 409);
       checkingOutbound = true;
       try {
@@ -290,47 +362,72 @@ export async function buildSoloServer(
       }
     },
   );
-  app.post<{ Params: { id: string } }>('/api/calls/:id/hangup', async (req) => {
-    await manager.end(req.params.id);
-    if (!manager.isCleanupConfirmed(req.params.id))
-      throw new SessionError('CALL_CLEANUP_UNCONFIRMED', 503);
-    return { ok: true };
-  });
-  app.get('/api/events', (req, reply) => {
-    if (subscribers.size >= 5)
-      return reply.code(429).send({ error: 'TOO_MANY_EVENT_CONNECTIONS' });
-    reply.hijack();
-    reply.raw.writeHead(200, {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-store',
-      Connection: 'keep-alive',
-      'X-Accel-Buffering': 'no',
-      'Referrer-Policy': 'no-referrer',
-    });
-    const send = ({ event, data }: { event: string; data: unknown }) => {
-      if (!reply.raw.destroyed) {
-        // Disconnect stalled tabs instead of buffering unbounded transcripts.
-        if (reply.raw.writableLength > 256 * 1024) {
-          reply.raw.destroy();
-          return;
-        }
-        reply.raw.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  app.post<{ Params: { id: string } }>(
+    '/api/calls/:id/hangup',
+    browserTransport?.httpRoute((req) => ({
+      callId: (req.params as { id: string }).id,
+      action: 'mutate',
+    })) || {},
+    async (req) => {
+      if (browserControl && browserTransport) {
+        const context = browserTransport.requestContext(req);
+        const intent = browserControl.beginHangup(context, req.params.id);
+        await browserControl.finishHangup(intent);
+        if (!browserControl.recheckCleanup(context, req.params.id))
+          throw new SessionError('CALL_CLEANUP_UNCONFIRMED', 503);
+        return { ok: true };
       }
-    };
-    send({ event: 'snapshot', data: { activeSession: manager.activeSession } });
-    subscribers.add(send);
-    eventStreams.add(reply.raw);
-    const heartbeat = setInterval(() => {
-      if (!reply.raw.destroyed) reply.raw.write(': keepalive\n\n');
-    }, 20000);
-    heartbeat.unref?.();
-    reply.raw.once('close', () => {
-      clearInterval(heartbeat);
-      subscribers.delete(send);
-      eventStreams.delete(reply.raw);
+      await manager.end(req.params.id);
+      if (!manager.isCleanupConfirmed(req.params.id))
+        throw new SessionError('CALL_CLEANUP_UNCONFIRMED', 503);
+      return { ok: true };
+    },
+  );
+  if (ownedEventStreams) {
+    app.get(
+      '/api/events',
+      { preHandler: ownedEventStreams.guard },
+      ownedEventStreams.handler,
+    );
+  } else
+    app.get('/api/events', (req, reply) => {
+      if (subscribers.size >= 5)
+        return reply.code(429).send({ error: 'TOO_MANY_EVENT_CONNECTIONS' });
+      reply.hijack();
+      reply.raw.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-store',
+        Connection: 'keep-alive',
+        'X-Accel-Buffering': 'no',
+        'Referrer-Policy': 'no-referrer',
+      });
+      const send = ({ event, data }: { event: string; data: unknown }) => {
+        if (!reply.raw.destroyed) {
+          // Disconnect stalled tabs instead of buffering unbounded transcripts.
+          if (reply.raw.writableLength > 256 * 1024) {
+            reply.raw.destroy();
+            return;
+          }
+          reply.raw.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+        }
+      };
+      send({
+        event: 'snapshot',
+        data: { activeSession: manager.activeSession },
+      });
+      subscribers.add(send);
+      eventStreams.add(reply.raw);
+      const heartbeat = setInterval(() => {
+        if (!reply.raw.destroyed) reply.raw.write(': keepalive\n\n');
+      }, 20000);
+      heartbeat.unref?.();
+      reply.raw.once('close', () => {
+        clearInterval(heartbeat);
+        subscribers.delete(send);
+        eventStreams.delete(reply.raw);
+      });
+      return undefined;
     });
-    return undefined;
-  });
 
   app.post<{ Body: Record<string, string> }>(
     '/voice/client',
@@ -342,6 +439,11 @@ export async function buildSoloServer(
   app.post<{ Body: Record<string, string> }>(
     '/voice/incoming',
     async (req, reply) => {
+      if (browserControl) {
+        const response = new twilio.twiml.VoiceResponse();
+        response.reject({ reason: 'busy' });
+        return reply.type('text/xml').send(response.toString());
+      }
       requireConfigured();
       if (verifying || maintenance.active) {
         const response = new twilio.twiml.VoiceResponse();
@@ -439,10 +541,13 @@ export async function buildSoloServer(
     return reply.type(types[extname(file)]).send(readFileSync(file));
   });
   app.addHook('preClose', async () => {
+    ownedEventStreams?.close();
     for (const stream of eventStreams) stream.end();
     await manager.close();
   });
   app.addHook('onClose', async () => {
+    ownedEventStreams?.close();
+    browserControl?.close();
     manager.off('event', broadcast);
     closeNanoVoiceWorker();
     closePocketVoiceWorker();

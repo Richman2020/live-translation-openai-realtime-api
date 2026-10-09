@@ -1,9 +1,11 @@
 # 云会话与通话归属：独立授权组件
 
 日期：2026-10-09。依据 [已审查方案](CLOUD_AUTH_DEPLOYMENT_PLAN.md)。
-本里程碑提供授权组件与离线 HTTP/WebSocket 证据；**没有接入生产电话路由，
-没有登录提供方，cloud 两个启动入口仍拒绝 `CLOUD_AUTH_NOT_IMPLEMENTED`**。
-本机 loopback/Host/Origin/token 与 Twilio 签名边界保持原样。
+本文件记录 `709806b` 时的独立组件及浏览器读取来源策略。随后已通过显式服务端
+依赖注入接入真实电话应用路由，并新增按 owner 授权的 SSE，见
+[电话应用离线集成](CLOUD_PHONE_APPLICATION_INTEGRATION.md)。**默认生产入口没有启用
+该注入，没有登录提供方，cloud 两个启动入口仍拒绝 `CLOUD_AUTH_NOT_IMPLEMENTED`**。
+本机 loopback/Host/Origin/token 与 Twilio 签名边界继续保留。
 
 ## 当前接口与信任边界
 
@@ -21,7 +23,7 @@
   服务端登记的通话绑定 authSession、principal、browserOwner 与 epoch，登记数量
   有上限且 ID 不能重复重绑。不同登录即使共享 principal 或 owner 字段仍不能越权。
 - 写操作及输入音频还须匹配会话 CSRF；原文/译文和输出音频按读取权限验证。
-  接管一律拒绝。本组件未实现控制 lease、预算或实际拨号授权。
+  接管一律拒绝。本组件未实现控制 lease、预算或生产拨号许可。
 
 ## 兼容浏览器的请求来源策略
 
@@ -63,7 +65,8 @@ commit/send。异步准备发生在它之前；准备期间撤销、过期或 ep
 | `browserSocketGuard()` | 在浏览器升级入口验证会话、固定来源、通话归属并限制连接数量                                 |
 | `bindBrowserSocket()`  | 绑定唯一通话；每条输入和每次输出重新授权，撤销/过期后拒绝处理与发送，并关闭流              |
 
-HTTP 仅支持缓冲完成的响应；流式响应被拒绝并销毁，未实现 SSE 逐块校验。
+普通 HTTP 适配器仅支持缓冲完成的响应；任意流式响应被拒绝并销毁。后来新增的
+电话 SSE 使用独立流组件与每次写出授权，不以普通 HTTP onSend 代替逐块检查。
 
 浏览器 WS 无法设置自定义升级 CSRF header；写帧中仅允许独立 `csrfToken` 字段
 映射到校验，帧的 cookie/owner/session 字段不能替换握手身份。未知字段、其他
@@ -72,8 +75,9 @@ call ID、接管、非法或过大帧拒绝。连接数、待处理帧/输出与
 跨系统撤销保证。
 
 这些接口专用于浏览器。`/voice/*` 明确拒绝使用该适配器；Twilio 的签名、账户、
-CallSid、role/nonce 与媒体绑定是另一边界，现有实现未改。供应商回调与未来云
-owner/journal 的绑定尚未接线，不能把浏览器 cookie 当作 Twilio 鉴权。
+CallSid、role/nonce 与媒体绑定是另一边界，原校验继续。新的注入式应用路径将
+供应商回调关联已登记的 owner 通话，但没有持久 journal；浏览器 cookie 不能
+代替 Twilio 鉴权。
 
 ## 离线验收与尚未接线部分
 
@@ -91,13 +95,14 @@ HTTP 使用 Fastify 注入，WS 使用云端容器内临时回环端口与锁定
 跨会话读写/音频/字幕、伪造上下文、禁止接管、准备后撤销和队列/连接回收。
 具体数量和实际结果以 `PROGRESS.md` 最新记录及当前 PR CI 为准。
 
-已独立验证浏览器读取的来源规则；**没有实现登录或现有电话入口接线，也没有提供
-生产 SSE**。缺 resolver、缺可信来源证据的读取、未授权写/WS与流式响应继续拒绝。
-真实 HTTPS/反向代理、cookie签发、会话存储和 SSE 逐块授权仍须各自实现并验收；
-不能将组件测试或浏览器请求头观察称作已接入电话的端到端通过。
+已独立验证浏览器读取的来源规则，并在后续里程碑验证真实电话 router、SessionManager
+和 owner SSE 的模拟依赖闭环。**没有实现登录或启用生产入口与 SSE**。缺 resolver、
+缺可信来源证据的读取、未授权写/WS与普通 HTTP 流式响应继续拒绝。
+真实 HTTPS/反向代理、cookie签发及会话存储仍待实现和验收；不能将离线接线或
+浏览器请求头观察称作真实云端浏览器到普通手机端到端通过。
 
 实际登录/cookie签发轮换、会话存储、控制 lease、允许号码/费用预算、持久 journal、
-供应商回调清理、既有全局 SessionManager/SSE 的 owner 接线、真实 HTTPS/代理和
-Linux Pocket warm 均未完成。本次内存通话归属表不能作为重启恢复保证。
+重启后的供应商回调清理、默认生产 SessionManager/SSE 的启用、真实 HTTPS/代理和
+Linux Pocket warm 均未完成。当前内存通话归属表不能作为重启恢复保证。
 保持 cloud 总保护，按 [授权配置清单](CLOUD_AUTH_DEPLOYMENT_PLAN.md#后续执行前需要用户确定的具体配置)
 和分步门槛推进，不据这些离线组件宣称云电话 ready。

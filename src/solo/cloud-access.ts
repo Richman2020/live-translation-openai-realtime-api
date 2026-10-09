@@ -171,6 +171,10 @@ export class CloudAccessPolicy {
       throw new CloudAccessError('FORBIDDEN');
   }
 
+  get publicOrigin(): string {
+    return this.origin;
+  }
+
   private requireSourceAction(
     source: CloudRequestSource | undefined,
     originPresent: boolean,
@@ -393,6 +397,24 @@ export class CloudAccessPolicy {
     this.calls.set(callId, binding(session));
   }
 
+  /** Private rollback capability for a server admission that has not published.
+   * It revokes metadata only, never grants permission or stops an active phone.
+   * The caller must retain registrations for every committed/uncertain session.
+   */
+  registerCallWithRollback(
+    context: CloudAccessContext,
+    callId: string,
+  ): () => void {
+    this.registerCall(context, callId);
+    const registered = this.calls.get(callId);
+    let disposed = false;
+    return () => {
+      if (disposed) return;
+      disposed = true;
+      if (this.calls.get(callId) === registered) this.calls.delete(callId);
+    };
+  }
+
   authorizeCall(
     context: CloudAccessContext,
     callId: string,
@@ -410,6 +432,22 @@ export class CloudAccessPolicy {
    * happens before entering this boundary; external async effects need their own
    * transactional authority rather than a cached authorization result.
    */
+  runAuthorizedSession<T>(
+    context: CloudAccessContext,
+    action: CloudAccessAction,
+    commit: (context: CloudAccessContext) => T,
+  ): T {
+    if (Object.prototype.toString.call(commit) !== '[object Function]')
+      throw new CloudAccessError('FORBIDDEN');
+    this.revalidate(context, action);
+    const result = commit(context);
+    if (result && typeof (result as { then?: unknown }).then === 'function') {
+      Promise.resolve(result).catch(() => {});
+      throw new CloudAccessError('FORBIDDEN');
+    }
+    return result;
+  }
+
   runAuthorizedCall<T>(
     context: CloudAccessContext,
     callId: string,

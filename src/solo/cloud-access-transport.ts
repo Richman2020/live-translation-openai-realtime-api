@@ -32,7 +32,7 @@ export type CloudBrowserOutput = Readonly<{
 type RequestGrant = {
   context: CloudAccessContext;
   headers: CloudAccessHeaders;
-  scope: CloudHttpScope;
+  scope: Readonly<{ action: CloudAccessAction; callId?: string }>;
   source: CloudRequestSource;
   socketBound?: boolean;
 };
@@ -188,12 +188,13 @@ export function createCloudAccessTransport(
   const socketGrants = new WeakMap<FastifyRequest, RequestGrant>();
   function authenticate(
     request: FastifyRequest,
-    scope: CloudHttpScope,
+    scope: RequestGrant['scope'],
     source: CloudRequestSource,
   ): RequestGrant {
     const headers = browserHeaders(request);
     const context = policy.authenticate(headers, scope.action, source);
-    policy.authorizeCall(context, scope.callId, scope.action);
+    if (scope.callId !== undefined)
+      policy.authorizeCall(context, scope.callId, scope.action);
     return {
       headers,
       context,
@@ -201,7 +202,9 @@ export function createCloudAccessTransport(
       scope: Object.freeze({ ...scope }),
     };
   }
-  function httpGuard(scopeFor: (request: FastifyRequest) => CloudHttpScope) {
+  function httpGuard(
+    scopeFor: (request: FastifyRequest) => RequestGrant['scope'],
+  ) {
     return async (request: FastifyRequest, reply: FastifyReply) => {
       privateResponseHeaders(reply);
       try {
@@ -236,12 +239,17 @@ export function createCloudAccessTransport(
         if (typeof stream.destroy === 'function') stream.destroy();
         throw new CloudTransportUnavailable();
       }
-      policy.runAuthorizedCall(
-        grant.context,
-        grant.scope.callId,
-        grant.scope.action,
-        () => done(null, payload),
-      );
+      if (grant.scope.callId === undefined)
+        policy.runAuthorizedSession(grant.context, grant.scope.action, () =>
+          done(null, payload),
+        );
+      else
+        policy.runAuthorizedCall(
+          grant.context,
+          grant.scope.callId,
+          grant.scope.action,
+          () => done(null, payload),
+        );
     } catch (error) {
       const known = error instanceof CloudAccessError;
       reply.code(known ? error.statusCode : 503);
@@ -258,12 +266,43 @@ export function createCloudAccessTransport(
   function httpRoute(scopeFor: (request: FastifyRequest) => CloudHttpScope) {
     return { preHandler: httpGuard(scopeFor), onSend: responseGuard };
   }
+  function sessionHttpRoute(action: CloudAccessAction) {
+    return { preHandler: httpGuard(() => ({ action })), onSend: responseGuard };
+  }
+  /** Pre-header check only. Streaming users must authorize every write/heartbeat. */
+  function sessionStreamGuard(action: CloudAccessAction = 'read') {
+    return httpGuard(() => ({ action }));
+  }
+  function requestContext(request: FastifyRequest): CloudAccessContext {
+    const grant = httpGrants.get(request);
+    if (!grant) throw new CloudAccessError('UNAUTHORIZED');
+    return grant.context;
+  }
+  async function executeSessionHttp<Result>(
+    request: FastifyRequest,
+    commit: (context: CloudAccessContext) => Result,
+  ) {
+    const grant = httpGrants.get(request);
+    if (!grant || grant.scope.callId !== undefined)
+      throw new CloudAccessError('UNAUTHORIZED');
+    try {
+      return policy.runAuthorizedSession(
+        grant.context,
+        grant.scope.action,
+        commit,
+      );
+    } catch (error) {
+      if (error instanceof CloudAccessError) throw error;
+      throw new CloudTransportUnavailable();
+    }
+  }
   async function executeHttp<Result>(
     request: FastifyRequest,
     commit: (context: CloudAccessContext) => Result,
   ) {
     const grant = httpGrants.get(request);
-    if (!grant) throw new CloudAccessError('UNAUTHORIZED');
+    if (!grant || grant.scope.callId === undefined)
+      throw new CloudAccessError('UNAUTHORIZED');
     // Async preparation belongs before this call. The final check and synchronous
     // commit share the core continuation; asynchronous external effects remain
     // the caller's separate transaction/lease responsibility.
@@ -487,5 +526,14 @@ export function createCloudAccessTransport(
       callId: grant.scope.callId,
     };
   }
-  return { httpRoute, executeHttp, browserSocketGuard, bindBrowserSocket };
+  return {
+    httpRoute,
+    executeHttp,
+    sessionHttpRoute,
+    executeSessionHttp,
+    requestContext,
+    sessionStreamGuard,
+    browserSocketGuard,
+    bindBrowserSocket,
+  };
 }

@@ -4,7 +4,31 @@
 
 需求见 [PROJECT_BRIEF.md](PROJECT_BRIEF.md)，工作规则见 [AGENTS.md](AGENTS.md)，运行步骤见 [LOCAL_SETUP.md](LOCAL_SETUP.md)，后续执行入口见 [LOCAL_CODEX_HANDOFF.md](LOCAL_CODEX_HANDOFF.md)。
 
-## 最新实施：独立云会话与通话授权组件（2026-10-09）
+## 最新实施：真实电话应用的授权与事件离线集成（2026-10-09）
+
+- 从真实远端 `709806b8c545a725c3f3cba83c28f52972973e8a` 的干净工作区继续；该头 [CI run 37901404878](https://github.com/Richman2020/live-translation-openai-realtime-api/actions/runs/37901404878) 已整体成功。保留 `codex/cloud-phone-conversation-20261009` 与 [草稿PR #3](https://github.com/Richman2020/live-translation-openai-realtime-api/pull/3)，基线仍为PR #2 `df3c447`，没有从旧main重建或覆盖并发改动。
+- 独立授权组件现已通过 `buildSoloServer({ browserControl })` 的显式服务端对象接入真实 status、创建、挂断及事件路由。构建器先无条件执行cloud拒绝启动；注入应用仍仅接受回环socket、固定HTTPS目标、当前cookie会话及CSRF/来源校验。默认本机流程保持；主入口不注入该对象，不存在环境、布尔或请求启用开关。
+- `CloudPhoneAccess` 要求显式provider/bridge工厂、同一个SessionManager和ConfigStore及两种预检函数，不回退到真实外部依赖。预检同时最多一个，等待后重新鉴权。通话在首事件前登记authSession/principal/browserOwner/epoch，生成每通服务器Voice identity；尚未发布的失败创建安全回滚，已经发布的失败会话保留归属并清理。归属累计上限100，达到后拒绝新建；内存记录不提供重启恢复。
+- 挂断在最终同步授权内接受结束意图，立即停止bridge/媒体；供应商两腿挂断作为独立异步清理继续，即使随后撤销也不取消。独立审查补出并修复事件订阅者抛错阻断媒体关闭或遗漏异步清理的两条路径；未获授权的请求不能触发救援清理。重复挂断、清理失败、迟到SID及旧call事件保持原归属，不转交当前另一通电话。
+- 供应商回调仍先验证原签名、账户、role/nonce、SID及媒体格式，再应用归属生命周期。bridge的媒体输入/输出每帧复核当前权限，静默电话默认每秒复核；撤销停止新音频并清理，严格匹配旧stream的clear仅可清理原播放，不能撤回已经听到的声音。真实浏览器语音仍由Twilio Voice SDK承担，不将浏览器WS守卫误用于供应商媒体。
+- 新owner SSE使用专用流组件，每条快照、事件及心跳最终写出前检查权限；晚到事件按稳定call ID过滤。默认16条全局/每认证会话2条、64KiB帧/256KiB待写缓冲，静默授权复核1秒、心跳20秒。断开、异常及停机回收订阅/计时器；SSE断开不冒充控制lease到期或电话已挂断。
+- 注入分支的token、presence、来电、settings、verify、shutdown和connection-maintenance继续拒绝；公共health仅含原应用标识。尚未选择登录来源，不创建凭据或新增访问权限、不开放公网、不部署、不改Twilio回调、不下载模型或调用付费接口；显式模拟身份和fake provider/bridge仅存在测试。
+
+接口、上限、实际路径及后续最小决策点见 [电话应用集成](docs/CLOUD_PHONE_APPLICATION_INTEGRATION.md)。本轮验证环境仍为云端Linux、Node24.19.0/npm11.9.0、原锁定依赖，无额外安装或升级；不访问用户电脑。具体最终结果在下表，提交和精确远端CI终态由当前PR正文及最终Git回读记录。
+
+| 验证 | 实际结果 |
+| --- | --- |
+| 新增离线用例 | 53项：服务13、真实路由13、SessionManager22、SSE5；既有测试未删除 |
+| 独立重点审查 | 核心/传输/新增集成95项通过；创建回滚、逐帧撤销、两腿清理与异常订阅者复核，无剩余本轮代码阻塞 |
+| `npm test` | 最终825项：820通过、5个既有Windows专属跳过、0失败；最后窄修后完整重跑通过 |
+| `npm run typecheck` / `npm run build` | 最终源码及全部测试类型检查、生产构建通过 |
+| 修改源码ESLint / 浏览器JS语法 / diff检查 | 最终通过 |
+| `npm run test:conversation:browser` | 真实Chromium16项通过；页面0外部请求、0异常，保留逐句/乱序/历史阅读及原生读取请求头验收 |
+| 生产入口与依赖 | index/cloud-runtime/security、package/锁文件/CI workflow未改；server及SessionManager本轮有明确注入式接线 |
+
+这是**真实应用代码的模拟依赖闭环通过**，不是生产云端浏览器→供应商→普通手机端到端通过。登录/cookie签发与当前会话存储、Voice token/控制lease、持久预算/journal及重启恢复、真实TLS/代理、Linux Pocket warm仍未完成。真实麦克风/手机音频、译音自然度、数字否定、长期播放积压及实际耳听延迟未验收。两个solo入口继续拒绝 `CLOUD_AUTH_NOT_IMPLEMENTED`；下一步仅按明确决策点与授权门槛推进。
+
+## 此前：独立云会话与通话授权组件（2026-10-09）
 
 - 从真实远端 `999c00d72cf626324d110a21ee74c0a0142c583d` 的干净工作区继续；此前 [CI run 37896933506](https://github.com/Richman2020/live-translation-openai-realtime-api/actions/runs/37896933506) 已整体成功。沿用独立开发分支与草稿PR #3，不覆盖用户改动，不从旧main重建。
 - 实现登录提供方无关的 `CloudAccessPolicy`：没有服务端 resolver 则拒绝；身份只从唯一规范会话cookie取值，经服务端当前记录查询。严格固定Origin/Host、CSRF写保护、不可伪造上下文、authSession/principal/browserOwner/epoch 的通话归属；不同登录即使共享principal或owner也不能读写他人通话、音频或字幕。接管一律拒绝，通话登记与浏览器连接/队列均有界。
