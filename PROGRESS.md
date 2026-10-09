@@ -1,8 +1,34 @@
 # 项目进度与交接
 
-更新日期：2026-10-08。共享仓库：<https://github.com/Richman2020/live-translation-openai-realtime-api>。
+更新日期：2026-10-09。共享仓库：<https://github.com/Richman2020/live-translation-openai-realtime-api>。
 
 需求见 [PROJECT_BRIEF.md](PROJECT_BRIEF.md)，工作规则见 [AGENTS.md](AGENTS.md)，运行步骤见 [LOCAL_SETUP.md](LOCAL_SETUP.md)，后续执行入口见 [LOCAL_CODEX_HANDOFF.md](LOCAL_CODEX_HANDOFF.md)。
+
+## 最新实施：云端开发的逐句对话第一里程碑（2026-10-09）
+
+- 开始时真实远端 `main=5fabf51`、PR #2 / `codex/local-phone-workbench=df3c447`；工作区干净。从功能基线 `df3c4474013e0612e0d5b20a21d673c0af6489e1` 建立独立 `codex/cloud-phone-conversation-20261009`，保留既有工作；未从旧 main 实现、未修改用户电脑。本节为当前云端开发状态，下方 Windows 电话、部署和回调记录仅为历史环境证据。
+- 逐句 UI 已接入真实工作台和独立离线重放：每张卡片配对原译文，双方统一时间顺序；稳定 session / utterance ID、独立 revision、草稿/确定、迟到译文原地更新、插话及乱序保护。Pocket-prefix 将源语义小节、增量英文和最终英文显式关联；原 ASR 整段事件保留兼容但不重复成卡片，失效小节撤销。连续直出的累计文本无可靠源对应时标为未配对诊断，不猜跨语言句界。
+- 字幕排序使用已有源 turn 时间或源语义小节首次被应用观察到的时间；不是跨设备精确声学时间。排队、送出、取消、未确认和线路 mark 独立显示；producer 给出预期 delivery 数，全部匹配 mark 加 seal 才确认整小节，乱序不提前报 played。确认不等于人耳听清或译意正确，英文回程仍原声直传，字幕旁路，不新增中文回译配音。
+- 保留单卡 DOM 与阅读锚点，阅读历史暂停跟随并提供回到最新；历史与导出只重放接受的事件，保留同会话 SSE 重连前文字。150 个语义单元（300 个原/译文位置）×200 次普通修订检查，0 次完整历史快照/完整重绘，仅200次单卡更新，避免回退既有字幕性能优化。
+- Pocket 可配置绝对 Python executable / runtime 目录，Windows/POSIX 默认 venv 路径分别解析；保留固定 Michael、版本与资产/实现哈希、离线 guard、串行 warm 与有限队列。POSIX 独占进程组及 EOF 清理有真实假进程回归，不影响相邻无关进程。没有安装 Python 模型环境或下载模型，详见 [Pocket 云兼容](docs/CLOUD_POCKET_RUNTIME.md)。
+- 云兼容仅完成独立配置解析和设计：显式 cloud 校验固定 HTTPS→WSS、平台 PORT、单实例 warm 规划。两个 solo 入口都在认证未实现时拒绝启动 `CLOUD_AUTH_NOT_IMPLEMENTED`；保留全部 loopback / Host / Origin / token 和 Twilio 签名边界。当前 global identity / activeSession / SSE 尚未改成真实 owner 隔离，**不是可部署运行的云电话**。具体登录、owner、lease、断线/停机清理门槛见 [云模式设计](docs/CLOUD_MODE_DESIGN.md)。
+
+本轮验证环境：云端 Linux，Node 24.19.0、npm 11.9.0、Python 3.12.14、Chromium 151.0.7922.173。官方 npm registry 按原 package-lock 安装549个包，使用工作区缓存，不升级、不更改锁文件；仓库及 workspace 未发现 `.agents/skills` 指令。
+
+| 验证 | 实际结果 |
+| --- | --- |
+| 基线 `npm test` | 699项：694通过、5跳过、0失败 |
+| 最终 `npm test` | 730项：725通过、5跳过、0失败；Linux跳过Windows专属验收 |
+| 生产 `npm run build` | 通过 |
+| 额外 `tsc --noEmit -p tsconfig.json`（含全部测试代码） | 仍有14个既有测试类型错误，位于 `outbound-readiness.test.ts` / `solo-security.test.ts` 及 `browser-call-lifecycle.test.ts` 的原有 deferred.resolve 行；临时独立基线worktree同命令也14个错误，按文件/错误内容和数量比对一致，仅新增测试使行号移动。不是生产构建失败；本轮不扩大为历史测试类型清理 |
+| 所改源码 ESLint / 浏览器 JS 语法 / diff检查 | 通过 |
+| Pocket Python 离线检查 | 6通过、1跳过；跳过真实本地模型资产，不加载模型 |
+| `npm run test:conversation:browser` | 真实Chromium14项断言通过，页面0外部请求、0异常，包含配对、乱序/插话、数字否定、播放区分、历史滚动和纯文本安全 |
+| 独立审查 | seal乱序、空白字幕撤销、prefix整段重复、历史接受事件、单卡性能均修复/复核，无剩余提交阻塞 |
+
+浏览器证据保存在本云环境忽略提交的 `.runtime/conversation-browser/acceptance.json` / `acceptance.png`；可复现命令与范围见 [里程碑记录](docs/CONVERSATION_MILESTONE.md)。新增 GitHub Actions 仅安装原锁定依赖、构建、离线测试及模拟浏览器检查，不提供供应商密钥、不拨号、不部署。推送及远端 CI 结果以后续真实回读为准，提交SHA与草稿PR由Git历史和最终交接给出；草稿PR基于 `codex/local-phone-workbench` 便于独立审阅，依赖PR #2，未合入 main。
+
+本轮未验收：真实云认证/owner隔离、Linux Pocket实际合成、API实连、真实麦克风、普通手机双向电话、自然度、数字/否定翻译质量、持续跟随/尾部播放积压和耳听延迟。当前云环境没有Pocket模型，历史完整Python依赖freeze也不在仓库，后续须先取得并审核；不即时安装猜测版本。未改Twilio回调、未部署、未调用付费接口。下一步限于按云设计实现独立认证/隔离与离线故障验收，取得已有冻结依赖/资产后验证单实例warm，再另行按授权做真实通话。原生翻译保留为 [ADR候选](docs/ADR_REALTIME_TRANSLATION.md)，不替换引擎、不承诺零延迟或本人声音克隆。
 
 ## 最新检查：返回后的通话预检（2026-10-08）
 

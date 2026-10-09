@@ -7,6 +7,7 @@ import RequestClient from 'twilio/lib/base/RequestClient';
 
 import type { SoloConfig } from './config';
 import { safeEqual } from './security';
+import { ConversationEventAdapter } from './conversation-events';
 import { TranslationBridge } from './translation-bridge';
 import {
   ContinuousTranslationBridge,
@@ -93,6 +94,7 @@ export function createSessionBridge(
   return new TranslationBridge(settings);
 }
 type Session = {
+  conversation: ConversationEventAdapter;
   view: CallView;
   config: SoloConfig;
   nonces: Record<Role, string>;
@@ -277,6 +279,7 @@ export class SessionManager extends EventEmitter {
       throw new SessionError('CALL_CLEANUP_UNCONFIRMED', 409);
     const id = randomUUID();
     const session: Session = {
+      conversation: new ConversationEventAdapter(id, this.now),
       view: {
         id,
         direction,
@@ -510,11 +513,43 @@ export class SessionManager extends EventEmitter {
           proxyUrl: session.config.OPENAI_PROXY_URL,
           translationEngine: session.view.translationEngine,
           onTranscript: (transcript) => {
-            if (!session.ended)
+            if (!session.ended) {
               this.emit('event', {
                 event: 'transcript',
-                data: { ...transcript, sessionId: session.view.id },
+                data: {
+                  ...transcript,
+                  sessionId: session.view.id,
+                  ...(session.view.translationEngine === 'pocket-prefix' &&
+                  transcript.role === 'local'
+                    ? { conversationVisible: false }
+                    : {}),
+                },
               });
+              // Prefix source turns and translated clauses have different IDs.
+              // Its explicit segment callback supplies their true correspondence.
+              if (
+                !(
+                  session.view.translationEngine === 'pocket-prefix' &&
+                  transcript.role === 'local'
+                )
+              ) {
+                const event = session.conversation.transcript(transcript);
+                if (event)
+                  this.emit('event', { event: 'conversation', data: event });
+              }
+            }
+          },
+          onConversationTranscript: (transcript) => {
+            if (session.ended) return;
+            const event = session.conversation.transcript(transcript);
+            if (event)
+              this.emit('event', { event: 'conversation', data: event });
+          },
+          onUtterancePlayback: (playback) => {
+            if (session.ended && playback.status !== 'cancelled') return;
+            const event = session.conversation.playback(playback);
+            if (event)
+              this.emit('event', { event: 'conversation', data: event });
           },
           onFailure: (reason) => {
             this.end(session.view.id, reason);
@@ -558,6 +593,10 @@ export class SessionManager extends EventEmitter {
               event: 'translation-audio',
               data: { ...audio, sessionId: session.view.id },
             });
+            if (session.ended && audio.stage !== 'unconfirmed') return;
+            const event = session.conversation.audio(audio);
+            if (event)
+              this.emit('event', { event: 'conversation', data: event });
           },
           onCaptionInputDiagnostic: (diagnostic) => {
             if (!session.ended)

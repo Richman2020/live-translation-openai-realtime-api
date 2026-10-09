@@ -35,6 +35,10 @@ export type PocketVoiceWorker = {
 };
 export type PocketVoiceWorkerOptions = {
   repoRoot?: string;
+  /** Absolute executable path; defaults to this runtime's platform venv. */
+  pythonExecutable?: string;
+  /** Absolute directory containing the preprovisioned model/ and venv/. */
+  runtimeDir?: string;
   readyTimeoutMs?: number;
   jobTimeoutMs?: number;
   maxQueuedJobs?: number;
@@ -60,6 +64,47 @@ function failure(code: string): Error {
   return error;
 }
 
+/** Configuration only: never probes, installs, or downloads a Python/model. */
+export function resolvePocketVoiceLaunchConfig(
+  options: Pick<
+    PocketVoiceWorkerOptions,
+    'repoRoot' | 'pythonExecutable' | 'runtimeDir'
+  > = {},
+  environment: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): { repoRoot: string; runtimeDir: string; pythonExecutable: string } {
+  const repoRoot = path.resolve(
+    options.repoRoot ??
+      path.join(path.dirname(fileURLToPath(import.meta.url)), '../..'),
+  );
+  function configuredPath(value: string | undefined, fallback: string): string {
+    if (value === undefined) return fallback;
+    if (
+      typeof value !== 'string' ||
+      value.trim() !== value ||
+      [...value].some(
+        (char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127,
+      ) ||
+      !path.isAbsolute(value)
+    )
+      throw failure('POCKETVOICE_INVALID_RUNTIME_PATH');
+    return path.resolve(value);
+  }
+  const runtimeDir = configuredPath(
+    options.runtimeDir ?? (environment.POCKET_RUNTIME_DIR || undefined),
+    path.join(repoRoot, '.runtime/pocket-tts-lab'),
+  );
+  const pythonExecutable = configuredPath(
+    options.pythonExecutable ??
+      (environment.POCKET_PYTHON_EXECUTABLE || undefined),
+    path.join(
+      runtimeDir,
+      platform === 'win32' ? 'venv/Scripts/python.exe' : 'venv/bin/python',
+    ),
+  );
+  return { repoRoot, runtimeDir, pythonExecutable };
+}
+
 export function validatePocketVoiceText(value: unknown): string {
   if (typeof value !== 'string') throw failure('POCKETVOICE_INVALID_TEXT');
   const text = value.trim();
@@ -75,7 +120,7 @@ export function validatePocketVoiceText(value: unknown): string {
 }
 
 /** Do not inherit API keys, proxy credentials, Python paths or HF tokens. */
-function workerEnvironment(): NodeJS.ProcessEnv {
+function workerEnvironment(runtimeDir?: string): NodeJS.ProcessEnv {
   const allowed = new Set([
     'SYSTEMROOT',
     'WINDIR',
@@ -83,6 +128,7 @@ function workerEnvironment(): NodeJS.ProcessEnv {
     'PATHEXT',
     'TEMP',
     'TMP',
+    'TMPDIR',
     'LOCALAPPDATA',
     'APPDATA',
     'USERPROFILE',
@@ -93,6 +139,7 @@ function workerEnvironment(): NodeJS.ProcessEnv {
     if (allowed.has(key.toUpperCase()) && value !== undefined) env[key] = value;
   return {
     ...env,
+    ...(runtimeDir ? { POCKET_RUNTIME_DIR: runtimeDir } : {}),
     PYTHONUTF8: '1',
     PYTHONIOENCODING: 'utf-8',
     PYTHONUNBUFFERED: '1',
@@ -117,6 +164,11 @@ function terminateWindowsTree(pid: number): void {
     timeout: 5000,
     env: workerEnvironment(),
   });
+}
+
+function terminateOwnedProcessTree(pid: number): void {
+  if (process.platform === 'win32') terminateWindowsTree(pid);
+  else process.kill(-pid, 'SIGKILL'); // The child owns a detached POSIX group.
 }
 
 type Job = {
@@ -164,10 +216,8 @@ export function createPocketVoiceWorker(
     bufferLimit > MAX_PCM_BYTES
   )
     throw failure('POCKETVOICE_INVALID_OPTIONS');
-  const repoRoot = path.resolve(
-    options.repoRoot ??
-      path.join(path.dirname(fileURLToPath(import.meta.url)), '../..'),
-  );
+  const { repoRoot, runtimeDir, pythonExecutable } =
+    resolvePocketVoiceLaunchConfig(options);
   let state: 'starting' | 'ready' | 'closed' | 'failed' = 'starting';
   let child: ChildProcessWithoutNullStreams;
   let active: Job | undefined;
@@ -175,6 +225,7 @@ export function createPocketVoiceWorker(
   const consumers = new Set<Job>();
   let received = Buffer.alloc(0);
   let processEnded = false;
+  let terminating = false;
   let closeTimer: ReturnType<typeof setTimeout> | undefined;
   let startTimer: ReturnType<typeof setTimeout>;
   let resolveReady: () => void;
@@ -189,6 +240,7 @@ export function createPocketVoiceWorker(
   function endJob(job: Job, error?: Error): void {
     job.ended = true;
     if (error) {
+      job.text = '';
       job.signal?.removeEventListener('abort', job.onAbort);
       consumers.delete(job);
       job.error = error;
@@ -204,29 +256,27 @@ export function createPocketVoiceWorker(
     }
   }
   function killWorkerTree(): void {
-    if (!child || processEnded) return;
-    if (
-      process.platform === 'win32' &&
-      Number.isInteger(child.pid) &&
-      child.pid > 0
-    ) {
+    if (!child || processEnded || terminating) return;
+    terminating = true;
+    if (Number.isInteger(child.pid) && child.pid > 0) {
       try {
-        (options.terminateProcessTree ?? terminateWindowsTree)(child.pid);
+        (options.terminateProcessTree ?? terminateOwnedProcessTree)(child.pid);
       } catch {
         /* Direct process fallback. */
       }
     }
     try {
-      child.kill();
+      child.kill('SIGKILL');
     } catch {
       /* Already closed. */
     }
+    terminating = false;
   }
   function parentExit(): void {
     killWorkerTree();
   }
   function stopProcess(immediate: boolean): void {
-    process.removeListener('exit', parentExit);
+    // Keep the exit hook until the child actually closes, including EOF grace.
     if (!child || processEnded) return;
     try {
       child.stdin.end();
@@ -418,13 +468,14 @@ export function createPocketVoiceWorker(
           stdio: ['pipe', 'pipe', 'pipe'],
         }) as ChildProcessWithoutNullStreams);
     child = spawnWorker(
-      path.join(repoRoot, '.runtime/pocket-tts-lab/venv/Scripts/python.exe'),
+      pythonExecutable,
       ['-u', path.join(repoRoot, 'scripts/pocket-voice-worker.py')],
       {
         cwd: repoRoot,
         windowsHide: true,
+        detached: process.platform !== 'win32',
         shell: false,
-        env: workerEnvironment(),
+        env: workerEnvironment(runtimeDir),
         stdio: ['pipe', 'pipe', 'pipe'],
       },
     );
@@ -435,6 +486,8 @@ export function createPocketVoiceWorker(
       stream.on('error', () => fail('POCKETVOICE_PIPE_FAILED'));
     child.stdout.on('end', () => fail('POCKETVOICE_WORKER_EXITED'));
     child.on('close', () => {
+      // Clean lingering descendants even if the worker itself honored EOF.
+      if (process.platform !== 'win32') killWorkerTree();
       processEnded = true;
       clearTimeout(closeTimer);
       process.removeListener('exit', parentExit);

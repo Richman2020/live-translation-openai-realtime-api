@@ -24,6 +24,7 @@ import type {
   TranslationAudioDiagnostic,
   TranslationBridgeOptions,
   TranslationRole,
+  UtterancePlaybackEvent,
 } from './translation-bridge';
 
 export type LocalVoiceSynthesizer = {
@@ -78,6 +79,7 @@ type Provider = {
   transcriptAt: number;
 };
 type Delivery = {
+  utteranceId?: string;
   role: TranslationRole;
   recipientRole: TranslationRole;
   streamSid: string;
@@ -201,7 +203,13 @@ export class ContinuousTranslationBridge {
     text: string;
     at: number;
     prefixSequence?: number;
+    utteranceId?: string;
+    finalPart?: boolean;
   }[] = [];
+
+  private readonly pendingUtterances = new Set<string>();
+
+  private readonly utteranceDeliveryCounts = new Map<string, number>();
 
   private prefixSequence = 0;
 
@@ -545,10 +553,23 @@ export class ContinuousTranslationBridge {
           /* UI only. */
         }
       },
+      onConversationTranscript: (event) => {
+        if (this.closed || this.providers.get('local') !== provider) return;
+        try {
+          this.options.onConversationTranscript?.(event);
+        } catch {
+          /* Captions cannot interrupt speech. */
+        }
+      },
       onCommit: (segment) => {
         if (this.closed || this.providers.get('local') !== provider) return;
         this.prefixSequence += 1;
-        this.enqueueNano(segment.text, this.prefixSequence);
+        this.enqueueNano(
+          segment.text,
+          this.prefixSequence,
+          segment.utteranceId,
+          segment.finalPart,
+        );
         try {
           const at = (this.options.now || Date.now)();
           this.options.onMetric?.({
@@ -784,7 +805,12 @@ export class ContinuousTranslationBridge {
     // together with all remaining audio rather than speaking after departure.
   }
 
-  private enqueueNano(text: string, prefixSequence?: number): void {
+  private enqueueNano(
+    text: string,
+    prefixSequence?: number,
+    utteranceId?: string,
+    finalPart?: boolean,
+  ): void {
     if (this.closed) return;
     // Old mode keeps four whole-sentence jobs. Finer live clauses use the same
     // maximum text allowance (4 * 240 chars) with a separate bounded job count;
@@ -798,6 +824,7 @@ export class ContinuousTranslationBridge {
       this.nanoQueue.length + Number(this.nanoBusy) >= jobLimit ||
       textChars + text.length > 960
     ) {
+      if (utteranceId) this.utterancePlayback(utteranceId, 'cancelled');
       this.shutdown(`${this.voicePrefix}_synthesis_queue_full:local`);
       return;
     }
@@ -805,7 +832,12 @@ export class ContinuousTranslationBridge {
       text,
       at: (this.options.now || Date.now)(),
       ...(prefixSequence === undefined ? {} : { prefixSequence }),
+      ...(utteranceId ? { utteranceId, finalPart } : {}),
     });
+    if (utteranceId && !this.pendingUtterances.has(utteranceId)) {
+      this.pendingUtterances.add(utteranceId);
+      this.utterancePlayback(utteranceId, 'queued');
+    }
     this.processNano().catch(() =>
       this.shutdown(`${this.voicePrefix}_synthesis_failed:local`),
     );
@@ -878,7 +910,17 @@ export class ContinuousTranslationBridge {
             });
           }
           if (this.closed) return;
-          this.forward('local', chunk);
+          this.forward(
+            'local',
+            chunk,
+            undefined,
+            job.prefixSequence,
+            job.utteranceId,
+          );
+        }
+        if (!this.closed && job.utteranceId && job.finalPart) {
+          this.pendingUtterances.delete(job.utteranceId);
+          this.utterancePlayback(job.utteranceId, 'sent', true);
         }
       }
     } catch {
@@ -900,6 +942,8 @@ export class ContinuousTranslationBridge {
     text: string;
     at: number;
     prefixSequence?: number;
+    utteranceId?: string;
+    finalPart?: boolean;
   }): Promise<void> {
     const voice = this.options.localVoice;
     const converter = new Pcm24kToPcmu();
@@ -983,6 +1027,7 @@ export class ContinuousTranslationBridge {
       await this.forwardLocalVoice(
         converter.push(generated.pcm),
         job.prefixSequence,
+        job.utteranceId,
       );
     }
     if (this.closed) return;
@@ -991,7 +1036,12 @@ export class ContinuousTranslationBridge {
     await this.forwardLocalVoice(
       converter.push(Buffer.alloc(384)),
       job.prefixSequence,
+      job.utteranceId,
     );
+    if (!this.closed && job.utteranceId && job.finalPart) {
+      this.pendingUtterances.delete(job.utteranceId);
+      this.utterancePlayback(job.utteranceId, 'sent', true);
+    }
     // Completion is bridge consumption, including queue/phone backpressure; it
     // is not an isolated measure of Python computation or actual phone hearing.
     if (!this.closed) metric('pocket_synthesis_complete_ms');
@@ -1000,6 +1050,7 @@ export class ContinuousTranslationBridge {
   private async forwardLocalVoice(
     audio: Buffer,
     prefixSequence?: number,
+    utteranceId?: string,
   ): Promise<void> {
     for (
       let offset = 0;
@@ -1018,7 +1069,7 @@ export class ContinuousTranslationBridge {
         });
       }
       if (this.closed) return;
-      this.forward('local', chunk, undefined, prefixSequence);
+      this.forward('local', chunk, undefined, prefixSequence, utteranceId);
     }
   }
 
@@ -1026,6 +1077,32 @@ export class ContinuousTranslationBridge {
     const waiters = [...this.nanoPlaybackWaiters];
     this.nanoPlaybackWaiters.clear();
     waiters.forEach((resolve) => resolve());
+  }
+
+  private utterancePlayback(
+    utteranceId: string,
+    status: UtterancePlaybackEvent['status'],
+    sealed = false,
+  ): void {
+    try {
+      this.options.onUtterancePlayback?.({
+        utteranceId,
+        role: 'local',
+        status,
+        at: (this.options.now || Date.now)(),
+        ...(sealed
+          ? {
+              sealed: true,
+              expectedDeliveryCount:
+                this.utteranceDeliveryCounts.get(utteranceId) || 0,
+            }
+          : {}),
+      });
+    } catch {
+      // Queue presentation must never interrupt audio or cleanup.
+    }
+    if (sealed || status === 'cancelled')
+      this.utteranceDeliveryCounts.delete(utteranceId);
   }
 
   private forwardOriginal(audio: Buffer): void {
@@ -1123,6 +1200,7 @@ export class ContinuousTranslationBridge {
     audio: Buffer,
     metadata?: ContinuousTranslationAudioMetadata,
     prefixSequence?: number,
+    utteranceId?: string,
   ): void {
     if (this.closed || !audio.length) return;
     const recipientRole = opposite(role);
@@ -1147,6 +1225,7 @@ export class ContinuousTranslationBridge {
       this.sequence += 1;
       const name = `continuous_${this.sequence}`;
       const delivery: Delivery = {
+        ...(utteranceId ? { utteranceId } : {}),
         role,
         recipientRole,
         streamSid: phone.streamSid,
@@ -1175,6 +1254,11 @@ export class ContinuousTranslationBridge {
       delivery.timer.unref?.();
       phone.outstandingBytes += chunk.length;
       this.deliveries.set(name, delivery);
+      if (utteranceId)
+        this.utteranceDeliveryCounts.set(
+          utteranceId,
+          (this.utteranceDeliveryCounts.get(utteranceId) || 0) + 1,
+        );
       this.energy(delivery, chunk);
       this.diagnostic(delivery, 'generated');
       this.send(
@@ -1240,6 +1324,7 @@ export class ContinuousTranslationBridge {
   ): void {
     try {
       this.options.onAudioDiagnostic?.({
+        ...(delivery.utteranceId ? { utteranceId: delivery.utteranceId } : {}),
         ...(this.options.remoteCaptions && delivery.role === 'remote'
           ? { audioKind: 'original' as const }
           : {}),
@@ -1327,6 +1412,8 @@ export class ContinuousTranslationBridge {
       offset += length;
       const event: TranscriptEvent = {
         id: `continuous_${role}_${provider.transcriptSequence}`,
+        pairing: 'unpaired',
+        boundary: 'diagnostic',
         role,
         kind: 'translation',
         text: provider.transcript,
@@ -1348,6 +1435,9 @@ export class ContinuousTranslationBridge {
   private shutdown(reason?: string): void {
     if (this.closed) return;
     this.closed = true;
+    for (const id of this.pendingUtterances)
+      this.utterancePlayback(id, 'cancelled');
+    this.pendingUtterances.clear();
     for (const role of ROLES) this.flushInputEnergy(role);
     clearTimeout(this.directMarkTimer);
     this.directDelivery = undefined;

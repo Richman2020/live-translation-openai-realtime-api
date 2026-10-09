@@ -10,6 +10,7 @@ import type WebSocket from 'ws';
 import { desktopConnectivity } from './desktop-connectivity';
 import { ConnectionMaintenance } from './connection-maintenance';
 import { ConfigStore } from './config';
+import { loadPhoneRuntime, requireLocalPhoneRuntime } from './cloud-runtime';
 import {
   isLocalRequest,
   sameOrigin,
@@ -37,6 +38,11 @@ export async function buildSoloServer(
     providerVerifier?: typeof verifyProviders;
   } = {},
 ) {
+  // Exported builders are also entry points: never expose local control APIs by
+  // bypassing index.ts in a cloud process.
+  requireLocalPhoneRuntime(
+    loadPhoneRuntime({ envPath: options.configStore?.envPath }),
+  );
   const configStore = options.configStore || new ConfigStore();
   const manager = options.sessionManager || new SessionManager();
   const publicDir = resolve(options.publicDir || 'public');

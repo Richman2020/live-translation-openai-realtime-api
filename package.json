@@ -19,6 +19,7 @@
     "quality:analyze": "node --import tsx scripts/analyze-quality-results.ts",
     "quality:silence": "node --import tsx scripts/check-continuous-silence.ts",
     "test": "node --import tsx --test tests/*.test.ts",
+    "test:conversation:browser": "node scripts/verify-conversation-browser.mjs",
     "predev": "npm run check:config",
     "prestart": "npm run check:config",
     "prebuild": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",

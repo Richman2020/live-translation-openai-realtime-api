@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
+import { readFile } from 'node:fs/promises';
 import { PassThrough, Writable } from 'node:stream';
+import path from 'node:path';
 import { test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import {
@@ -11,6 +13,7 @@ import {
 } from 'node:child_process';
 import {
   createPocketVoiceWorker,
+  resolvePocketVoiceLaunchConfig,
   validatePocketVoiceText,
   type PocketVoiceWorkerOptions,
 } from '../src/solo/pocket-voice-worker';
@@ -113,11 +116,18 @@ test('Pocket uses isolated public preset runtime, no credentials, and waits for 
   try {
     assert.match(
       f.launch().command,
-      /pocket-tts-lab[\\/]venv[\\/]Scripts[\\/]python.exe$/,
+      process.platform === 'win32'
+        ? /pocket-tts-lab[\\/]venv[\\/]Scripts[\\/]python.exe$/
+        : /pocket-tts-lab\/venv\/bin\/python$/,
     );
     assert.equal(f.launch().options.env.OPENAI_API_KEY, undefined);
     assert.equal(f.launch().options.env.HTTPS_PROXY, undefined);
     assert.equal(f.launch().options.env.HF_HUB_OFFLINE, '1');
+    assert.equal(
+      f.launch().options.env.POCKET_RUNTIME_DIR,
+      path.resolve('.runtime/pocket-tts-lab'),
+    );
+    assert.equal(f.launch().options.detached, process.platform !== 'win32');
     assert.equal(f.launch().options.windowsHide, true);
     assert.equal(f.launch().options.shell, false);
     const pending = f.worker.synthesize('Hello, thank you for calling.');
@@ -137,6 +147,77 @@ test('Pocket uses isolated public preset runtime, no credentials, and waits for 
     if (previous === undefined) delete process.env.OPENAI_API_KEY;
     else process.env.OPENAI_API_KEY = previous;
   }
+});
+
+test('Pocket selects platform venvs and explicit preprovisioned paths without probing or shell arguments', () => {
+  const repoRoot = path.resolve('offline-repo');
+  const runtimeDir = path.resolve('offline-models');
+  const pythonExecutable = path.join(runtimeDir, 'Python runtime', 'python');
+  for (const platform of ['win32', 'linux'] as const) {
+    assert.deepEqual(
+      resolvePocketVoiceLaunchConfig({ repoRoot }, {}, platform),
+      {
+        repoRoot,
+        runtimeDir: path.join(repoRoot, '.runtime/pocket-tts-lab'),
+        pythonExecutable: path.join(
+          repoRoot,
+          '.runtime/pocket-tts-lab',
+          platform === 'win32' ? 'venv/Scripts/python.exe' : 'venv/bin/python',
+        ),
+      },
+    );
+  }
+  const environment = {
+    POCKET_RUNTIME_DIR: runtimeDir,
+    POCKET_PYTHON_EXECUTABLE: pythonExecutable,
+  };
+  assert.deepEqual(resolvePocketVoiceLaunchConfig({ repoRoot }, environment), {
+    repoRoot,
+    runtimeDir,
+    pythonExecutable,
+  });
+  const f = fixture({ repoRoot, runtimeDir, pythonExecutable });
+  try {
+    assert.equal(f.launch().command, pythonExecutable);
+    assert.deepEqual(f.launch().args, [
+      '-u',
+      path.join(repoRoot, 'scripts/pocket-voice-worker.py'),
+    ]);
+    assert.equal(f.launch().options.env.POCKET_RUNTIME_DIR, runtimeDir);
+    assert.equal(f.launch().options.env.POCKET_PYTHON_EXECUTABLE, undefined);
+    assert.equal(f.launch().options.shell, false);
+  } finally {
+    f.worker.close();
+  }
+});
+
+test('Pocket rejects relative, URL and control-containing runtime paths before spawning', () => {
+  for (const value of [
+    'python3',
+    'https://model.invalid/',
+    '/tmp/model\nsecret',
+    '/tmp/\0model',
+    ' /tmp/model',
+  ]) {
+    for (const field of ['runtimeDir', 'pythonExecutable'] as const) {
+      assert.throws(
+        () =>
+          createPocketVoiceWorker({
+            [field]: value,
+            spawnWorker() {
+              assert.fail('Invalid path must not launch a worker');
+            },
+          }),
+        { message: 'POCKETVOICE_INVALID_RUNTIME_PATH' },
+      );
+    }
+  }
+  const options = { runtimeDir: path.resolve('operator-models') };
+  const config = resolvePocketVoiceLaunchConfig(options, {
+    POCKET_RUNTIME_DIR: 'invalid-inherited-path',
+    POCKET_PYTHON_EXECUTABLE: '',
+  });
+  assert.equal(config.runtimeDir, options.runtimeDir);
 });
 
 test('Pocket yields each native chunk before done and preserves exact order', async () => {
@@ -359,7 +440,7 @@ test('Pocket deadlines and failures terminate owned workers without exposing pat
   const close = fixture({ terminateProcessTree: (pid) => killed.push(pid) });
   Object.assign(close.child, { pid: 912345 });
   close.worker.close();
-  assert.deepEqual(killed, process.platform === 'win32' ? [912345] : []);
+  assert.deepEqual(killed, [912345]);
 });
 
 test('Pocket local validation and runtime status do not launch a model', async () => {
@@ -391,6 +472,18 @@ test('Pocket local validation and runtime status do not launch a model', async (
     state: 'not_started',
     pendingJobs: 0,
   });
+});
+
+test('Pocket retains parent-exit cleanup during EOF grace and removes it after process close', async () => {
+  const listenersBefore = process.listenerCount('exit');
+  const f = fixture();
+  f.child.ready();
+  await f.worker.ready;
+  assert.equal(process.listenerCount('exit'), listenersBefore + 1);
+  f.worker.close();
+  assert.equal(process.listenerCount('exit'), listenersBefore + 1);
+  await delay(0); // Fake EOF closes asynchronously, as a real subprocess does.
+  assert.equal(process.listenerCount('exit'), listenersBefore);
 });
 
 test('Pocket real subprocess fixture streams before done, stays resident and exits on EOF', async () => {
@@ -440,3 +533,91 @@ test('Pocket real subprocess fixture streams before done, stays resident and exi
     if (child.exitCode === null) child.kill();
   }
 });
+
+test(
+  'Pocket EOF cleans its Linux process group while preserving an unrelated process',
+  {
+    skip: process.platform !== 'linux',
+  },
+  async () => {
+    const unrelated = spawn(
+      process.execPath,
+      ['-e', 'setInterval(() => {}, 1000)'],
+      {
+        stdio: 'ignore',
+      },
+    );
+    const source = `
+    const {spawn} = require('node:child_process');
+    const descendant = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {stdio:'ignore'});
+    process.stdin.resume();
+    process.stdin.on('end', () => process.exit(0));
+    process.stdout.write(JSON.stringify({...${JSON.stringify(readyEvent)}, descendantPid:descendant.pid})+'\\n');
+  `;
+    let child: ChildProcessWithoutNullStreams;
+    let descendantPid: number;
+    let exited: Promise<void>;
+    const worker = createPocketVoiceWorker({
+      readyTimeoutMs: 3000,
+      spawnWorker(_command, _args, options) {
+        child = spawn(process.execPath, ['-e', source], {
+          ...options,
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+        child.stdout.once('data', (data) => {
+          descendantPid = JSON.parse(data.toString()).descendantPid;
+        });
+        exited = new Promise((resolve) => child.once('close', () => resolve()));
+        return child;
+      },
+    });
+    async function running(pid: number): Promise<boolean> {
+      try {
+        // An orphan can remain a zombie until the container init reaps it;
+        // a zombie cannot run or retain resources and is already terminated.
+        const stat = await readFile(`/proc/${pid}/stat`, 'utf8');
+        return (
+          stat.slice(stat.lastIndexOf(')') + 2, stat.lastIndexOf(')') + 3) !==
+          'Z'
+        );
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+        throw error;
+      }
+    }
+    try {
+      await worker.ready;
+      assert.equal(await running(descendantPid), true);
+      assert.equal(await running(unrelated.pid), true);
+      worker.close();
+      await Promise.race([
+        exited,
+        delay(2000).then(() => {
+          throw new Error('EOF ignored');
+        }),
+      ]);
+      for (
+        let attempt = 0;
+        attempt < 20 && (await running(descendantPid));
+        attempt += 1
+      )
+        await delay(10);
+      assert.equal(
+        await running(descendantPid),
+        false,
+        'Owned descendant remained alive',
+      );
+      assert.equal(
+        await running(unrelated.pid),
+        true,
+        'Unrelated process must be preserved',
+      );
+    } finally {
+      worker.close();
+      unrelated.kill('SIGKILL');
+      if (child?.exitCode === null) child.kill('SIGKILL');
+      if (descendantPid && (await running(descendantPid)))
+        process.kill(descendantPid, 'SIGKILL');
+    }
+  },
+);

@@ -453,13 +453,16 @@ async function pageFixture(requestMedia: (constraints: unknown) => Promise<unkno
   const nodes = new Map<string, any>();
   function node(): any {
     return {
-      textContent: '', value: '', hidden: false, disabled: false, dataset: {}, children: [], events: {},
+      textContent: '', value: '', hidden: false, disabled: false, dataset: {}, children: [], events: {}, scrollTop: 0, scrollHeight: 0, clientHeight: 0,
+      get ownerDocument() { return fixtureDocument; },
+      getBoundingClientRect() { return { top: 0, bottom: 100 }; },
       get options() { return this.children; },
       classList: { toggle() {}, add() {} }, style: { setProperty() {} },
       setAttribute() {}, removeAttribute() {}, focus() {},
       append(...children: any[]) { for (const child of children) { this.children.push(child); child.parentNode = this; } },
       replaceChildren(...children: any[]) { this.children = []; this.append(...children); },
       insertBefore(child: any, next: any) {
+        if (child.parentNode) child.remove();
         const index = next ? this.children.indexOf(next) : this.children.length;
         assert.ok(index >= 0, 'insertBefore requires an existing sibling');
         this.children.splice(index, 0, child); child.parentNode = this;
@@ -469,6 +472,7 @@ async function pageFixture(requestMedia: (constraints: unknown) => Promise<unkno
       click() { this.events.click?.(); },
       querySelector() { return this.child || (this.child = node()); }, querySelectorAll() { return []; },
       addEventListener(name: string, handler: unknown) { this.events[name] = handler; },
+      removeEventListener(name: string) { delete this.events[name]; },
     };
   }
   const element = (id: string) => { if (!nodes.has(id)) nodes.set(id, node()); return nodes.get(id); };
@@ -549,13 +553,25 @@ async function pageFixture(requestMedia: (constraints: unknown) => Promise<unkno
     addEventListener(name: string, handler: unknown) { this.handlers.set(name, handler); }
     close() { this.readyState = FakeEvents.CLOSED; }
   }
+  const conversationWork = { fullSnapshots: 0, singleSnapshots: 0, fullRenders: 0, singleUpdates: 0 };
+  const conversationModelModule = await import('../public/conversation-model.js');
+  const conversationViewModule = await import('../public/conversation-view.js');
+  const fixtureDocument = { getElementById: element, querySelector: element, querySelectorAll: () => [], createElement: node, createElementNS: node, body: node() };
   const context = vm.createContext({
     audioOutputModule: await import('../public/audio-output.js'),
     microphoneInputModule: await import('../public/microphone-input.js'),
     rtcDiagnosticsModule: { ...rtcDiagnostics, createRtcDiagnostics: (options: any = {}) => rtcDiagnostics.createRtcDiagnostics({ now, ...options }) },
     translationEngineModule: await import('../public/translation-engine.js'),
+    conversationModelModule: { ...conversationModelModule, createConversationModel(options: any) {
+      const model = conversationModelModule.createConversationModel(options);
+      return { ...model, getUtterances() { conversationWork.fullSnapshots++; return model.getUtterances(); }, getUtterance(id: string) { conversationWork.singleSnapshots++; return model.getUtterance(id); } };
+    } },
+    conversationViewModule: { ...conversationViewModule, createConversationView(options: any) {
+      const view = conversationViewModule.createConversationView(options);
+      return { ...view, get count() { return view.count; }, render(rows: any) { conversationWork.fullRenders++; return view.render(rows); }, update(row: any) { conversationWork.singleUpdates++; return view.update(row); } };
+    } },
     lifecycleModule: { createCallLifecycle, createDeviceMediaOwner, microphoneMessages: (await import('../public/call-lifecycle.js')).microphoneMessages },
-    document: { getElementById: element, querySelector: element, querySelectorAll: () => [], createElement: node, createElementNS: node, body: node() },
+    document: fixtureDocument,
     window: { Twilio: { Device: FakeDevice }, history: { replaceState(_state: unknown, _title: string, path: string) { historyPaths.push(path); } }, addEventListener(name: string, callback: () => void) { windowEvents.set(name, callback); }, scrollTo() {} },
     navigator: { mediaDevices },
     location: { hash: options.locationHash ?? '#token=offline-test-access-only', pathname: '/', search: '' },
@@ -599,7 +615,7 @@ async function pageFixture(requestMedia: (constraints: unknown) => Promise<unkno
   const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
   const importLine = "await import('./call-lifecycle.js')";
   assert.ok(source.includes(importLine));
-  await vm.runInContext(source.replace(importLine, 'lifecycleModule').replace("await import('./audio-output.js')", 'audioOutputModule').replace("await import('./microphone-input.js')", 'microphoneInputModule').replace("await import('./rtc-diagnostics.js')", 'rtcDiagnosticsModule').replace("await import('./translation-engine.js')", 'translationEngineModule'), context);
+  await vm.runInContext(source.replace(importLine, 'lifecycleModule').replace("await import('./audio-output.js')", 'audioOutputModule').replace("await import('./microphone-input.js')", 'microphoneInputModule').replace("await import('./rtc-diagnostics.js')", 'rtcDiagnosticsModule').replace("await import('./translation-engine.js')", 'translationEngineModule').replace("await import('./conversation-model.js')", 'conversationModelModule').replace("await import('./conversation-view.js')", 'conversationViewModule'), context);
   await new Promise(resolve => setImmediate(resolve));
   if (!options.initialStatusFailure && sources.length) {
     sources[0].readyState = FakeEvents.OPEN; sources[0].onopen();
@@ -615,6 +631,10 @@ async function pageFixture(requestMedia: (constraints: unknown) => Promise<unkno
     eventSourceCount: () => sources.length,
     eventSource: (index = sources.length - 1) => sources[index],
     pendingTimeouts: (delay: number) => [...timeouts.values()].filter(timer => !timer.cleared && timer.delay === delay),
+    conversationWork(run: () => void) {
+      const before = { ...conversationWork }; run();
+      return Object.fromEntries(Object.entries(conversationWork).map(([key, value]) => [key, value - before[key as keyof typeof before]]));
+    },
     measureTranscriptWork(run: () => void) {
       // Count whole-history JavaScript operations, not elapsed time or browser layout.
       // Instrument the page's own realm without exposing its private record/indexes.
@@ -656,6 +676,9 @@ async function pageFixture(requestMedia: (constraints: unknown) => Promise<unkno
     inputChanged() { mediaDevices.emit('devicechange'); },
     transcriptEvent(value: Record<string, unknown>) {
       sources[0].handlers.get('transcript')({ data: JSON.stringify({ sessionId: activeSession?.id, at: '2026-09-26T01:00:00.000Z', ...value }) });
+    },
+    conversationEvent(value: Record<string, unknown>) {
+      sources[0].handlers.get('conversation')({ data: JSON.stringify({ sessionId: activeSession?.id, ...value }) });
     },
     captionEvent(value: Record<string, unknown>) {
       sources[0].handlers.get('caption-status')({ data: JSON.stringify({ sessionId: activeSession?.id, ...value }) });
@@ -1134,50 +1157,45 @@ for (const engine of ['nano-captions', 'continuous-captions', 'pocket-captions']
   await f.element('end-call').events.click();
 });
 
+// Each card contains both language slots, even if the legacy preference hides originals.
+const partText = (row: any, kind: 'original' | 'translation') => row.children[1].children[kind === 'original' ? 0 : 1].children[1].textContent;
+const partStatus = (row: any, kind: 'original' | 'translation') => row.children[1].children[kind === 'original' ? 0 : 1].children[0].children[1].textContent;
 for (const engine of ['nano-captions', 'continuous-captions', 'pocket-captions']) test(`${engine} drafts pair English with Chinese even with original preference off, including history and export`, async () => {
   const f = await pageFixture(async () => streamFixture().stream);
-  f.element('save-history-toggle').events.click();
-  f.element('show-original-toggle').events.click();
-  f.element('translation-engine').value = engine;
-  f.element('translation-engine').events.change();
+  f.element('save-history-toggle').events.click(); f.element('show-original-toggle').events.click();
+  f.element('translation-engine').value = engine; f.element('translation-engine').events.change();
   await f.element('start-call').events.click();
   const original = { id: 'remote:original:caption_a:0', role: 'remote', kind: 'original' };
   const translation = { id: 'remote:translation:caption_a:0', role: 'remote', kind: 'translation' };
   f.transcriptEvent({ ...translation, text: '五点', final: false });
+  const stable = f.element('transcript').children[0];
+  assert.equal(partText(stable, 'original'), '等待原文…');
   f.transcriptEvent({ ...original, text: 'Not five.', final: true });
   const rows = () => f.element('transcript').children;
-  assert.equal(rows().length, 2);
-  assert.equal(rows()[0].dataset.transcriptId, original.id);
-  assert.equal(rows()[0].className.split(/\s+/).includes('original-entry'), false);
-  assert.equal(rows()[0].className.split(/\s+/).includes('caption-original-entry'), true);
-  assert.equal(rows()[1].children[0].children[2].textContent, '更新中');
+  assert.equal(rows().length, 1); assert.equal(rows()[0], stable);
+  assert.equal(rows()[0].dataset.utteranceId, 'remote:caption_a:0');
+  assert.equal(partText(rows()[0], 'original'), 'Not five.');
+  assert.equal(partStatus(rows()[0], 'translation'), '临时 · 更新中');
   f.transcriptEvent({ ...translation, text: '不是五点。', final: true });
-  assert.equal(rows().length, 2);
-  assert.equal(rows()[1].children[0].children[2].textContent, '');
-  f.element('export-current').events.click();
-  const text = await f.exports[0].text();
+  assert.equal(rows().length, 1); assert.equal(rows()[0], stable);
+  assert.equal(partStatus(rows()[0], 'translation'), '已确定');
+  f.element('export-current').events.click(); const text = await f.exports[0].text();
   if (engine === 'nano-captions') {
-    assert.match(text, /翻译版本：英文原声＋中文字幕/);
-    assert.match(text, /电脑听英文原声，手机听本人英文本音/);
+    assert.match(text, /翻译版本：英文原声＋中文字幕/); assert.match(text, /电脑听英文原声，手机听本人英文本音/);
   } else if (engine === 'pocket-captions') {
-    assert.match(text, /翻译版本：Pocket 美式男声＋中文字幕（测试候选）/);
-    assert.match(text, /电脑听英文原声，手机听Michael 固定美式男声/);
-    assert.match(text, /Pocket TTS.*按译文小节流式合成/);
-    assert.doesNotMatch(text, /本人声线|本人英文本音/);
+    assert.match(text, /翻译版本：Pocket 美式男声＋中文字幕（测试候选）/); assert.match(text, /电脑听英文原声，手机听Michael 固定美式男声/);
+    assert.match(text, /Pocket TTS.*按译文小节流式合成/); assert.doesNotMatch(text, /本人声线|本人英文本音/);
   } else {
-    assert.match(text, /翻译版本：连续直出＋中文字幕（测试候选）/);
-    assert.match(text, /电脑听英文原声，手机听模型声音的连续英文译音/);
+    assert.match(text, /翻译版本：连续直出＋中文字幕（测试候选）/); assert.match(text, /电脑听英文原声，手机听模型声音的连续英文译音/);
     assert.doesNotMatch(text, /本人声线|本人英文本音/);
   }
   assert.match(text, /对方英文原声直接送到电脑，不生成中文声音/);
-  assert.match(text, /\[对方 · 原文\] Not five\.\r\n\[对方 · 译文\] 不是五点。/);
-  assert.doesNotMatch(text, /以双方实际听到的译音为准|未开启原文转写|未定稿\]/);
-  f.callEvent({ status: 'completed' });
-  assert.equal(f.history()[0].translationEngine, engine);
+  assert.match(text, /原文：Not five\.\r\n译文：不是五点。/);
+  assert.doesNotMatch(text, /以双方实际听到的译音为准|未开启原文转写/);
+  f.callEvent({ status: 'completed' }); assert.equal(f.history()[0].translationEngine, engine);
   const historyRows = f.element('history-detail').children.slice(1);
-  assert.equal(historyRows[0].dataset.transcriptId, original.id);
-  assert.equal(historyRows[0].className.split(/\s+/).includes('original-entry'), false);
-  assert.equal(historyRows[1].children[1].children[0].textContent, '不是五点。');
+  assert.equal(historyRows.length, 1); assert.equal(historyRows[0].dataset.utteranceId, 'remote:caption_a:0');
+  assert.equal(partText(historyRows[0], 'original'), 'Not five.'); assert.equal(partText(historyRows[0], 'translation'), '不是五点。');
 });
 
 for (const engine of ['nano-captions', 'continuous-captions', 'pocket-captions']) test(`${engine} empty final captions remove invalid drafts instead of leaving blank or stale rows`, async () => {
@@ -1188,9 +1206,9 @@ for (const engine of ['nano-captions', 'continuous-captions', 'pocket-captions']
   const emit = (kind: string, text: string, final: boolean, sessionId?: string) => f.transcriptEvent({ id: `remote:${kind}:empty_case:0`, role: 'remote', kind, text, final, ...(sessionId ? { sessionId } : {}) });
   emit('original', 'uncertain noise', false);
   emit('translation', '不确定的声音', false);
-  assert.equal(f.element('transcript').children.length, 2);
+  assert.equal(f.element('transcript').children.length, 1);
   emit('original', '', true, 'previous-session');
-  assert.equal(f.element('transcript').children.length, 2);
+  assert.equal(f.element('transcript').children.length, 1);
   emit('original', '', true);
   emit('translation', '', true);
   assert.equal(f.element('transcript').children.length, 0);
@@ -1199,42 +1217,42 @@ for (const engine of ['nano-captions', 'continuous-captions', 'pocket-captions']
   await f.element('end-call').events.click();
 });
 
-for (const engine of ['nano-captions', 'continuous-captions', 'pocket-captions']) test(`${engine} ASR turns use stable source time across late completions, paired translations, history and export`, async () => {
+for (const engine of ['nano-captions', 'continuous-captions', 'pocket-captions']) test(`${engine} both speakers use stable source time across late completions, history and export`, async () => {
   const f = await pageFixture(async () => streamFixture().stream);
-  f.element('save-history-toggle').events.click();
-  f.element('translation-engine').value = engine;
-  f.element('translation-engine').events.change();
+  f.element('save-history-toggle').events.click(); f.element('translation-engine').value = engine; f.element('translation-engine').events.change();
   await f.element('start-call').events.click();
   const emit = (id: string, kind: string, at: number, text: string) => f.transcriptEvent({ id: `remote:${kind}:${id}:0`, role: 'remote', kind, at, text, final: true });
-  const ids = () => f.element('transcript').children.map((row: any) => row.dataset.transcriptId);
+  const ids = () => f.element('transcript').children.map((row: any) => row.dataset.utteranceId);
   emit('second', 'original', 2000, 'Second statement.');
   f.transcriptEvent({ id: 'continuous_local_0', role: 'local', kind: 'translation', at: 1500, text: 'Local response.', final: false });
-  const local = f.element('transcript').children[1];
+  const local = f.element('transcript').children[0];
   emit('first', 'original', 1000, 'First statement.');
-  assert.deepEqual(ids(), ['remote:original:first:0', 'continuous_local_0', 'remote:original:second:0']);
-  emit('second', 'translation', 2000, '第二句。');
-  emit('first', 'translation', 1000, '第一句。');
-  const expected = ['remote:original:first:0', 'remote:translation:first:0', 'continuous_local_0', 'remote:original:second:0', 'remote:translation:second:0'];
+  const expected = ['remote:first:0', 'unpaired:continuous_local_0', 'remote:second:0'];
   assert.deepEqual(ids(), expected);
-  assert.equal(f.element('transcript').children[2], local, 'unchanged local row is reused');
-  f.element('export-current').events.click();
-  const text = await f.exports[0].text();
-  assert.match(text, /\[对方 · 原文\] First statement\.\r\n\[对方 · 译文\] 第一句。\r\n\[你 · 译文 · 未定稿\] Local response\.\r\n\[对方 · 原文\] Second statement\.\r\n\[对方 · 译文\] 第二句。/);
+  emit('second', 'translation', 2000, '第二句。'); emit('first', 'translation', 1000, '第一句。');
+  assert.deepEqual(ids(), expected); assert.equal(f.element('transcript').children[1], local);
+  assert.equal(partText(local, 'original'), '当前事件未提供对应原文');
+  assert.equal(partText(f.element('transcript').children[0], 'translation'), '第一句。');
+  f.element('export-current').events.click(); const text = await f.exports[0].text();
+  assert.ok(text.indexOf('First statement.') < text.indexOf('Local response.') && text.indexOf('Local response.') < text.indexOf('Second statement.'));
+  assert.match(text, /未配对/); assert.match(text, /译文（未确定）：Local response\./);
   f.callEvent({ status: 'completed' });
-  assert.deepEqual(f.element('history-detail').children.slice(1).map((row: any) => row.dataset.transcriptId), expected);
+  assert.deepEqual(f.element('history-detail').children.slice(1).map((row: any) => row.dataset.utteranceId), expected);
 });
 
-for (const engine of ['nano-captions', 'continuous-captions', 'pocket-captions']) test(`${engine} timestamp updates reorder an existing paired DOM group without duplicate rows`, async () => {
+for (const engine of ['nano-captions', 'continuous-captions', 'pocket-captions']) test(`${engine} timestamp updates reorder the existing paired card without duplicate rows`, async () => {
   const f = await pageFixture(async () => streamFixture().stream);
-  f.element('translation-engine').value = engine;
-  f.element('translation-engine').events.change();
+  f.element('translation-engine').value = engine; f.element('translation-engine').events.change();
   await f.element('start-call').events.click();
   f.transcriptEvent({ id: 'remote:original:second:0', role: 'remote', kind: 'original', at: 2000, text: 'Second.', final: true });
   f.transcriptEvent({ id: 'remote:translation:first:0', role: 'remote', kind: 'translation', at: 3000, text: '第一', final: false });
+  const first = f.element('transcript').children[1];
   f.transcriptEvent({ id: 'remote:translation:first:0', role: 'remote', kind: 'translation', at: 1000, text: '第一句。', final: true });
-  assert.deepEqual(f.element('transcript').children.map((row: any) => row.dataset.transcriptId), ['remote:translation:first:0', 'remote:original:second:0']);
+  assert.deepEqual(f.element('transcript').children.map((row: any) => row.dataset.utteranceId), ['remote:first:0', 'remote:second:0']);
+  assert.equal(f.element('transcript').children[0], first);
   f.transcriptEvent({ id: 'remote:original:first:0', role: 'remote', kind: 'original', at: 1000, text: 'First.', final: true });
-  assert.deepEqual(f.element('transcript').children.map((row: any) => row.dataset.transcriptId), ['remote:original:first:0', 'remote:translation:first:0', 'remote:original:second:0']);
+  assert.equal(f.element('transcript').children.length, 2); assert.equal(f.element('transcript').children[0], first);
+  assert.equal(partText(first, 'original'), 'First.'); assert.equal(partText(first, 'translation'), '第一句。');
   await f.element('end-call').events.click();
 });
 
@@ -1251,78 +1269,72 @@ for (const engine of ['nano-captions', 'continuous-captions', 'pocket-captions']
     emit(turn, 'original', `Original-${turn}`, true);
   }
   const rows = () => f.element('transcript').children;
-  const order = rows().map((row: any) => row.dataset.transcriptId);
-  assert.equal(rows().length, 300, 'complete earlier text remains visible');
-  const firstNode = rows()[0]; const lastNode = rows()[299];
+  const order = rows().map((row: any) => row.dataset.utteranceId);
+  assert.equal(rows().length, 150, 'all original and translated turns remain visible');
+  const firstNode = rows()[0]; const lastNode = rows()[149];
   const scroll = f.element('transcript-scroll'); scroll.scrollHeight = 20000; scroll.clientHeight = 500; scroll.scrollTop = 1000;
-  const work = f.measureTranscriptWork(() => {
-    for (let revision = 0; revision < 200; revision++) emit(70, 'translation', `Corrected-${revision}`, revision === 199);
+  scroll.events.scroll();
+  const work = f.conversationWork(() => {
+    for (let revision = 0; revision < 200; revision++) emit(70, 'translation', `Corrected-${revision}`, true);
   });
-  assert.deepEqual(work, { largeArrayScans: 0, largeArraySorts: 0, domRowsEnumerated: 0 });
-  assert.deepEqual(rows().map((row: any) => row.dataset.transcriptId), order);
-  assert.equal(rows()[0], firstNode); assert.equal(rows()[299], lastNode);
-  assert.equal(rows()[141].children[1].children[0].textContent, 'Corrected-199');
-  assert.equal(rows()[141].children[0].children[2].textContent, '', 'the final-only flag revision reaches the visible row');
+  assert.deepEqual(work, { fullSnapshots: 0, singleSnapshots: 200, fullRenders: 0, singleUpdates: 200 }, 'ordinary revisions only snapshot and update their indexed card');
+  assert.deepEqual(rows().map((row: any) => row.dataset.utteranceId), order);
+  assert.equal(rows()[0], firstNode); assert.equal(rows()[149], lastNode);
+  assert.equal(partText(rows()[70], 'translation'), 'Corrected-199');
+  assert.equal(partStatus(rows()[70], 'translation'), '已确定');
   assert.equal(scroll.scrollTop, 1000, 'reading older text must not be interrupted by revisions');
-  scroll.scrollTop = 19500; emit(70, 'translation', 'Corrected-final', true);
+  scroll.scrollTop = 19500; scroll.events.scroll(); emit(70, 'translation', 'Corrected-final', true);
   assert.equal(scroll.scrollTop, scroll.scrollHeight, 'a viewer following the bottom keeps following');
-  const reorder = f.measureTranscriptWork(() => emit(0, 'original', 'Original-0-corrected', true, 200000));
-  assert.ok(reorder.largeArrayScans > 0 && reorder.largeArraySorts > 0 && reorder.domRowsEnumerated > 0,
-    'the operation sensor must see the full ordering path when source time changes');
-  assert.equal(rows().length, 300);
+  emit(0, 'original', 'Original-0-corrected', true, 200000);
+  assert.equal(rows().length, 150);
+  assert.equal(rows()[0], firstNode, 'later receipts preserve the established source start');
   f.element('export-current').events.click();
   const exported = await f.exports[0].text();
-  assert.equal((exported.match(/\[对方 · /g) || []).length, 300);
+  assert.equal((exported.match(/\[对方 · /g) || []).length, 150);
   assert.match(exported, /Original-0-corrected/); assert.match(exported, /Original-149/); assert.match(exported, /Corrected-final/);
   assert.doesNotMatch(exported, /Corrected-198|Corrected-199/);
   f.callEvent({ status: 'completed' });
   assert.equal(f.history()[0].lines.length, 300);
-  assert.equal(f.element('history-detail').children.length, 301, 'saved history still exposes every line plus its heading');
+  assert.equal(f.element('history-detail').children.length, 151, 'saved history exposes each paired turn plus its heading');
   f.pagehide();
 });
 
-for (const engine of ['nano-captions', 'continuous-captions', 'pocket-captions']) test(`${engine} transcript indexes survive deletion, reinsert, metadata changes and session reset`, async () => {
+for (const engine of ['nano-captions', 'continuous-captions', 'pocket-captions']) test(`${engine} paired indexes survive empty parts, restored text, mismatched metadata and session reset`, async () => {
   const f = await pageFixture(async () => streamFixture().stream);
   f.element('translation-engine').value = engine; f.element('translation-engine').events.change();
   await f.element('start-call').events.click();
-  const emit = (turn: string, kind: string, text: string, at: number, extra = {}) => f.transcriptEvent({
-    id: `remote:${kind}:${turn}:0`, role: 'remote', kind, at, text, final: true, ...extra,
-  });
-  const ids = () => f.element('transcript').children.map((row: any) => row.dataset.transcriptId);
+  const emit = (turn: string, kind: string, text: string, at: number, extra = {}) => f.transcriptEvent({ id: `remote:${kind}:${turn}:0`, role: 'remote', kind, at, text, final: true, ...extra });
+  const ids = () => f.element('transcript').children.map((row: any) => row.dataset.utteranceId);
   emit('first', 'original', 'First', 1000); emit('first', 'translation', '第一', 3000);
   emit('second', 'original', 'Second', 2000); emit('second', 'translation', '第二', 2000);
-  emit('first', 'original', '', 1000);
-  emit('second', 'translation', '第二修订', 2000);
-  assert.deepEqual(ids(), ['remote:original:second:0', 'remote:translation:second:0', 'remote:translation:first:0'], 'deleting the earliest group member invalidates cached caption order');
+  emit('first', 'original', '', 1000); emit('second', 'translation', '第二修订', 2000);
+  assert.deepEqual(ids(), ['remote:first:0', 'remote:second:0'], 'empty original retains a valid translation and stable source order');
+  const first = f.element('transcript').children[0];
   emit('first', 'original', 'First restored', 1000);
-  assert.deepEqual(ids(), ['remote:original:first:0', 'remote:translation:first:0', 'remote:original:second:0', 'remote:translation:second:0']);
+  assert.equal(f.element('transcript').children[0], first); assert.equal(partText(first, 'original'), 'First restored');
   emit('second', 'translation', '第二再修订', 2000);
-  assert.equal(f.element('transcript').children[3].children[1].children[0].textContent, '第二再修订', 'shifted indexes still update the correct saved and visible row');
+  assert.equal(partText(f.element('transcript').children[1], 'translation'), '第二再修订');
   emit('first', 'original', 'Metadata changed', 1000, { kind: 'translation' });
-  assert.deepEqual(ids(), ['remote:original:second:0', 'remote:translation:second:0', 'remote:translation:first:0', 'remote:original:first:0'], 'kind/group membership changes leave the reinserted unpaired row in its first-arrival slot');
-  f.element('export-current').events.click();
-  const exported = await f.exports[0].text();
-  assert.match(exported, /第二再修订/); assert.doesNotMatch(exported, /First restored/);
-  await f.element('end-call').events.click();
-  await f.element('start-call').events.click();
-  emit('first', 'original', 'New session only', 1000);
-  emit('first', 'original', 'New session revised', 1000);
+  assert.ok(ids().includes('unpaired:remote:original:first:0'), 'mismatched kind cannot be guessed into an explicit pair');
+  assert.equal(partText(first, 'original'), 'First restored', 'malformed metadata cannot replace the valid paired original');
+  f.element('export-current').events.click(); const exported = await f.exports[0].text();
+  assert.match(exported, /第二再修订/); assert.match(exported, /First restored/); assert.match(exported, /Metadata changed/);
+  await f.element('end-call').events.click(); await f.element('start-call').events.click();
+  emit('first', 'original', 'New session only', 1000); emit('first', 'original', 'New session revised', 1000);
   emit('second', 'translation', 'Old session rejected', 2000, { sessionId: 'session-1' });
-  assert.deepEqual(ids(), ['remote:original:first:0']);
-  assert.equal(f.element('transcript').children[0].children[1].children[0].textContent, 'New session revised');
-  f.element('export-current').events.click();
-  const nextExport = await f.exports[1].text();
+  assert.deepEqual(ids(), ['remote:first:0']); assert.equal(partText(f.element('transcript').children[0], 'original'), 'New session revised');
+  f.element('export-current').events.click(); const nextExport = await f.exports[1].text();
   assert.match(nextExport, /New session revised/); assert.doesNotMatch(nextExport, /Metadata changed|第二|Old session/);
   await f.element('end-call').events.click(); f.pagehide();
 });
 
-test('legacy transcript turns retain first arrival when timestamps arrive out of order', async () => {
+test('legacy transcript turns also interleave by source time when received out of order', async () => {
   const f = await pageFixture(async () => streamFixture().stream);
   await f.element('start-call').events.click();
   for (const [id, at] of [['second', 2000], ['first', 1000]]) {
     f.transcriptEvent({ id: `remote:original:${id}:0`, role: 'remote', kind: 'original', at, text: String(id), final: true });
   }
-  assert.deepEqual(f.element('transcript').children.map((row: any) => row.dataset.transcriptId), ['remote:original:second:0', 'remote:original:first:0']);
+  assert.deepEqual(f.element('transcript').children.map((row: any) => row.dataset.utteranceId), ['remote:first:0', 'remote:second:0']);
   await f.element('end-call').events.click();
 });
 
@@ -2042,8 +2054,7 @@ test('authentication failures are not cleared by successful status reads or retr
 
 test('transcripts pair by role, item and content index despite reversed arrival, consistently in history and export', async () => {
   const f = await pageFixture(async () => streamFixture().stream);
-  f.element('save-history-toggle').events.click();
-  await f.element('start-call').events.click();
+  f.element('save-history-toggle').events.click(); await f.element('start-call').events.click();
   const emit = (role: string, kind: string, index: number, text: string, at: string) => f.transcriptEvent({ id: `${role}:${kind}:shared:${index}`, role, kind, text, final: true, at });
   emit('local', 'translation', 0, 'Local translation zero', '2026-09-26T02:00:00.000Z');
   const firstTranslation = f.element('transcript').children[0];
@@ -2052,16 +2063,65 @@ test('transcripts pair by role, item and content index despite reversed arrival,
   emit('remote', 'translation', 0, 'Remote translation zero', '2026-09-26T03:00:00.000Z');
   emit('local', 'original', 1, 'Local original one', '2026-09-26T04:00:00.000Z');
   emit('local', 'original', 0, 'Local original zero', '2026-09-26T05:00:00.000Z');
-  const expected = ['local:original:shared:0', 'local:translation:shared:0', 'remote:original:shared:0', 'remote:translation:shared:0', 'local:original:shared:1', 'local:translation:shared:1'];
-  const ids = (id: string) => f.element(id).children.map((child: any) => child.dataset.transcriptId).filter(Boolean);
+  const expected = ['remote:shared:0', 'local:shared:1', 'local:shared:0'];
+  const ids = (id: string) => f.element(id).children.map((child: any) => child.dataset.utteranceId).filter(Boolean);
   assert.deepEqual(ids('transcript'), expected);
-  assert.equal(f.element('transcript').children[1], firstTranslation, 'late original inserts before its existing translation without redrawing it');
-  f.element('export-current').events.click();
-  const text = await f.exports[0].text();
-  const lines = text.split('\r\n').filter(line => line.startsWith('['));
-  assert.deepEqual(lines, ['[你 · 原文] Local original zero', '[你 · 译文] Local translation zero', '[对方 · 原文] Remote original zero', '[对方 · 译文] Remote translation zero', '[你 · 原文] Local original one', '[你 · 译文] Local translation one']);
+  assert.equal(f.element('transcript').children[2], firstTranslation, 'late original updates the same paired card');
+  assert.equal(partText(firstTranslation, 'original'), 'Local original zero');
+  f.element('export-current').events.click(); const text = await f.exports[0].text();
+  assert.ok(text.indexOf('Remote original zero') < text.indexOf('Local original one') && text.indexOf('Local original one') < text.indexOf('Local original zero'));
+  assert.match(text, /原文：Local original zero\r\n译文：Local translation zero/);
+  f.callEvent({ status: 'completed' }); assert.deepEqual(ids('history-detail'), expected);
+});
+
+test('canonical conversation events preserve earlier fallback cards across reconnect, history and export', async () => {
+  const f = await pageFixture(async () => streamFixture().stream);
+  f.element('save-history-toggle').events.click(); await f.element('start-call').events.click();
+  f.transcriptEvent({ id: 'local:original:earlier:0', role: 'local', kind: 'original', text: '旧字幕原文', final: true, at: 1000 });
+  f.transcriptEvent({ id: 'local:translation:earlier:0', role: 'local', kind: 'translation', text: 'Earlier translation.', final: true, at: 1000 });
+  const earlier = f.element('transcript').children[0];
+  const event = { type: 'text', utteranceId: 'remote:later:0', role: 'remote', kind: 'original', text: 'A later answer.', final: true, revision: 1, at: 1500, sequence: 2, pairing: 'explicit', boundary: 'utterance' };
+  f.conversationEvent({ ...event, sessionId: 'retired' }); assert.equal(f.element('transcript').children.length, 1);
+  f.conversationEvent(event); assert.equal(f.element('transcript').children.length, 2); assert.equal(f.element('transcript').children[0], earlier);
+  f.conversationEvent({ ...event, kind: 'translation', text: '后来的回答。' });
+  f.conversationEvent({ ...event, role: 'local', utteranceId: 'local:earlier:0', kind: 'translation', text: 'Earlier translation updated.', revision: 2, at: 1000, sequence: 1 });
+  f.transcriptEvent({ id: 'local:translation:earlier:0', role: 'local', kind: 'translation', text: 'Stale legacy echo.', final: true, at: 1000 });
+  assert.equal(f.element('transcript').children.length, 2); assert.equal(partText(earlier, 'translation'), 'Earlier translation updated.');
+  f.element('export-current').events.click(); const exported = await f.exports[0].text();
+  assert.match(exported, /旧字幕原文/); assert.match(exported, /Earlier translation updated/); assert.match(exported, /后来的回答/); assert.doesNotMatch(exported, /Stale legacy echo/);
   f.callEvent({ status: 'completed' });
-  assert.deepEqual(ids('history-detail'), expected);
+  assert.equal(f.element('history-detail').children.length, 3); assert.equal(partText(f.element('history-detail').children[1], 'original'), '旧字幕原文');
+});
+
+test('whole-turn diagnostic ASR never duplicates an explicitly paired semantic segment', async () => {
+  const f = await pageFixture(async () => streamFixture().stream);
+  f.element('save-history-toggle').events.click(); await f.element('start-call').events.click();
+  const raw = { id: 'continuous_full_turn', role: 'local', kind: 'original', text: 'Whole-turn diagnostic text.', final: false, at: 1000, conversationVisible: false };
+  f.transcriptEvent(raw); assert.equal(f.element('transcript').children.length, 0); assert.equal(f.element('export-current').disabled, true);
+  const segment = { type: 'text', utteranceId: 'local:semantic:0', role: 'local', kind: 'original', text: '请预约', final: false, revision: 1, at: 1000, sequence: 1, pairing: 'explicit', boundary: 'semantic' };
+  f.conversationEvent(segment); const row = f.element('transcript').children[0];
+  f.transcriptEvent({ ...raw, final: true });
+  f.conversationEvent({ ...segment, revision: 2, text: '请预约三点。', final: true });
+  f.conversationEvent({ ...segment, kind: 'translation', text: 'Please book three.', final: true });
+  assert.equal(f.element('transcript').children.length, 1); assert.equal(f.element('transcript').children[0], row);
+  assert.equal(partText(row, 'original'), '请预约三点。'); assert.equal(partText(row, 'translation'), 'Please book three.');
+  f.element('export-current').events.click(); const exported = await f.exports[0].text();
+  assert.match(exported, /请预约三点/); assert.doesNotMatch(exported, /Whole-turn diagnostic/);
+  f.callEvent({ status: 'completed' }); assert.equal(f.element('history-detail').children.length, 2);
+});
+
+test('canonical text completion, queued delivery and actual line confirmation remain independent', async () => {
+  const f = await pageFixture(async () => streamFixture().stream); await f.element('start-call').events.click();
+  const base = { utteranceId: 'local:play:0', role: 'local', revision: 1, at: 1000, sequence: 1 };
+  f.conversationEvent({ ...base, type: 'text', kind: 'original', text: '请确认三点。', final: true, pairing: 'explicit', boundary: 'utterance' });
+  const row = f.element('transcript').children[0]; const status = () => row.children[2].dataset.playbackStatus;
+  assert.equal(status(), 'unknown');
+  f.conversationEvent({ ...base, type: 'playback', status: 'queued', evidence: 'none' }); assert.equal(status(), 'queued');
+  f.conversationEvent({ ...base, type: 'playback', deliveryId: 'delivery-a', status: 'sent', evidence: 'transport' }); assert.equal(status(), 'sent');
+  f.conversationEvent({ ...base, revision: 2, type: 'playback', deliveryId: 'delivery-a', status: 'played', evidence: 'transport', sealed: true, expectedDeliveryCount: 1 }); assert.equal(status(), 'sent', 'a transport receipt cannot claim line playback');
+  f.conversationEvent({ ...base, revision: 2, type: 'playback', deliveryId: 'delivery-a', status: 'played', evidence: 'twilio_mark', sealed: true, expectedDeliveryCount: 1 }); assert.equal(status(), 'played');
+  assert.equal(f.element('transcript').children[0], row); assert.match(row.children[2].textContent, /线路已确认播放/);
+  assert.match(row.children[2].title, /不等于人耳/); await f.element('end-call').events.click();
 });
 
 test('output selection controls bind the SDK and cannot reroute during a call', async () => {
@@ -2121,7 +2181,7 @@ test('a pending output switch blocks outgoing and incoming media until actual SD
   assert.equal(f.element('start-call').disabled, false);
 });
 
-test('partial transcript updates replace only their own paired row and keep final text in exports', async () => {
+test('partial transcript updates retain their paired card and keep final text in exports', async () => {
   const f = await pageFixture(async () => streamFixture().stream);
   await f.element('start-call').events.click();
   const original = { id: 'local:original:turn_a:0', role: 'local', kind: 'original' };
@@ -2131,13 +2191,11 @@ test('partial transcript updates replace only their own paired row and keep fina
   const originalNode = f.element('transcript').children[0];
   f.transcriptEvent({ ...translation, text: 'Where is it?', final: true });
   const children = f.element('transcript').children;
-  assert.equal(children.length, 2);
-  assert.equal(children[0], originalNode);
-  assert.equal(children[1].children[1].children[0].textContent, 'Where is it?');
-  assert.equal(children[1].children[0].children[2].textContent, '');
+  assert.equal(children.length, 1); assert.equal(children[0], originalNode);
+  assert.equal(partText(children[0], 'translation'), 'Where is it?'); assert.equal(partStatus(children[0], 'translation'), '已确定');
   f.element('export-current').events.click();
   const text = await f.exports[0].text();
-  assert.match(text, /\[你 · 原文\] 哪里？\r\n\[你 · 译文\] Where is it\?/);
+  assert.match(text, /原文：哪里？\r\n译文：Where is it\?/);
   assert.doesNotMatch(text, /未定稿/);
   await f.element('end-call').events.click();
 });
