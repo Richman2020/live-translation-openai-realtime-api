@@ -1,4 +1,4 @@
-/** Offline Chromium acceptance: serves public assets only; no phone/provider APIs. */
+/** Offline Chromium acceptance: public assets and synthetic header probes; no phone/provider APIs. */
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
@@ -15,9 +15,25 @@ const executable = process.env.CHROME_BIN || ['/usr/bin/chromium', '/usr/bin/goo
 if (!executable) throw new Error('Set CHROME_BIN to an installed Chromium executable.');
 const profile = await mkdtemp(join(tmpdir(), 'phone-offline-chrome-'));
 const mime = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml' };
+const browserSourceHeaders = { fetch: [], eventSource: [] };
 const server = createServer(async (request, response) => {
   try {
     const pathname = new URL(request.url, 'http://offline').pathname;
+    const probe = pathname === '/offline-header-proof/fetch' ? 'fetch'
+      : pathname === '/offline-header-proof/events' ? 'eventSource' : undefined;
+    if (probe) {
+      if (request.method !== 'GET') { response.writeHead(405).end(); return; }
+      browserSourceHeaders[probe].push({
+        method: request.method,
+        origin: request.headers.origin ?? null,
+        secFetchSite: request.headers['sec-fetch-site'] ?? null,
+        secFetchMode: request.headers['sec-fetch-mode'] ?? null,
+        secFetchDest: request.headers['sec-fetch-dest'] ?? null,
+      });
+      response.writeHead(200, { 'Content-Type': probe === 'eventSource' ? 'text/event-stream' : 'text/plain', 'Cache-Control': 'no-store' });
+      response.end(probe === 'eventSource' ? 'data: headers-observed\n\n' : 'headers-observed');
+      return;
+    }
     const file = resolve(root, `.${pathname}`);
     if (!file.startsWith(root + sep) || !mime[extname(file)] || pathname.startsWith('/api/') || pathname.startsWith('/voice/')) {
       response.writeHead(404).end(); return;
@@ -115,7 +131,20 @@ try {
   await evaluate(`document.getElementById('conversation-latest').click()`);
   equal(await evaluate(`(() => { const box = document.getElementById('transcript-scroll'); return box.scrollHeight - box.scrollTop - box.clientHeight < 65 && document.getElementById('conversation-latest').hidden; })()`), true, 'return to latest resumes following');
   await evaluate(`document.getElementById('demo-reset').click(); document.getElementById('demo-all').click(); document.getElementById('transcript-scroll').scrollTop = 0;`);
-  const result = { passed: true, checks };
+  await evaluate(`fetch('/offline-header-proof/fetch').then(async response => {
+    if (!response.ok || await response.text() !== 'headers-observed') throw new Error('Synthetic GET probe failed');
+  })`);
+  await evaluate(`new Promise((resolve, reject) => {
+    const source = new EventSource('/offline-header-proof/events');
+    const finish = error => { clearTimeout(timer); source.close(); error ? reject(error) : resolve(true); };
+    const timer = setTimeout(() => finish(new Error('Synthetic EventSource probe timed out')), 3000);
+    source.onmessage = event => finish(event.data === 'headers-observed' ? undefined : new Error('Unexpected synthetic event'));
+    source.onerror = () => finish(new Error('Synthetic EventSource probe failed'));
+  })`);
+  const expectedSourceHeaders = [{ method: 'GET', origin: null, secFetchSite: 'same-origin', secFetchMode: 'cors', secFetchDest: 'empty' }];
+  equal(browserSourceHeaders.fetch, expectedSourceHeaders, 'actual Chrome same-origin fetch GET omits Origin and sends same-origin Fetch Metadata');
+  equal(browserSourceHeaders.eventSource, expectedSourceHeaders, 'actual Chrome same-origin EventSource GET omits Origin and sends same-origin Fetch Metadata');
+  const result = { passed: true, checks, browserSourceHeaders };
   assert.deepEqual(faults, []);
   assert.equal(requests.some(url => /^https?:/.test(url) && !url.startsWith(`${origin}/`)), false, 'Browser contacted an external endpoint');
   const output = join(repo, '.runtime', 'conversation-browser');

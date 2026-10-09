@@ -6,6 +6,8 @@
 
 下一里程碑的可审查方案见 [云认证、会话隔离与部署准备](CLOUD_AUTH_DEPLOYMENT_PLAN.md)：推荐无需外部 provider 的单账户自托管 scrypt 验证与 opaque 会话 cookie，身份方案及具体配置待确认。本文运行配置和拒绝启动行为保持不变。
 
+后续独立组件见 [会话/通话授权边界](CLOUD_ACCESS_BOUNDARY.md)：仅提供可测试接口与 HTTP/浏览器 WS 拒绝、归属校验，不注册生产路由、不实现登录或 SSE，不解除本文 cloud guard。
+
 原上游 Flex 的 `src/index.ts` / `npm start` 是独立入口，不受此 solo 保护控制。不能用它绕过云模式保护，或把该入口的启动成功当作本方案完成。
 
 ## 已实现的运行配置
