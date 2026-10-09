@@ -581,7 +581,9 @@ test(
           'Z'
         );
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+        // /proc can disappear before open (ENOENT) or during read (ESRCH).
+        const { code } = error as NodeJS.ErrnoException;
+        if (code === 'ENOENT' || code === 'ESRCH') return false;
         throw error;
       }
     }

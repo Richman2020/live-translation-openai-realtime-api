@@ -34,6 +34,8 @@
 
 第二轮 [CI run 37893945641](https://github.com/Richman2020/live-translation-openai-realtime-api/actions/runs/37893945641) 基于 `8f8b424` 再次通过安装、生产构建、730项回归和JS语法；浏览器在DevTools端口文件出现前10秒超时，本轮未执行浏览器断言，不算通过。增加启动/target/module阶段及有限stderr退出诊断（删除调试websocket capability），只将启动等待调整为30秒；本环境再次做同一14项验收，远端后续结果以最终回读为准。
 
+第三轮 [CI run 37894242031](https://github.com/Richman2020/live-translation-openai-realtime-api/actions/runs/37894242031) 基于 `557c219` 安装、生产构建通过；回归为724通过、1失败、5跳过。新增Linux EOF进程清理测试读取 `/proc/<pid>/stat` 时遇到已退出进程的 ESRCH，测试 helper 原只处理 ENOENT；浏览器及后续步骤因前置失败跳过，没有执行断言。窄修 helper，仅将 ENOENT / ESRCH 认定为进程已退出，其余错误继续抛出，保留真实子进程与无关进程存活检查；不修改电话生产逻辑。定向27项回归通过，提交后的完整CI以远端回读为准。
+
 本轮未验收：真实云认证/owner隔离、Linux Pocket实际合成、API实连、真实麦克风、普通手机双向电话、自然度、数字/否定翻译质量、持续跟随/尾部播放积压和耳听延迟。当前云环境没有Pocket模型，历史完整Python依赖freeze也不在仓库，后续须先取得并审核；不即时安装猜测版本。未改Twilio回调、未部署、未调用付费接口。下一步限于按云设计实现独立认证/隔离与离线故障验收，取得已有冻结依赖/资产后验证单实例warm，再另行按授权做真实通话。原生翻译保留为 [ADR候选](docs/ADR_REALTIME_TRANSLATION.md)，不替换引擎、不承诺零延迟或本人声音克隆。
 
 ## 最新检查：返回后的通话预检（2026-10-08）
