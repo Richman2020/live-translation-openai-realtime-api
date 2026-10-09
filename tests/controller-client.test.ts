@@ -119,6 +119,22 @@ test('new documents get independent tab identifiers and cannot recover a held le
   assert.equal(posts(f, '/api/calls').length, 0); await f.close();
 });
 
+test('a new document that reads before old-page revoke stays read-only until an explicit current refresh', async () => {
+  const f = fixture(); await f.ready();
+  const reader = f.makeClient(); await reader.boot(); reader.setConnectionState(true);
+  assert.equal(reader.state.controller.mode, 'held'); assert.equal(reader.state.canAcquire, false);
+  const writes = posts(f).length;
+  // Provider cleanup and controller revocation are independent. A reconnect
+  // cannot turn an earlier held hint into an unproven available capability.
+  f.setLease(null); f.setBusy(false); reader.setConnectionState(false); reader.setConnectionState(true);
+  assert.equal(reader.state.canAcquire, false); assert.equal(reader.state.lease, null);
+  assert.equal(posts(f).length, writes);
+  await reader.refresh();
+  assert.equal(reader.state.controller.mode, 'available'); assert.equal(reader.state.canAcquire, true);
+  assert.equal(reader.state.lease, null); assert.equal(posts(f).length, writes);
+  await f.close();
+});
+
 test('missing login disables every write and reports the server error code', async () => {
   const f = fixture(); f.overrides.set('/api/browser-session', () => response({ error: 'UNAUTHORIZED' }, 401));
   await f.client.boot(); f.client.setConnectionState(true);

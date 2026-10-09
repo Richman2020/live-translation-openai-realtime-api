@@ -78,6 +78,9 @@ const bridges: BridgeOptions[] = [];
 const providerCreates: Record<string, unknown>[] = [];
 const providerHangups: string[] = [];
 const preparations = { voice: 0, public: 0 };
+let completedControllerRevocations = 0;
+let refreshRevokeGate: ReturnType<typeof deferred> | undefined;
+let heldRefreshRevocations = 0;
 let voiceGate: ReturnType<typeof deferred> | undefined;
 let publicGate: ReturnType<typeof deferred> | undefined;
 let failHangup = false;
@@ -370,6 +373,14 @@ const proxy = https.createServer(async (request, response) => {
       mode: (request.headers['sec-fetch-mode'] as string) || null,
       dest: (request.headers['sec-fetch-dest'] as string) || null,
     });
+  const refreshGate =
+    path === '/api/controller/revoke' ? refreshRevokeGate : undefined;
+  if (refreshGate) {
+    // Only the refresh scenario delays forwarding the real pagehide revoke.
+    // Hangup, the new document's bootstrap and every backend response stay real.
+    heldRefreshRevocations += 1;
+    await refreshGate.promise;
+  }
   // The supplier recovers only when the real retry request reaches the proxy.
   // Background cleanup attempts keep failing until then; no API response is replaced.
   if (
@@ -393,6 +404,10 @@ const proxy = https.createServer(async (request, response) => {
       headers: request.headers,
     },
     (stream) => {
+      if (path === '/api/controller/revoke' && stream.statusCode === 200)
+        stream.once('end', () => {
+          completedControllerRevocations += 1;
+        });
       response.writeHead(stream.statusCode!, stream.headers);
       stream.pipe(response);
       response.once('close', () => stream.destroy());
@@ -1190,14 +1205,63 @@ try {
     'Live call before page reload',
   );
   const refreshHangups = providerHangups.length;
-  await page.send('Page.reload');
+  const oldDocumentTimeOrigin = await page.evaluate('performance.timeOrigin');
+  const refreshRevocations = completedControllerRevocations;
+  const heldBeforeRefresh = heldRefreshRevocations;
+  const controllerStatus = () =>
+    leases.status(
+      policy.authenticate(
+        {
+          host: new URL(origin).host,
+          origin,
+          cookie: `${CLOUD_SESSION_COOKIE}=${token}`,
+        },
+        'read',
+        { surface: 'http', method: 'GET' },
+      ),
+    );
+  refreshRevokeGate = deferred();
+  try {
+    await page.send('Page.reload');
+    await eventually(
+      async () =>
+        (await page.evaluate('performance.timeOrigin')) !==
+          oldDocumentTimeOrigin && (await page.state()).ready === 'true',
+      'Actual refresh',
+    );
+    await eventually(
+      () =>
+        heldRefreshRevocations > heldBeforeRefresh &&
+        !manager.controlAdmissionBlocked,
+      'Pagehide hangup cleans both legs before held revoke is forwarded',
+    );
+    await eventually(
+      async () =>
+        (await page.state()).title === '只读标签页 · 控制权在其他页面',
+      'New document reads the still-held old controller',
+    );
+    const heldState = await page.state();
+    check(
+      {
+        serverMode: controllerStatus().mode,
+        acquire: heldState.acquire,
+        start: heldState.start,
+      },
+      { serverMode: 'held', acquire: false, start: false },
+      'completed hangup with delayed real revoke leaves refreshed page safely read-only',
+    );
+  } finally {
+    refreshRevokeGate.resolve();
+    refreshRevokeGate = undefined;
+  }
+  // Hangup and revoke are independent keepalive requests. A new document can
+  // read the old lease before its revocation completes; that safe read-only
+  // hint is not refreshed merely because provider cleanup has finished.
   await eventually(
-    async () => (await page.state()).ready === 'true',
-    'Actual refresh',
-  );
-  await eventually(
-    () => !manager.controlAdmissionBlocked,
-    'Pagehide cleans live call',
+    () =>
+      completedControllerRevocations > refreshRevocations &&
+      controllerStatus().mode === 'available',
+    'Pagehide revocation completes and retires old controller',
   );
   check(
     providerHangups.length - refreshHangups,
@@ -1208,6 +1272,19 @@ try {
     (await page.state()).start,
     false,
     'refresh cannot recover a controller capability from storage',
+  );
+  await page.click('refresh-controlled-state');
+  await eventually(
+    async () => (await page.state()).acquire,
+    'Explicit refresh confirms controller availability',
+  );
+  check(
+    {
+      acquire: (await page.state()).acquire,
+      start: (await page.state()).start,
+    },
+    { acquire: true, start: false },
+    'confirmed revoke and actual state refresh enable only explicit controller acquisition',
   );
   await page.click('enable-device');
   await eventually(
@@ -1393,6 +1470,7 @@ try {
     }),
   );
 } finally {
+  refreshRevokeGate?.resolve();
   identity.revoked = false;
   failHangup = false;
   voiceGate?.resolve();

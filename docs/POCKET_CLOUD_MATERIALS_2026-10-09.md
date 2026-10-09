@@ -11,6 +11,19 @@
 请求尚未到 Hugging Face 或其 CDN，不代表模型需付费或账号授权。没有换镜像、
 清除代理、关闭 TLS 校验或申请其它服务凭据，已停止反复重试。
 
+以下摘录来自本轮已返回的原始工具输出，未为此再次请求网络；依次为常规检查、
+`with_additional_permissions` 网络检查及 `require_escalated` 固定模型 HEAD 检查：
+
+```text
+huggingface.co OSError Tunnel connection failed: 403 Forbidden
+OSError Tunnel connection failed: 403 Forbidden
+{"file": "model.safetensors", "error_class": "OSError", "reason": "Tunnel connection failed: 403 Forbidden"}
+```
+
+升级执行中 Michael 和 tokenizer 也分别返回相同 `OSError`/CONNECT 403；三个
+目标文件均不存在。检查脚本捕获并输出异常后退出码为 0，这不是 HTTP 或下载
+成功。没有使用 curl 发起下载，因此没有 curl 下载退出码可报告。
+
 ## 官方来源与固定版本
 
 - Pocket：官方 [Kyutai GitHub 固定提交](https://github.com/kyutai-labs/pocket-tts/tree/3dbee45d343d7dddd0d105468d17f8dcba14db3e)。

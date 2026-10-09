@@ -17,15 +17,19 @@
 
 | 验证 | 实际结果 |
 | --- | --- |
-| 新离线回归 | OIDC24项、登录17项、客户端退出新增3项通过；包含真实Fastify最终onSend等待期间cancel/new-login/logout拒绝旧callback |
-| 完整回归 | 986项：981通过、5个既有Windows专属跳过、0失败；新增44项，未删除原测试 |
+| 新离线回归 | OIDC24项、登录17项、客户端退出新增3项及刷新先读旧lease新增1项通过；包含真实Fastify最终onSend等待期间cancel/new-login/logout拒绝旧callback |
+| 完整回归 | 987项：982通过、5个既有Windows专属跳过、0失败；新增45项，未删除原测试 |
 | 类型/构建/lint/语法/diff | 完整源码及全部测试类型检查、生产构建、三处修改源码ESLint、浏览器JS语法和diff通过；新浏览器脚本另作独立类型检查 |
 | Google实际Chromium | 24/24通过：原生跨站导航/Lax、Strict正式cookie、PKCE/RSA验证、CSRF、退出撤销、旧proof及callback重放；拦截Google授权导航1次，实际外部网络0、异常0、真实供应商调用0 |
-| 既有Chromium验收 | 字幕16/16、实际受控工作台47/47通过；各自外部页面请求0、异常0，受控工作台真实供应商调用0 |
+| 既有Chromium验收 | 字幕16/16、实际受控工作台49/49通过（新增刷新竞态2项）；各自外部页面请求0、异常0，受控工作台真实供应商调用0 |
 | 独立安全审查 | 最新八文件175/175通过，0失败/跳过；发现的最终发送竞态已修复并进入17项登录回归，无剩余本轮代码阻塞 |
 | Pocket只读审计 | 实际13项下载/23项缓存manifest大小及SHA256、49包候选附录与71条metadata依赖关系通过；模型0字节，未安装/执行下载代码或合成 |
 
-初次并行浏览器验收发生Google同源Other请求失效的CDP `INVALID_INTERCEPTION_ID/-32602`及受控页面控件等待超时；未将其当作通过。Google脚本增加固定安全错误类别、取消观测和拒绝回调完整渲染barrier，未忽略provider/API或其它拦截错误；具体失效请求未证实，不能断言是favicon。最终按CI相同串行方式三套浏览器均通过。
+初次并行浏览器验收发生Google同源Other请求失效的CDP `INVALID_INTERCEPTION_ID/-32602`及受控页面控件等待超时；未将其当作通过。Google脚本增加固定安全错误类别、取消观测和拒绝回调完整渲染barrier，未忽略provider/API或其它拦截错误；具体失效请求未证实，不能断言是favicon。
+
+提交 `9a5675e` 的 [首次CI run 37931414975](https://github.com/Richman2020/live-translation-openai-realtime-api/actions/runs/37931414975) 在同一个刷新控件场景失败，构建/类型/986项回归/字幕浏览器均通过，Google步骤未执行。定位到旧pagehide的hangup与revoke并发：manager清理完成不代表controller已释放，新document先读到held是正确只读状态，SSE不能猜测或授予available。验收主动在离线proxy延迟真实revoke转发，允许两腿hangup完成和新document读held；先验证真实DOM不能领取/拨号，再放行原请求并确认200完整响应及真实leaseavailable，通过真实“刷新状态”读取后才显式领取。新增2项浏览器断言及1项客户端回归；不增加超时、不替换后端响应或改生产恢复/认证逻辑，确认当前状态前不能写或恢复旧capability。精确修正提交的完整CI另行核验。
+
+父线程收到环境断开通知后，root立即核验pwd、Node24.19.0/npm11.9.0、提交和工作区均可用；随后完整987项回归及类型检查成功。没有因通知重置仓库或假设下载已恢复。
 
 忽略目录 `.runtime/google-login-browser/` 保存三张真实页面截图和验收JSON，登录后截图已实际查看；上述浏览器命令可重建证据。最终提交、精确远端CI与checkout merge映射以Git回读和草稿PR正文为准。真实OAuth客户端/所需同意屏及账号授权、工作身份hd或sub、固定域名/callback、安全secret注入、Railway资源/区域/持久化与预算/恢复仍待确认；官方模型访问和Linux warm仍阻塞。未来真人测试只限本人已提供的美国号码、Twilio+OpenAI合计最多5美元、禁止自动充值；此上限不是已经实现的持久预算，当前没有拨号或付费调用。真实麦克风/普通手机、数字否定、积压、自然度和耳听延迟均未验收；不部署、改回调、合并或自行扩展新里程碑。
 
