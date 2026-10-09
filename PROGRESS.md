@@ -26,7 +26,11 @@
 | `npm run test:conversation:browser` | 真实Chromium14项断言通过，页面0外部请求、0异常，包含配对、乱序/插话、数字否定、播放区分、历史滚动和纯文本安全 |
 | 独立审查 | seal乱序、空白字幕撤销、prefix整段重复、历史接受事件、单卡性能均修复/复核，无剩余提交阻塞 |
 
+新增运行测试31项：模型/关联18项、云配置/启动边界6项、Pocket路径与进程清理4项、工作台事件衔接3项；原字幕测试改为双位置配对验收并保留性能检查。5项跳过分别是Windows PowerShell 5.1/7进程身份时间戳两项、Windows继承ACL阻止配置保存一项、Windows私密临时文件/原子替换及ACL失败保护两项，均因Linux平台不适用。Python新增2项，唯一跳过是本环境缺少真实模型资产，未算作通过。
+
 浏览器证据保存在本云环境忽略提交的 `.runtime/conversation-browser/acceptance.json` / `acceptance.png`；可复现命令与范围见 [里程碑记录](docs/CONVERSATION_MILESTONE.md)。新增 GitHub Actions 仅安装原锁定依赖、构建、离线测试及模拟浏览器检查，不提供供应商密钥、不拨号、不部署。推送及远端 CI 结果以后续真实回读为准，提交SHA与草稿PR由Git历史和最终交接给出；草稿PR基于 `codex/local-phone-workbench` 便于独立审阅，依赖PR #2，未合入 main。
+
+远端交接：实现提交 `7bc7e7f2a53a7cfbefc4eb481d77cc196bd67935` 已推送并回读；[草稿 PR #3](https://github.com/Richman2020/live-translation-openai-realtime-api/pull/3) 保持 draft，基线仍为PR #2的 `df3c447`。首轮 [CI run 37893632660](https://github.com/Richman2020/live-translation-openai-realtime-api/actions/runs/37893632660) 安装、构建、730项回归、语法和浏览器14项断言均成功，但浏览器关闭后的临时目录删除发生 ENOTEMPTY，整个job失败，不能记为CI通过。已修测试脚本：POSIX浏览器独占进程组清理，正确判断signal退出，最后回收自有helpers并对目录删除有限重试；不改电话运行代码。修复提交后的CI由最终远端回读确认。
 
 本轮未验收：真实云认证/owner隔离、Linux Pocket实际合成、API实连、真实麦克风、普通手机双向电话、自然度、数字/否定翻译质量、持续跟随/尾部播放积压和耳听延迟。当前云环境没有Pocket模型，历史完整Python依赖freeze也不在仓库，后续须先取得并审核；不即时安装猜测版本。未改Twilio回调、未部署、未调用付费接口。下一步限于按云设计实现独立认证/隔离与离线故障验收，取得已有冻结依赖/资产后验证单实例warm，再另行按授权做真实通话。原生翻译保留为 [ADR候选](docs/ADR_REALTIME_TRANSLATION.md)，不替换引擎、不承诺零延迟或本人声音克隆。
 

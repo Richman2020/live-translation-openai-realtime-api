@@ -58,7 +58,7 @@ async function evaluate(expression) {
 }
 
 try {
-  chrome = spawn(executable, ['--headless', '--disable-gpu', '--no-sandbox', '--disable-dev-shm-usage', '--no-first-run', '--no-default-browser-check', '--remote-debugging-port=0', `--user-data-dir=${profile}`, 'about:blank'], { stdio: 'ignore' });
+  chrome = spawn(executable, ['--headless', '--disable-gpu', '--no-sandbox', '--disable-dev-shm-usage', '--disable-background-networking', '--no-first-run', '--no-default-browser-check', '--remote-debugging-port=0', `--user-data-dir=${profile}`, 'about:blank'], { stdio: 'ignore', detached: process.platform !== 'win32' });
   chrome.on('error', error => faults.push(String(error)));
   const port = await eventually(async () => Number((await readFile(join(profile, 'DevToolsActivePort'), 'utf8')).split('\n')[0]));
   const target = await eventually(async () => (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()).find(item => item.type === 'page'));
@@ -118,12 +118,21 @@ try {
   console.log(JSON.stringify({ ...result, screenshot: '.runtime/conversation-browser/acceptance.png', externalRequests: 0, exceptions: faults }));
 } finally {
   socket?.close();
-  if (chrome && chrome.exitCode === null) {
+  const stopOwnedBrowser = signal => {
+    try {
+      if (process.platform !== 'win32' && Number.isInteger(chrome?.pid)) process.kill(-chrome.pid, signal);
+      else chrome?.kill(signal);
+    } catch (error) { if (error.code !== 'ESRCH') throw error; }
+  };
+  if (chrome && chrome.exitCode === null && chrome.signalCode === null) {
     const exited = new Promise(done => chrome.once('exit', done));
-    chrome.kill('SIGTERM');
+    stopOwnedBrowser('SIGTERM');
     await Promise.race([exited, pause(2000)]);
-    if (chrome.exitCode === null) { chrome.kill('SIGKILL'); await exited; }
+    if (chrome.exitCode === null && chrome.signalCode === null) { stopOwnedBrowser('SIGKILL'); await exited; }
   }
+  // The runner's Chrome wrapper may exit before its helper processes. Only this
+  // detached, owned group is reclaimed; never scan or kill unrelated browsers.
+  if (chrome?.pid && process.platform !== 'win32') stopOwnedBrowser('SIGKILL');
   await new Promise(done => server.close(done));
-  await rm(profile, { recursive: true, force: true });
+  await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 }
