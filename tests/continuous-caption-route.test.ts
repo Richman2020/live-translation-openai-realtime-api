@@ -49,7 +49,10 @@ function bytes(phone: Socket) {
 
 function fixture(
   t: any,
-  engine: 'continuous-captions' | 'pocket-captions' = 'continuous-captions',
+  engine:
+    | 'continuous-captions'
+    | 'pocket-captions'
+    | 'pocket-prefix' = 'continuous-captions',
 ) {
   const local = new Socket(),
     remote = new Socket();
@@ -102,13 +105,16 @@ function fixture(
   );
   bridge.attach('local', local.socket(), 'MZ_local');
   bridge.attach('remote', remote.socket(), 'MZ_remote');
-  const voice = providers.find((item) =>
-    item.url.includes('/translations?'),
-  )!.socket;
-  const asr = providers.find((item) =>
+  const outgoing =
+    engine === 'pocket-prefix'
+      ? providers.slice(0, 2)
+      : providers.filter((item) => item.url.includes('/translations?'));
+  const captions = engine === 'pocket-prefix' ? providers.slice(2) : providers;
+  const voice = outgoing.at(-1)!.socket;
+  const asr = captions.find((item) =>
     item.url.endsWith('?intent=transcription'),
   )!.socket;
-  const text = providers.find((item) =>
+  const text = captions.find((item) =>
     item.url.endsWith('?model=gpt-realtime-1.5'),
   )!.socket;
   const media = (role: 'local' | 'remote', data: Buffer) =>
@@ -118,14 +124,19 @@ function fixture(
       media: { track: 'inbound', payload: data.toString('base64') },
     });
   const readyVoice = async () => {
-    voice.open();
-    voice.receive({
-      type: 'session.updated',
-      session: {
-        model: 'gpt-realtime-translate',
-        audio: { output: { language: 'en' } },
-      },
-    });
+    for (const { socket } of outgoing) {
+      socket.open();
+      socket.receive({
+        type: 'session.updated',
+        session:
+          engine === 'pocket-prefix'
+            ? socket.sent[0].session
+            : {
+                model: 'gpt-realtime-translate',
+                audio: { output: { language: 'en' } },
+              },
+      });
+    }
     await tick();
   };
   const readyCaptions = async () => {
@@ -208,6 +219,71 @@ test('production Pocket route selects only the public preset stream and preserve
       converter.push(Buffer.alloc(384)),
     ]),
   );
+  assert.deepEqual(f.failures, []);
+});
+
+test('production prefix route selects Pocket and keeps return English independent of Chinese text', async (t) => {
+  const f = fixture(t, 'pocket-prefix');
+  assert.equal(f.pocketCalls(), 1);
+  assert.equal(f.nanoCalls(), 0);
+  assert.equal(f.providers.length, 4);
+  assert.ok(
+    f.providers.every(({ url }) => !url.includes('/translations?')),
+    'prefix speech uses text and the selected Pocket voice',
+  );
+  const original = Buffer.from(Array.from({ length: 800 }, (_, i) => i % 256));
+  f.media('remote', original);
+  assert.deepEqual(
+    bytes(f.local),
+    original,
+    'return original does not wait for recognition, translation or Pocket',
+  );
+  await f.readyVoice();
+  await f.readyCaptions();
+  assert.deepEqual(f.text.sent[0].session.output_modalities, ['text']);
+  f.asr.receive({ type: 'input_audio_buffer.committed', item_id: 'turn_1' });
+  f.asr.receive({
+    type: 'conversation.item.input_audio_transcription.completed',
+    item_id: 'turn_1',
+    content_index: 0,
+    transcript: 'Tomorrow, not today.',
+  });
+  const request = f.text.sent.find((event) => event.type === 'response.create');
+  assert.ok(request);
+  assert.deepEqual(request.response.output_modalities, ['text']);
+  f.text.receive({
+    type: 'response.created',
+    response: { id: 'response_1', metadata: request.response.metadata },
+  });
+  f.text.receive({
+    type: 'response.done',
+    response: {
+      id: 'response_1',
+      status: 'completed',
+      output: [
+        {
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'output_text', text: '明天，不是今天。' }],
+        },
+      ],
+    },
+  });
+  assert.ok(
+    f.transcripts.some(
+      (event) =>
+        event.role === 'remote' &&
+        event.kind === 'translation' &&
+        event.text === '明天，不是今天。',
+    ),
+  );
+  assert.deepEqual(
+    bytes(f.local),
+    original,
+    'Chinese text adds no return audio',
+  );
+  assert.deepEqual(f.pocketTexts, [], 'return captions never enter Pocket TTS');
+  assert.equal(bytes(f.remote).length, 0);
   assert.deepEqual(f.failures, []);
 });
 

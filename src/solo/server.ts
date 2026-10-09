@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { extname, resolve, sep } from 'node:path';
 import type { ServerResponse } from 'node:http';
-import fastify from 'fastify';
+import fastify, { type FastifyRequest, type onSendHookHandler } from 'fastify';
 import formbody from '@fastify/formbody';
 import websocket from '@fastify/websocket';
 import twilio from 'twilio';
@@ -11,9 +11,14 @@ import { desktopConnectivity } from './desktop-connectivity';
 import { ConnectionMaintenance } from './connection-maintenance';
 import { ConfigStore } from './config';
 import { loadPhoneRuntime, requireLocalPhoneRuntime } from './cloud-runtime';
-import { CloudAccessError } from './cloud-access';
+import { CloudAccessError, type CloudAccessContext } from './cloud-access';
 import { createCloudAccessTransport } from './cloud-access-transport';
 import { CloudPhoneAccess } from './cloud-phone-access';
+import { ControllerLeaseError, type ControllerProof } from './controller-lease';
+import {
+  CloudVoiceJoinError,
+  type PreparedCloudVoice,
+} from './cloud-voice-join';
 import { createOwnedPhoneEventStreams } from './phone-event-stream';
 import {
   isLocalRequest,
@@ -66,6 +71,66 @@ export async function buildSoloServer(
   const browserTransport = browserControl
     ? createCloudAccessTransport(browserControl.policy)
     : null;
+  const controllerResponses = new WeakMap<
+    FastifyRequest,
+    {
+      context: CloudAccessContext;
+      proof?: ControllerProof;
+      callId?: string;
+      voice?: PreparedCloudVoice;
+    }
+  >();
+  const controllerResponseGuard: onSendHookHandler = (
+    req,
+    reply,
+    payload,
+    done,
+  ) => {
+    const issued = controllerResponses.get(req);
+    if (!issued || !browserControl) return done(null, payload);
+    try {
+      if (issued.voice)
+        browserControl.assertVoiceResponseCurrent(
+          issued.context,
+          issued.callId!,
+          issued.voice,
+        );
+      else
+        browserControl.recheckController(
+          issued.context,
+          issued.proof!,
+          issued.callId,
+        );
+      return done(null, payload);
+    } catch (error) {
+      const known =
+        error instanceof CloudAccessError ||
+        error instanceof CloudVoiceJoinError;
+      reply
+        .code(known ? error.statusCode : 503)
+        .type('application/json; charset=utf-8')
+        .removeHeader('content-length');
+      return done(
+        null,
+        JSON.stringify({
+          error: known ? error.code : 'CLOUD_CONTROL_UNAVAILABLE',
+        }),
+      );
+    }
+  };
+  const controllerRoute = () => {
+    if (!browserTransport) return {};
+    const route = browserTransport.sessionHttpRoute('mutate');
+    return { ...route, onSend: [route.onSend, controllerResponseGuard] };
+  };
+  const controllerCallRoute = () => {
+    if (!browserTransport) return {};
+    const route = browserTransport.httpRoute((req) => ({
+      callId: (req.params as { id: string }).id,
+      action: 'mutate',
+    }));
+    return { ...route, onSend: [route.onSend, controllerResponseGuard] };
+  };
   const publicDir = resolve(options.publicDir || 'public');
   // URLs can carry stream nonces/SSE tokens. Never enable automatic HTTP logging.
   const app = fastify({
@@ -113,14 +178,17 @@ export async function buildSoloServer(
     connectionMaintenance: maintenance.active,
     desktopConnection: desktopConnectivity(),
   });
-  function requestedEngine(body: unknown): TranslationEngine {
+  function requestedEngine(
+    body: unknown,
+    defaultEngine: TranslationEngine = 'legacy',
+  ): TranslationEngine {
     if (
       body !== undefined &&
       (body === null || typeof body !== 'object' || Array.isArray(body))
     )
       throw new SessionError('INVALID_TRANSLATION_ENGINE');
     const value = (body as { translationEngine?: unknown })?.translationEngine;
-    if (value === undefined) return 'legacy';
+    if (value === undefined) return defaultEngine;
     if (!isTranslationEngine(value))
       throw new SessionError('INVALID_TRANSLATION_ENGINE');
     return value;
@@ -154,7 +222,8 @@ export async function buildSoloServer(
         return reply.code(403).send({ error: 'LOCAL_ACCESS_ONLY' });
       if (
         !['/api/status', '/api/calls', '/api/events'].includes(path) &&
-        !/^\/api\/calls\/[^/]+\/hangup$/.test(path)
+        !/^\/api\/calls\/[^/]+\/(?:hangup|voice)$/.test(path) &&
+        !/^\/api\/controller\/(?:acquire|renew|revoke)$/.test(path)
       )
         return reply.code(503).send({ error: 'CLOUD_CONTROL_UNAVAILABLE' });
       return undefined;
@@ -175,11 +244,19 @@ export async function buildSoloServer(
   });
   app.setErrorHandler((error, req, reply) => {
     const code =
-      error instanceof SessionError || error instanceof CloudAccessError
+      error instanceof SessionError ||
+      error instanceof CloudAccessError ||
+      error instanceof CloudVoiceJoinError ||
+      error instanceof ControllerLeaseError
         ? error.code
         : 'REQUEST_FAILED';
     let statusCode = 500;
-    if (error instanceof SessionError) statusCode = error.statusCode;
+    if (
+      error instanceof SessionError ||
+      error instanceof CloudVoiceJoinError ||
+      error instanceof ControllerLeaseError
+    )
+      statusCode = error.statusCode;
     else if (error.statusCode && error.statusCode < 500)
       statusCode = error.statusCode;
     reply.code(statusCode).send({
@@ -207,6 +284,55 @@ export async function buildSoloServer(
       return status();
     },
   );
+  if (browserControl && browserTransport) {
+    app.post<{ Body: { tabId: string } }>(
+      '/api/controller/acquire',
+      controllerRoute(),
+      async (req) => {
+        const context = browserTransport.requestContext(req);
+        const proof = browserControl.acquireController(
+          context,
+          req.body?.tabId,
+        );
+        controllerResponses.set(req, { context, proof });
+        return proof;
+      },
+    );
+    app.post<{ Body: ControllerProof }>(
+      '/api/controller/renew',
+      controllerRoute(),
+      async (req) => {
+        const context = browserTransport.requestContext(req);
+        const proof = browserControl.renewController(context, req.body);
+        controllerResponses.set(req, { context, proof });
+        return proof;
+      },
+    );
+    app.post<{ Body: ControllerProof }>(
+      '/api/controller/revoke',
+      browserTransport.sessionHttpRoute('mutate'),
+      async (req) => {
+        browserControl.revokeController(
+          browserTransport.requestContext(req),
+          req.body,
+        );
+        return { ok: true };
+      },
+    );
+    app.post<{
+      Params: { id: string };
+      Body: { controller: ControllerProof };
+    }>('/api/calls/:id/voice', controllerCallRoute(), async (req) => {
+      const context = browserTransport.requestContext(req);
+      const voice = await browserControl.prepareVoice(
+        context,
+        req.params.id,
+        req.body?.controller,
+      );
+      controllerResponses.set(req, { context, callId: req.params.id, voice });
+      return voice;
+    });
+  }
   app.post<{ Body: { action: string; lease?: string } }>(
     '/api/connection-maintenance',
     async (req) => {
@@ -312,77 +438,94 @@ export async function buildSoloServer(
     manager.setPresence(req.body.available);
     return { ok: true, available: manager.available };
   });
-  app.post<{ Body: { to: string; translationEngine?: TranslationEngine } }>(
-    '/api/calls',
-    browserTransport?.sessionHttpRoute('mutate') || {},
-    async (req) => {
-      const engine = requestedEngine(req.body);
-      if (maintenance.active)
-        throw new SessionError('CONNECTION_MAINTENANCE_BUSY', 409);
-      if (verifying || checkingOutbound)
-        throw new SessionError('VERIFICATION_IN_PROGRESS', 409);
-      requireConfigured();
-      if (typeof req.body?.to !== 'string')
-        throw new SessionError('INVALID_DESTINATION');
-      if (browserControl && browserTransport) {
-        const prepared = await browserControl.prepareCreate(
-          browserTransport.requestContext(req),
-          configStore.value,
-          req.body.to.trim(),
-          engine,
-        );
-        return browserControl.createPrepared(prepared);
+  app.post<{
+    Body: {
+      to: string;
+      translationEngine?: TranslationEngine;
+      controller?: ControllerProof;
+    };
+  }>('/api/calls', controllerRoute(), async (req) => {
+    const engine = requestedEngine(
+      req.body,
+      browserControl ? 'pocket-prefix' : 'legacy',
+    );
+    if (maintenance.active)
+      throw new SessionError('CONNECTION_MAINTENANCE_BUSY', 409);
+    if (verifying || checkingOutbound)
+      throw new SessionError('VERIFICATION_IN_PROGRESS', 409);
+    requireConfigured();
+    if (typeof req.body?.to !== 'string')
+      throw new SessionError('INVALID_DESTINATION');
+    if (browserControl && browserTransport) {
+      const prepared = await browserControl.prepareCreate(
+        browserTransport.requestContext(req),
+        configStore.value,
+        req.body.to.trim(),
+        engine,
+        req.body.controller,
+      );
+      const call = browserControl.createPrepared(prepared);
+      controllerResponses.set(req, {
+        context: browserTransport.requestContext(req),
+        proof: Object.freeze({ ...req.body.controller }),
+        callId: call.id,
+      });
+      return call;
+    }
+    if (manager.activeSession) throw new SessionError('BUSY', 409);
+    checkingOutbound = true;
+    try {
+      // A registered browser cannot establish a phone call when its public
+      // TwiML/media entry is offline. Check before creating even a local session.
+      const readiness = await (
+        options.publicReadinessChecker || checkPublicReadiness
+      )(configStore.value);
+      if (readiness.status !== 'ready')
+        throw new SessionError(readiness.code, 503);
+      // Check both candidate language sessions before a real call is created.
+      // A successful legacy probe cannot authorize a different endpoint/model.
+      if (engine !== 'legacy') {
+        const translation = await (
+          options.translationReadinessChecker || checkTranslationEngine
+        )(configStore.value, engine);
+        if (translation.status !== 'passed')
+          throw new SessionError('TRANSLATION_ENGINE_UNAVAILABLE', 503);
       }
-      if (manager.activeSession) throw new SessionError('BUSY', 409);
-      checkingOutbound = true;
-      try {
-        // A registered browser cannot establish a phone call when its public
-        // TwiML/media entry is offline. Check before creating even a local session.
-        const readiness = await (
-          options.publicReadinessChecker || checkPublicReadiness
-        )(configStore.value);
-        if (readiness.status !== 'ready')
-          throw new SessionError(readiness.code, 503);
-        // Check both candidate language sessions before a real call is created.
-        // A successful legacy probe cannot authorize a different endpoint/model.
-        if (engine !== 'legacy') {
-          const translation = await (
-            options.translationReadinessChecker || checkTranslationEngine
-          )(configStore.value, engine);
-          if (translation.status !== 'passed')
-            throw new SessionError('TRANSLATION_ENGINE_UNAVAILABLE', 503);
-        }
-        return manager.createOutbound(
-          configStore.value,
-          req.body.to.trim(),
-          engine,
-        );
-      } finally {
-        checkingOutbound = false;
-      }
-    },
-  );
-  app.post<{ Params: { id: string } }>(
-    '/api/calls/:id/hangup',
-    browserTransport?.httpRoute((req) => ({
-      callId: (req.params as { id: string }).id,
-      action: 'mutate',
-    })) || {},
-    async (req) => {
-      if (browserControl && browserTransport) {
-        const context = browserTransport.requestContext(req);
-        const intent = browserControl.beginHangup(context, req.params.id);
-        await browserControl.finishHangup(intent);
-        if (!browserControl.recheckCleanup(context, req.params.id))
-          throw new SessionError('CALL_CLEANUP_UNCONFIRMED', 503);
-        return { ok: true };
-      }
-      await manager.end(req.params.id);
-      if (!manager.isCleanupConfirmed(req.params.id))
+      return manager.createOutbound(
+        configStore.value,
+        req.body.to.trim(),
+        engine,
+      );
+    } finally {
+      checkingOutbound = false;
+    }
+  });
+  app.post<{
+    Params: { id: string };
+    Body: { controller?: ControllerProof };
+  }>('/api/calls/:id/hangup', controllerCallRoute(), async (req) => {
+    if (browserControl && browserTransport) {
+      const context = browserTransport.requestContext(req);
+      const intent = browserControl.beginHangup(
+        context,
+        req.params.id,
+        req.body?.controller,
+      );
+      controllerResponses.set(req, {
+        context,
+        proof: Object.freeze({ ...req.body.controller }),
+        callId: req.params.id,
+      });
+      await browserControl.finishHangup(intent);
+      if (!browserControl.recheckCleanup(context, req.params.id))
         throw new SessionError('CALL_CLEANUP_UNCONFIRMED', 503);
       return { ok: true };
-    },
-  );
+    }
+    await manager.end(req.params.id);
+    if (!manager.isCleanupConfirmed(req.params.id))
+      throw new SessionError('CALL_CLEANUP_UNCONFIRMED', 503);
+    return { ok: true };
+  });
   if (ownedEventStreams) {
     app.get(
       '/api/events',
@@ -547,7 +690,7 @@ export async function buildSoloServer(
   });
   app.addHook('onClose', async () => {
     ownedEventStreams?.close();
-    browserControl?.close();
+    await browserControl?.close();
     manager.off('event', broadcast);
     closeNanoVoiceWorker();
     closePocketVoiceWorker();

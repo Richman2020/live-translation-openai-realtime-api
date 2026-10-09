@@ -3,6 +3,7 @@ import { EventEmitter } from 'node:events';
 import { setImmediate as tick } from 'node:timers/promises';
 import { test, type TestContext } from 'node:test';
 import type WebSocket from 'ws';
+
 import type { SoloConfig } from '../src/solo/config';
 import {
   SessionManager,
@@ -65,6 +66,9 @@ function fixture(
     onAttach?: (role: Role) => void;
     onEvent?: (event: ObservedEvent) => void;
     beforeClose?: () => void;
+    controlled?: boolean;
+    join?: (fields: Record<string, string>) => 'join' | 'replay' | 'cleanup';
+    current?: () => void;
   } = {},
 ) {
   const created: Record<string, unknown>[] = [];
@@ -121,13 +125,19 @@ function fixture(
     events.push(event);
     options.onEvent?.(event);
   });
-  manager.setPresence(true);
+  if (!options.controlled) manager.setPresence(true);
   t.after(async () => {
     options.beforeClose?.();
     await manager.close();
   });
   const admission = {
     browserIdentity,
+    ...(options.controlled
+      ? {
+          deferBrowserJoin: true as const,
+          authorizeBrowserJoin: options.join || (() => 'join' as const),
+        }
+      : {}),
     beforePublish: (id: string) => {
       order.push('admission');
       options.beforePublish?.(id);
@@ -135,6 +145,7 @@ function fixture(
     },
     authorizeCurrent: () => {
       if (revoked) throw new Error('OFFLINE_OWNER_REVOKED');
+      options.current?.();
     },
   };
   return {
@@ -169,7 +180,7 @@ function owned(f: ReturnType<typeof fixture>): Call {
   return f.manager.createOutbound(
     config,
     '+14155550123',
-    'legacy',
+    f.admission.deferBrowserJoin ? 'pocket-prefix' : 'legacy',
     f.admission,
   );
 }
@@ -764,4 +775,158 @@ test('repeated intents and concurrent end calls coalesce provider cleanup', asyn
   assert.ok(final);
   assert.equal(final.status, 'failed');
   assert.equal(final.error, 'OFFLINE_STOP');
+});
+
+test('controlled reservation bypasses local presence but requires a valid join and bridge readiness before dialing', async (t) => {
+  let joins = 0;
+  const f = fixture(t, {
+    controlled: true,
+    join: (fields) => {
+      joins += 1;
+      if (fields.join !== 'offline-one-use-join')
+        throw new Error('INVALID_OFFLINE_JOIN');
+      return 'join';
+    },
+  });
+  assert.equal(f.manager.available, false);
+  const call = owned(f);
+  assert.equal(call.translationEngine, 'pocket-prefix');
+  assert.equal(f.created.length, 0);
+  const fields = {
+    ...call.connectionParams,
+    From: `client:${browserIdentity}`,
+    CallSid: localSid,
+    join: 'offline-one-use-join',
+  };
+  for (const bad of [
+    { nonce: 'wrong' },
+    { From: 'client:ai-phone' },
+    { CallSid: 'wrong' },
+  ])
+    assert.throws(() => f.manager.connectBrowser({ ...fields, ...bad }));
+  assert.equal(joins, 0, 'Malformed callbacks do not consume a join');
+  assert.match(f.manager.connectBrowser(fields), /<Stream/);
+  assert.equal(joins, 1);
+  assert.equal(attach(f, call).accepted, true);
+  await tick();
+  assert.equal(
+    f.created.length,
+    0,
+    'Attaching media is not translation readiness',
+  );
+  assert.equal(f.bridge().translationEngine, 'pocket-prefix');
+  f.bridge().onConnection({ role: 'local', state: 'ready' });
+  await tick();
+  assert.equal(f.created.length, 1);
+});
+
+test('controller revocation before delayed bridge readiness cleans the joined leg without submitting the remote leg', async (t) => {
+  const f = fixture(t, { controlled: true });
+  const call = owned(f);
+  connectBrowser(f, call);
+  const local = attach(f, call);
+  assert.equal(f.created.length, 0);
+  f.revoke();
+  f.bridge().onConnection({ role: 'local', state: 'ready' });
+  await tick();
+  assert.equal(f.created.length, 0);
+  assert.deepEqual(f.ended, [localSid]);
+  assert.equal(local.socket.readyState, 3);
+  assert.equal(f.manager.isCleanupConfirmed(call.id), true);
+});
+
+test('legitimate expired join is cleanup-only and refuses media, while unrelated callbacks never invoke its join checker', async (t) => {
+  let checks = 0;
+  const f = fixture(t, {
+    controlled: true,
+    join: () => {
+      checks += 1;
+      return 'cleanup';
+    },
+  });
+  const call = owned(f);
+  assert.throws(() =>
+    f.manager.connectBrowser({
+      ...call.connectionParams,
+      nonce: 'wrong',
+      From: `client:${browserIdentity}`,
+      CallSid: unrelatedSid,
+    }),
+  );
+  assert.equal(checks, 0);
+  assert.deepEqual(f.ended, []);
+  assert.match(connectBrowser(f, call), /<Hangup/);
+  assert.equal(attach(f, call).accepted, false);
+  await tick();
+  assert.equal(checks, 1);
+  assert.deepEqual(f.ended, [localSid]);
+  assert.equal(f.bridgeFactories(), 0);
+  assert.equal(f.created.length, 0);
+});
+
+test('controlled replay cannot bind a new SID or submit a second remote leg', async (t) => {
+  let used = false;
+  const f = fixture(t, {
+    controlled: true,
+    join: () => {
+      if (used) return 'replay';
+      used = true;
+      return 'join';
+    },
+  });
+  const call = owned(f);
+  connectBrowser(f, call);
+  attach(f, call);
+  f.bridge().onConnection({ role: 'local', state: 'ready' });
+  await tick();
+  assert.match(connectBrowser(f, call), /<Stream/);
+  assert.throws(
+    () =>
+      f.manager.connectBrowser({
+        ...call.connectionParams,
+        From: `client:${browserIdentity}`,
+        CallSid: unrelatedSid,
+      }),
+    (error: any) => error.code === 'CALL_SID_MISMATCH',
+  );
+  f.bridge().onConnection({ role: 'local', state: 'ready' });
+  await tick();
+  assert.equal(f.created.length, 1);
+});
+
+test('a late transcript checks controller authority immediately and stops both joined media legs', async (t) => {
+  const f = fixture(t, { controlled: true });
+  const call = owned(f);
+  connectBrowser(f, call);
+  const local = attach(f, call);
+  f.bridge().onConnection({ role: 'local', state: 'ready' });
+  await tick();
+  const nonce = remoteNonce(f);
+  f.manager.connectLeg(call.id, 'remote', nonce, remoteSid);
+  const remote = attach(f, call, 'remote', nonce, remoteSid);
+  assert.equal(remote.accepted, true);
+  f.revoke();
+  f.bridge().onTranscript({ id: 'late-text', role: 'remote', kind: 'original', text: 'Must not be published', final: true, at: 1 });
+  assert.equal(f.events.filter((event) => event.event === 'transcript').length, 0);
+  assert.equal(local.socket.readyState, 3);
+  assert.equal(remote.socket.readyState, 3);
+  await tick();
+  assert.deepEqual([...f.ended].sort(), [localSid, remoteSid].sort());
+});
+
+test('a revoked joined budget blocks late conversation output before an independent timer runs', async (t) => {
+  let budgetCurrent = true;
+  const f = fixture(t, { controlled: true, current: () => {
+    if (!budgetCurrent) throw new Error('OFFLINE_BUDGET_REVOKED');
+  } });
+  const call = owned(f);
+  connectBrowser(f, call);
+  const local = attach(f, call);
+  budgetCurrent = false;
+  f.bridge().onConversationTranscript({ id: 'late-prefix', role: 'local', kind: 'translation', text: 'Must not be published', final: true, at: 1 });
+  assert.equal(f.events.filter((event) => event.event === 'conversation').length, 0);
+  assert.equal(local.socket.readyState, 3);
+  await tick();
+  assert.equal(f.created.length, 0);
+  assert.deepEqual(f.ended, [localSid]);
 });

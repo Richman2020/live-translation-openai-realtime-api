@@ -4,7 +4,34 @@
 
 需求见 [PROJECT_BRIEF.md](PROJECT_BRIEF.md)，工作规则见 [AGENTS.md](AGENTS.md)，运行步骤见 [LOCAL_SETUP.md](LOCAL_SETUP.md)，后续执行入口见 [LOCAL_CODEX_HANDOFF.md](LOCAL_CODEX_HANDOFF.md)。
 
-## 最新实施：真实电话应用的授权与事件离线集成（2026-10-09）
+## 最新实施：单人控制租约与每通Voice许可离线闭环（2026-10-09）
+
+- 从真实远端 `48ac52237c1e6edd89541876b511fa23c38ec57c` 的干净工作区继续；父线程与本环境已核验 [CI run 37913983388](https://github.com/Richman2020/live-translation-openai-realtime-api/actions/runs/37913983388) 整体成功。仍在 `codex/cloud-phone-conversation-20261009` / [草稿PR #3](https://github.com/Richman2020/live-translation-openai-realtime-api/pull/3)，保留PR #2功能基线，不切换旧main或用户电脑。收到环境断连通知后，10:00及10:09 UTC实际只读命令均成功，本轮修改持续保存在云端工作区。
+- 新 `CloudControllerLeases` 提供单个标签页租约：32字节随机凭证，绑定authSession/principal/browserOwner/auth epoch、tab和服务端controller epoch；默认30秒、最多60秒，并夹至认证绝对/闲置期限。相同tabId无凭证不能重复领取，只有持有者显式续约或撤销；SSE和读取不续租。活动电话、准备或线路/预算清理未确认拒绝新领取，首轮不接管。
+- 真实注入路由新增controller acquire/renew/revoke与每通voice准备。创建/挂断要求controller proof，其他标签仍可读取本人status/SSE。受控电话先建立服务器reservation；不依赖全局presence，在合法join及bridge就绪前没有provider拨出。本机默认token/presence/引擎路径保持，两个cloud入口仍无条件拒绝，注入仍限loopback，供应商签名/账户/nonce/SID校验保留。
+- `CloudVoiceJoin` 只使用显式固定TwiML应用SID、签名器和预算/intent admission端口；没有真实JWT或secret读取默认。最小grant绑定当前登录、controller、每通随机identity和call，incoming关闭，期限不超过会话/租约/60秒。一次join只消费一个SID，重复SDK connect的新SID拒绝；同SID已签名供应商重试仅replay，不授新连接、预算或拨号；合法迟到SID走cleanup-only。
+- 异步预留/签名完成后、HTTP最终onSend、实际join、bridge就绪/拨号及媒体/新字幕回调均复核当前授权和joined预算许可。控制失联到期立即在媒体/回调处或独立每秒检查停止新音频/字幕并清理两腿；历史读取及取消/未确认清理诊断保留。SSE重连不延长控制权，最初join票据到期也不取代已加入电话的当前租约生命周期。
+- 确认结束后再release，正常结束/停机也接独立释放。准备结果未知、坏接口或释放失败保留不确定状态并拒绝新call/许可，安全释放可独立重试；没有公开reset、数据库或伪造恢复。未来持久端口仍须承担票据/供应商窗口内迟到SID的可恢复intent和残余责任；假release不能证明退款、journal删除或重启安全。
+- 云注入策略默认 `pocket-prefix`，只另允许明确选择 `pocket-captions`，防止legacy偏离固定Michael出程/英文原声和中文字幕回程。新正式工厂测试证明实际Pocket-prefix选Pocket不选Nano、英文PCMU原样回传、回程仅文本且不进入Pocket TTS；模型、锁定依赖和资产哈希未改变。
+
+接口和持久化决策点见 [控制租约与Voice许可](docs/CLOUD_CONTROLLER_VOICE.md)。本轮仍使用云端Linux、Node24.19.0/npm11.9.0和原锁定依赖，无额外安装。全部身份、signer、Voice SDK、provider/bridge及事务许可都是显式fake，真实router经签名回调和临时回环媒体/SSE闭环；生产网页未启用这些云接口，浏览器另验既有逐句UI，不能把两种证据合成真人电话端到端通过。
+
+| 验证 | 实际结果 |
+| --- | --- |
+| 控制租约单元 | 新增28项通过；当前auth deadline、伪造/复制proof、只读升权、标签隔离、expiry/renew/revoke覆盖 |
+| Voice许可单元 | 最终24/24通过，包括普通method receiver兼容、准备撤销、join/replay、未知reservation和释放失败 |
+| 服务/manager/SSE定向 | 52/52通过；保留旧assert，新增控制/预算撤销、准备/最终发送、清理失败和迟到字幕边界 |
+| 真实router与fakeSDK闭环 | 22/22通过，外部网络0；首事件归属、两腿签名媒体、默认引擎、join/replay拒绝、SSE不续租及cleanup busy均覆盖 |
+| Pocket策略回归 | 工厂7/7及相关六文件29/29通过；不加载真实模型 |
+| 独立重点审查 | 最终175/175通过，0失败/跳过；全部最终源码及端口receiver兼容复核，无剩余本轮代码阻塞 |
+| 完整回归 | 最终899项：894通过、5个既有Windows专属跳过、0失败；新增74项（lease28、Voice24、service6、manager6、router9、工厂1），未删除原测试 |
+| 类型/构建/lint/语法/diff | 最终完整源码与测试类型检查、生产构建、所改源码ESLint、浏览器JS语法及diff检查均通过 |
+| Chromium模拟UI | 16项通过，外部页面请求0、异常0；保留配对、乱序、播放区分、历史阅读和实际读取请求头观察 |
+| 入口/依赖边界 | index/cloud-runtime/security、package/锁文件/CI workflow/public未改，未开放生产云模式 |
+
+本轮没有选择身份提供方、配置实际权限/凭据、创建云资源或费用、下载模型、部署、改回调、拨号或合并。真实登录/安全cookie、Voice签名及SDK实连、持久预算/intent/journal与恢复、TLS/代理、完整Python freeze和Linux warm仍是上线门槛；真人麦克风/普通手机、自然度、数字否定/持续积压及耳听延迟未验收。最小存储或身份方案选择留待后续，不扩大成多租户产品。最终提交和精确远端CI以Git回读及草稿PR正文记录。
+
+## 此前：真实电话应用的授权与事件离线集成（2026-10-09）
 
 - 从真实远端 `709806b8c545a725c3f3cba83c28f52972973e8a` 的干净工作区继续；该头 [CI run 37901404878](https://github.com/Richman2020/live-translation-openai-realtime-api/actions/runs/37901404878) 已整体成功。保留 `codex/cloud-phone-conversation-20261009` 与 [草稿PR #3](https://github.com/Richman2020/live-translation-openai-realtime-api/pull/3)，基线仍为PR #2 `df3c447`，没有从旧main重建或覆盖并发改动。
 - 独立授权组件现已通过 `buildSoloServer({ browserControl })` 的显式服务端对象接入真实 status、创建、挂断及事件路由。构建器先无条件执行cloud拒绝启动；注入应用仍仅接受回环socket、固定HTTPS目标、当前cookie会话及CSRF/来源校验。默认本机流程保持；主入口不注入该对象，不存在环境、布尔或请求启用开关。

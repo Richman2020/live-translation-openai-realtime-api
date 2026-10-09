@@ -12,9 +12,14 @@ import {
   CLOUD_SESSION_COOKIE,
   CloudAccessPolicy,
   type CloudAuthSession,
+  CloudAccessContext,
 } from '../src/solo/cloud-access';
 import { createCloudAccessTransport } from '../src/solo/cloud-access-transport';
 import { CloudPhoneAccess } from '../src/solo/cloud-phone-access';
+import {
+  CloudControllerLeases,
+  type ControllerProof,
+} from '../src/solo/controller-lease';
 import type { SoloConfig } from '../src/solo/config';
 import { createOwnedPhoneEventStreams } from '../src/solo/phone-event-stream';
 import { SessionManager } from '../src/solo/session-manager';
@@ -93,13 +98,16 @@ async function fixture(
   const access = new CloudPhoneAccess({
     policy,
     manager,
+    controllerLeases: new CloudControllerLeases({ policy, now: () => now }),
     publicReadinessChecker: async () => ({
       status: 'ready',
       code: 'PUBLIC_CALLBACK_READY',
     }),
-    translationReadinessChecker: async () => {
-      throw new Error('NO_MODEL_CHECK');
-    },
+    translationReadinessChecker: async () => ({
+      name: 'offline',
+      status: 'passed',
+      code: 'OFFLINE_PASSED',
+    }),
   });
   const transport = createCloudAccessTransport(policy);
   const streams = createOwnedPhoneEventStreams({
@@ -124,7 +132,7 @@ async function fixture(
     await manager.close();
     await app.close();
   });
-  const port = (app.server.address() as import('node:net').AddressInfo).port;
+  const { port } = app.server.address() as import('node:net').AddressInfo;
   const headers = (token: string) => ({
     host: 'phone.example.test',
     cookie: `${CLOUD_SESSION_COOKIE}=${token}`,
@@ -154,9 +162,9 @@ async function fixture(
           outputs.push(response);
           const frames: { event: string; data: any }[] = [];
           const comments: string[] = [];
-          let body = '',
-            partial = '',
-            closed = false;
+          let body = '';
+          let partial = '';
+          let closed = false;
           response.setEncoding('utf8');
           response.on('data', (chunk) => {
             body += chunk;
@@ -198,15 +206,27 @@ async function fixture(
       request.end();
     });
   }
+  let heldController:
+    | { context: CloudAccessContext; proof: ControllerProof }
+    | undefined;
   async function create(token = tokenA) {
     const context = policy.authenticate(
       { ...headers(token), origin, 'x-phone-csrf': csrf },
       'mutate',
       { surface: 'http', method: 'POST' },
     );
-    manager.setPresence(true);
+    if (heldController)
+      access.revokeController(heldController.context, heldController.proof);
+    const proof = access.acquireController(context, 'offline-sse-tab');
+    heldController = { context, proof };
     return access.createPrepared(
-      await access.prepareCreate(context, config, '+14155550123'),
+      await access.prepareCreate(
+        context,
+        config,
+        '+14155550123',
+        'pocket-prefix',
+        proof,
+      ),
     );
   }
   return {

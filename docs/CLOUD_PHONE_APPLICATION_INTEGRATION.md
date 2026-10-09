@@ -1,6 +1,8 @@
 # 电话应用入口：授权组件的离线集成
 
 日期：2026-10-09。基线 `709806b8c545a725c3f3cba83c28f52972973e8a`。
+本文件记录已完成的 `48ac522` 接线路径；随后增加的标签页controller lease及
+per-call Voice许可离线闭环见 [控制租约与Voice许可](CLOUD_CONTROLLER_VOICE.md)。
 本轮在真实 `buildSoloServer()` / `SessionManager` 调用路径集成授权，
 使用显式注入的测试身份、provider、bridge及预检验证。两个solo启动入口仍拒绝
 cloud；默认本机流程、loopback/Host/Origin/token及Twilio验签保持。
@@ -42,20 +44,22 @@ HTTPS目标、当前会话cookie、独立CSRF及 [浏览器来源策略](CLOUD_A
 SSE不使用普通缓冲响应的onSend代替流校验。它在快照、每条事件和心跳最终写出
 前重新检查当前会话，按call事件的 `data.id`、其它事件的 `data.sessionId` 过滤。
 未知/他人ID不发送；认证失效则关闭。订阅、单帧和未写缓冲有界；断开/异常/停机
-释放订阅及计时器。SSE断开仅释放订阅，不冒充已经实现控制lease或手机挂断。
+释放订阅及计时器。SSE断开仅释放订阅，不续租或代表手机已经挂断；后续新增的
+控制租约独立到期清理，SSE重连不会延长期限。
 默认最多16条订阅、每认证会话2条、64KiB单帧及256KiB待写缓冲；静默授权复核
 间隔为1秒，心跳20秒。计时器受事件循环调度影响，不承诺跨系统瞬时撤销。
 
 ## 继续拒绝的路径与决策点
 
-注入分支的语音令牌、presence、普通来电，以及settings、verify、shutdown和
+原全局GET语音令牌、presence、普通来电，以及settings、verify、shutdown和
 connection-maintenance等管理API继续拒绝。默认本机模式仍使用其现有行为。
-没有语音令牌签发、完整浏览器控制或生产启动，因此本轮不能称网页到手机端到端就绪。
+后续新增per-call许可使用显式签名/预算intent端口，测试仅假令牌；没有真实登录、
+生产签名器/持久许可或生产启动，不能称网页到手机端到端就绪。
 
 | 必须先解决的决定 | 最小选项与完成门槛 |
 | --- | --- |
 | 已验证登录及当前会话来源 | 采用已有文档的单账户自托管验证，或明确选择外部身份来源；实现cookie签发/轮换/撤销与当前会话存储，不能用测试resolver代替 |
-| 标签页控制与Voice身份 | 独立owner/controller lease及一次性join授权；语音令牌绑定服务器identity与对应call，不使用全局 `ai-phone` 云身份 |
+| 标签页控制与Voice身份 | 后续离线代码已实现controller lease及一次性join；生产签名器与浏览器实连尚待验收，不使用全局 `ai-phone` 云身份 |
 | 持久预算与创建/清理记录 | 确定单实例持久事务存储或受管事务存储及恢复策略；浏览器资源许可和provider创建前落盘预算/intent，迟到SID可恢复清理 |
 | 实际HTTPS/代理/单实例warm | 明确目标环境、固定origin、可信ingress、持久卷和终止宽限，实际回读并故障验收；不是变量齐全就ready |
 | 模型与真人验收 | 补历史Python freeze/预置资产，Linux离线warm与资源实测；另明确真实API/电话费用授权，再由用户验收麦克风、普通手机和听感 |

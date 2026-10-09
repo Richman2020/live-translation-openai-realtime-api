@@ -382,6 +382,17 @@ export class CloudAccessPolicy {
     this.requireAction(action, issued.csrf, session);
   }
 
+  /** Current server-authenticated deadline; no credential/session fields escape. */
+  expiresAt(
+    context: CloudAccessContext,
+    action: CloudAccessAction = 'read',
+  ): number {
+    const { issued, session } = this.refresh(context);
+    this.requireSourceAction(issued.source, issued.originPresent, action);
+    this.requireAction(action, issued.csrf, session);
+    return Math.min(session.absoluteExpiresAt, session.idleExpiresAt);
+  }
+
   registerCall(context: CloudAccessContext, callId: string): void {
     const { issued, session } = this.refresh(context);
     this.requireSourceAction(issued.source, issued.originPresent, 'mutate');

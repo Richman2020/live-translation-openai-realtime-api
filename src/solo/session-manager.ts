@@ -60,8 +60,16 @@ export type BridgeOptions = ConstructorParameters<
 /** Trusted server integration only; never constructed from browser fields. */
 export type OutboundCallAdmission = {
   browserIdentity: string;
-  beforePublish: (id: string) => void;
+  beforePublish: (
+    id: string,
+    connection: { identity: string; nonce: string },
+  ) => void;
   authorizeCurrent: () => void;
+  /** Explicit controlled reservation: local presence never grants admission. */
+  deferBrowserJoin?: true;
+  authorizeBrowserJoin?: (
+    fields: Record<string, string>,
+  ) => 'join' | 'replay' | 'cleanup';
 };
 
 /** Route capabilities independently: captions never imply a local voice model. */
@@ -228,6 +236,10 @@ export class SessionManager extends EventEmitter {
     return this.explicitControlDependencies;
   }
 
+  get controlAdmissionBlocked(): boolean {
+    return this.closing || !!this.activeId || this.cleanupUnconfirmed;
+  }
+
   hasSession(id: string): boolean {
     return this.sessions.has(id);
   }
@@ -300,18 +312,30 @@ export class SessionManager extends EventEmitter {
     if (this.cleanupUnconfirmed)
       throw new SessionError('CALL_CLEANUP_UNCONFIRMED', 409);
     const id = randomUUID();
+    const nonces = {
+      local: randomBytes(24).toString('hex'),
+      remote: randomBytes(24).toString('hex'),
+    };
     let trusted: Readonly<OutboundCallAdmission> | undefined;
     if (admission) {
       if (
         typeof admission.browserIdentity !== 'string' ||
         !/^[A-Za-z0-9_-]{1,128}$/.test(admission.browserIdentity) ||
         typeof admission.beforePublish !== 'function' ||
-        typeof admission.authorizeCurrent !== 'function'
+        typeof admission.authorizeCurrent !== 'function' ||
+        (admission.deferBrowserJoin !== undefined &&
+          (admission.deferBrowserJoin !== true ||
+            typeof admission.authorizeBrowserJoin !== 'function')) ||
+        (admission.authorizeBrowserJoin !== undefined &&
+          admission.deferBrowserJoin !== true)
       )
         throw new SessionError('INVALID_CALL_ADMISSION');
       trusted = Object.freeze({ ...admission });
       trusted.authorizeCurrent();
-      trusted.beforePublish(id);
+      trusted.beforePublish(id, {
+        identity: trusted.browserIdentity,
+        nonce: nonces.local,
+      });
     }
     const session: Session = {
       browserIdentity: trusted?.browserIdentity || 'ai-phone',
@@ -331,10 +355,7 @@ export class SessionManager extends EventEmitter {
       },
       readyRoles: new Set(),
       config: { ...config },
-      nonces: {
-        local: randomBytes(24).toString('hex'),
-        remote: randomBytes(24).toString('hex'),
-      },
+      nonces,
       callSids: {},
       sockets: {},
       dialing: new Set(),
@@ -380,7 +401,8 @@ export class SessionManager extends EventEmitter {
       throw new SessionError('INVALID_DESTINATION');
     if (to === config.TWILIO_CALLER_NUMBER)
       throw new SessionError('CANNOT_DIAL_OWN_NUMBER');
-    if (!this.available) throw new SessionError('BROWSER_NOT_READY', 409);
+    if (!admission?.deferBrowserJoin && !this.available)
+      throw new SessionError('BROWSER_NOT_READY', 409);
     const session = this.make(
       config,
       'outbound',
@@ -432,8 +454,20 @@ export class SessionManager extends EventEmitter {
       fields.From !== `client:${session.browserIdentity}`
     )
       throw new SessionError('INVALID_BROWSER_CALL', 403);
-    this.bindCall(session, 'local', fields.CallSid);
-    if (!this.admissionCurrent(session))
+    this.validateCallBinding(session, 'local', fields.CallSid);
+    let cleanupJoin = false;
+    let replayJoin = false;
+    if (session.admission?.deferBrowserJoin) {
+      const result = session.admission.authorizeBrowserJoin(fields);
+      if (result !== 'join' && result !== 'replay' && result !== 'cleanup')
+        throw new SessionError('INVALID_BROWSER_JOIN', 403);
+      if (result === 'replay' && session.callSids.local !== fields.CallSid)
+        throw new SessionError('INVALID_BROWSER_JOIN', 403);
+      cleanupJoin = result === 'cleanup';
+      replayJoin = result === 'replay';
+    }
+    if (!replayJoin) this.bindCall(session, 'local', fields.CallSid);
+    if (cleanupJoin || !this.admissionCurrent(session))
       this.beginEndIntent(session.view.id, 'CALL_AUTHORIZATION_REVOKED');
     if (session.ended)
       this.track(
@@ -461,12 +495,23 @@ export class SessionManager extends EventEmitter {
     return this.streamTwiml(session, role);
   }
 
-  private bindCall(session: Session, role: Role, sid: string): void {
+  private validateCallBinding(session: Session, role: Role, sid: string): void {
     if (
       !callSidValid(sid) ||
-      (session.callSids[role] && session.callSids[role] !== sid)
+      (session.callSids[role] && session.callSids[role] !== sid) ||
+      [...this.sessions.values()].some((candidate) =>
+        Object.entries(candidate.callSids).some(
+          ([candidateRole, candidateSid]) =>
+            candidateSid === sid &&
+            (candidate !== session || candidateRole !== role),
+        ),
+      )
     )
       throw new SessionError('CALL_SID_MISMATCH', 403);
+  }
+
+  private bindCall(session: Session, role: Role, sid: string): void {
+    this.validateCallBinding(session, role, sid);
     session.callSids[role] = sid;
     if (session.ended && !session.confirmedTerminal.has(sid))
       session.pendingCleanup.add(sid);
@@ -480,6 +525,20 @@ export class SessionManager extends EventEmitter {
     } catch {
       return false;
     }
+  }
+
+  /** Late engine callbacks are also live output: check a protected controller
+   * and its joined reservation before publishing new text or readiness. */
+  private liveAdmission(session: Session): boolean {
+    if (session.ended) return false;
+    if (this.admissionCurrent(session)) return true;
+    try {
+      this.beginEndIntent(session.view.id, 'CALL_AUTHORIZATION_REVOKED');
+    } catch {
+      // A subscriber cannot prevent the separate provider cleanup drain.
+    }
+    this.track(this.end(session.view.id));
+    return false;
   }
 
   /** Only protected calls receive this facade; local bridges keep their socket.
@@ -710,7 +769,7 @@ export class SessionManager extends EventEmitter {
           proxyUrl: session.config.OPENAI_PROXY_URL,
           translationEngine: session.view.translationEngine,
           onTranscript: (transcript) => {
-            if (!session.ended) {
+            if (this.liveAdmission(session)) {
               this.emit('event', {
                 event: 'transcript',
                 data: {
@@ -737,22 +796,23 @@ export class SessionManager extends EventEmitter {
             }
           },
           onConversationTranscript: (transcript) => {
-            if (session.ended) return;
+            if (!this.liveAdmission(session)) return;
             const event = session.conversation.transcript(transcript);
             if (event)
               this.emit('event', { event: 'conversation', data: event });
           },
           onUtterancePlayback: (playback) => {
-            if (session.ended && playback.status !== 'cancelled') return;
+            if (playback.status !== 'cancelled' && !this.liveAdmission(session))
+              return;
             const event = session.conversation.playback(playback);
             if (event)
               this.emit('event', { event: 'conversation', data: event });
           },
           onFailure: (reason) => {
-            if (!session.ended) this.end(session.view.id, reason);
+            if (this.liveAdmission(session)) this.end(session.view.id, reason);
           },
           onConnection: (connection) => {
-            if (!session.ended) {
+            if (this.liveAdmission(session)) {
               if (connection.state === 'ready')
                 session.readyRoles.add(connection.role);
               else session.readyRoles.delete(connection.role);
@@ -769,11 +829,17 @@ export class SessionManager extends EventEmitter {
                 event: 'translation-connection',
                 data: { ...connection, sessionId: session.view.id },
               });
+              if (
+                session.admission?.deferBrowserJoin &&
+                session.sockets.local &&
+                session.readyRoles.has('local')
+              )
+                this.track(this.dialOther(session, 'remote'));
             }
           },
           onCaptionState: (caption) => {
             if (
-              session.ended ||
+              !this.liveAdmission(session) ||
               !usesRemoteCaptions(session.view.translationEngine)
             )
               return;
@@ -785,6 +851,8 @@ export class SessionManager extends EventEmitter {
             });
           },
           onAudioDiagnostic: (audio) => {
+            if (audio.stage !== 'unconfirmed' && !this.liveAdmission(session))
+              return;
             // Keep final unconfirmed playback reports when a call is closing.
             this.emit('event', {
               event: 'translation-audio',
@@ -796,14 +864,14 @@ export class SessionManager extends EventEmitter {
               this.emit('event', { event: 'conversation', data: event });
           },
           onCaptionInputDiagnostic: (diagnostic) => {
-            if (!session.ended)
+            if (this.liveAdmission(session))
               this.emit('event', {
                 event: 'caption-input',
                 data: { ...diagnostic, sessionId: session.view.id },
               });
           },
           onProviderDiagnostic: (diagnostic) => {
-            if (!session.ended)
+            if (this.liveAdmission(session))
               this.emit('event', {
                 event: 'translation-provider',
                 data: { ...diagnostic, sessionId: session.view.id },
@@ -817,7 +885,7 @@ export class SessionManager extends EventEmitter {
             });
           },
           onMetric: (metric) => {
-            if (!session.ended)
+            if (this.liveAdmission(session))
               this.emit('event', {
                 event: 'translation-metric',
                 data: { ...metric, sessionId: session.view.id },
@@ -848,9 +916,13 @@ export class SessionManager extends EventEmitter {
         (session.view.direction === 'outbound' && role === 'local') ||
         (session.view.direction === 'inbound' && role === 'remote')
       ) {
-        this.track(
-          this.dialOther(session, role === 'local' ? 'remote' : 'local'),
-        );
+        if (
+          !session.admission?.deferBrowserJoin ||
+          session.readyRoles.has('local')
+        )
+          this.track(
+            this.dialOther(session, role === 'local' ? 'remote' : 'local'),
+          );
       }
       return true;
     } catch {

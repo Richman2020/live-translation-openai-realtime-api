@@ -19,6 +19,14 @@ import {
   type CloudAuthSession,
 } from '../src/solo/cloud-access';
 import { CloudPhoneAccess } from '../src/solo/cloud-phone-access';
+import {
+  CloudControllerLeases,
+  type ControllerProof,
+} from '../src/solo/controller-lease';
+import {
+  CloudVoiceJoin,
+  type CloudVoiceGrant,
+} from '../src/solo/cloud-voice-join';
 import { ConfigStore, type SoloConfig } from '../src/solo/config';
 import { buildSoloServer } from '../src/solo/server';
 import {
@@ -121,6 +129,10 @@ async function fixture(
     create?: CallProvider['create'];
     hangup?: CallProvider['hangup'];
     listen?: boolean;
+    voiceReady?: boolean;
+    voicePreparation?: () => Promise<void>;
+    voiceResponsePause?: () => Promise<void>;
+    leaseTtlMs?: number;
   } = {},
 ) {
   const directory = mkdtempSync(join(tmpdir(), 'cloud-phone-integration-'));
@@ -139,6 +151,7 @@ async function fixture(
   const terminated: string[] = [];
   const admissions: OutboundCallAdmission[] = [];
   const bridgeOptions: BridgeOptions[] = [];
+  const translationChecks: string[] = [];
   const events: SseFrame[] = [];
   const counters = {
     factory: 0,
@@ -169,11 +182,15 @@ async function fixture(
     bridgeFactory: (parameters) => {
       counters.bridge += 1;
       bridgeOptions.push(parameters);
-      return { attach() {}, close() {} };
+      return {
+        attach(role) {
+          parameters.onConnection?.({ role, state: 'ready' });
+        },
+        close() {},
+      };
     },
     setupTimeoutMs: 5000,
   });
-  manager.setPresence(true); // Trusted test setup, never browser-supplied identity.
   manager.on('event', (event) => events.push(event));
   const originalCreate = manager.createOutbound.bind(manager);
   t.mock.method(
@@ -184,9 +201,39 @@ async function fixture(
       return originalCreate(...args);
     },
   );
+  const controllerLeases = new CloudControllerLeases({
+    policy,
+    now: () => identity.now,
+    ttlMs: options.leaseTtlMs ?? 30000,
+  });
+  const grants: unknown[] = [];
+  const voiceJoin = new CloudVoiceJoin({
+    policy,
+    outgoingApplicationSid: config.TWILIO_TWIML_APP_SID,
+    now: () => identity.now,
+    ...(options.voiceReady === false
+      ? {}
+      : {
+          signer: async (grant) => {
+            grants.push(grant);
+            return `test-only-fake-voice-${grant.identity}`;
+          },
+          admission: {
+            reserve: async () => {
+              await options.voicePreparation?.();
+              return {
+                assertCurrent() {},
+                release: async () => undefined,
+              };
+            },
+          },
+        }),
+  });
   const access = new CloudPhoneAccess({
     policy,
     manager,
+    controllerLeases,
+    voiceJoin,
     publicReadinessChecker: async (...args) => {
       counters.publicReady += 1;
       return options.publicChecker
@@ -195,6 +242,7 @@ async function fixture(
     },
     translationReadinessChecker: async (...args) => {
       counters.translationReady += 1;
+      translationChecks.push(args[1]);
       return options.translationChecker
         ? options.translationChecker(...args)
         : {
@@ -232,6 +280,12 @@ async function fixture(
     publicDir: directory,
     browserControl: access,
   });
+  if (options.voiceResponsePause)
+    app.addHook('onSend', async (request, _reply, payload) => {
+      if (/^\/api\/calls\/[^/]+\/voice$/.test(request.url))
+        await options.voiceResponsePause!();
+      return payload;
+    });
   const clients = new Set<ClientRequest>();
   if (options.listen) {
     await app.listen({ host: '127.0.0.1', port: 0 });
@@ -244,7 +298,6 @@ async function fixture(
     providerState.failHangup = false;
     for (const client of clients) client.destroy();
     for (const socket of app.websocketServer.clients) socket.terminate();
-    access.close();
     await app.close();
     rmSync(directory, { recursive: true, force: true });
     assert.equal(
@@ -253,12 +306,42 @@ async function fixture(
       'No external network/provider calls',
     );
   });
+  const proofs = new Map<string, ControllerProof>();
+  const controller = (
+    action: 'acquire' | 'renew' | 'revoke',
+    token = tokenA,
+    body: Record<string, unknown> = {},
+  ) =>
+    app.inject({
+      method: 'POST',
+      url: `/api/controller/${action}`,
+      headers: writeHeaders(token),
+      payload: body,
+    });
+  const acquire = async (
+    token = tokenA,
+    tabId = `tab-${token === tokenA ? 'a' : 'b'}`,
+  ) => {
+    const result = await controller('acquire', token, { tabId });
+    if (result.statusCode === 200) proofs.set(token, result.json());
+    return result;
+  };
+  const revoke = async (token = tokenA) => {
+    const result = await controller('revoke', token, { ...proofs.get(token) });
+    if (result.statusCode === 200) proofs.delete(token);
+    return result;
+  };
+  assert.equal(
+    (await acquire()).statusCode,
+    200,
+    'Explicit owner controller acquire',
+  );
   const call = async (token = tokenA, body: Record<string, unknown> = {}) =>
     app.inject({
       method: 'POST',
       url: '/api/calls',
       headers: writeHeaders(token),
-      payload: { to: '+12125550124', ...body },
+      payload: { to: '+12125550124', controller: proofs.get(token), ...body },
     });
   const status = (token = tokenA) =>
     app.inject({ url: '/api/status', headers: readHeaders(token) });
@@ -267,8 +350,39 @@ async function fixture(
       method: 'POST',
       url: `/api/calls/${encodeURIComponent(id)}/hangup`,
       headers: writeHeaders(token),
+      payload: { controller: proofs.get(token) },
     });
+  const voiceGrants = new Map<
+    string,
+    {
+      token: string;
+      join: string;
+      grant: CloudVoiceGrant;
+      params: Record<string, string>;
+    }
+  >();
+  const voice = async (
+    id: string,
+    token = tokenA,
+    proof = proofs.get(token),
+  ) => {
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/calls/${encodeURIComponent(id)}/voice`,
+      headers: writeHeaders(token),
+      payload: { controller: proof },
+    });
+    if (response.statusCode === 200) voiceGrants.set(id, response.json());
+    return response;
+  };
   async function signed(path: string, fields: Record<string, string>) {
+    if (path === '/voice/client' && fields.sessionId && !fields.join) {
+      if (!voiceGrants.has(fields.sessionId)) {
+        const permission = await voice(fields.sessionId);
+        assert.equal(permission.statusCode, 200, permission.body);
+      }
+      fields = { ...fields, join: voiceGrants.get(fields.sessionId)!.join };
+    }
     const body = { AccountSid: config.TWILIO_ACCOUNT_SID, ...fields };
     return app.inject({
       method: 'POST',
@@ -379,10 +493,20 @@ async function fixture(
     policy,
     manager,
     access,
+    controllerLeases,
+    voiceJoin,
+    grants,
+    proofs,
+    acquire,
+    revoke,
+    controller,
+    voice,
+    voiceGrants,
     created,
     terminated,
     admissions,
     bridgeOptions,
+    translationChecks,
     counters,
     providerState,
     events,
@@ -405,6 +529,9 @@ test('actual phone status and create routes isolate two authenticated sessions w
   assert.equal(created.statusCode, 200, created.body);
   const call = created.json();
   assert.ok(call.id && call.connectionParams.nonce);
+  assert.equal(call.translationEngine, 'pocket-prefix');
+  assert.equal(f.counters.translationReady, 1);
+  assert.deepEqual(f.translationChecks, ['pocket-prefix']);
   assert.equal(f.counters.factory, 1);
   assert.equal(f.created.length, 0, 'HTTP creation has not dialed a supplier');
   const mine = await f.status();
@@ -414,7 +541,7 @@ test('actual phone status and create routes isolate two authenticated sessions w
   assert.ok(!mine.body.includes('nonce'));
   assert.equal(mine.headers['cache-control'], 'private, no-store');
   for (const token of [tokenA, tokenB]) {
-    assert.equal((await f.call(token)).statusCode, 409);
+    assert.ok([403, 409].includes((await f.call(token)).statusCode));
     assert.equal(f.counters.factory, 1);
   }
   const forbidden = await f.hangup(call.id, tokenB);
@@ -425,6 +552,11 @@ test('actual phone status and create routes isolate two authenticated sessions w
   assert.equal(f.manager.activeSession?.id, call.id);
   assert.equal((await f.hangup(call.id)).statusCode, 200);
   assert.equal(f.manager.activeSession, null);
+  const legacy = await f.call(tokenA, { translationEngine: 'legacy' });
+  assert.equal(legacy.statusCode, 400);
+  assert.deepEqual(legacy.json(), { error: 'INVALID_TRANSLATION_ENGINE' });
+  assert.equal(f.counters.factory, 1);
+  assert.deepEqual(f.translationChecks, ['pocket-prefix']);
 });
 
 test('actual phone API rejects missing identity, wrong origins, missing CSRF and remote socket addresses before readiness', async (t) => {
@@ -594,6 +726,8 @@ test('real application SSE sees owner binding before first call publish and hide
   );
   assert.equal(b.frames.length, 1);
   assert.equal((await f.hangup(first.id)).statusCode, 200);
+  assert.equal((await f.revoke()).statusCode, 200);
+  assert.equal((await f.acquire(tokenB)).statusCode, 200);
   const second = (await f.call(tokenB)).json();
   await until(
     () =>
@@ -803,13 +937,39 @@ test('two signed fake telephone legs use the server-issued identity and owner ha
     From: 'client:ai-phone',
   });
   assert.equal(wrongIdentity.statusCode, 403);
-  const browser = await f.signed('/voice/client', {
-    sessionId: call.id,
-    nonce: call.connectionParams.nonce,
-    CallSid: localSid,
-    From: `client:${identity}`,
-  });
+  const permission = f.voiceGrants.get(call.id)!;
+  assert.equal(permission.grant.callId, call.id);
+  assert.equal(permission.grant.authSessionId, 'auth-a');
+  assert.equal(permission.grant.incomingAllow, false);
+  assert.equal(
+    permission.grant.outgoingApplicationSid,
+    config.TWILIO_TWIML_APP_SID,
+  );
+  assert.equal(
+    permission.grant.controller.leaseId,
+    f.proofs.get(tokenA)!.leaseId,
+  );
+  assert.ok(
+    permission.grant.expiresAt <=
+      (f.proofs.get(tokenA) as ControllerProof & { expiresAt: number })
+        .expiresAt,
+  );
+  assert.ok(permission.grant.expiresAt - permission.grant.issuedAt <= 60000);
+  assert.equal(permission.grant.identity, identity);
+  assert.match(permission.token, /^test-only-fake-voice-/);
+  const fakeVoiceSdk = {
+    connect: async ({ params }: { params: Record<string, string> }) => {
+      assert.deepEqual(params, permission.params);
+      return f.signed('/voice/client', {
+        ...params,
+        CallSid: localSid,
+        From: `client:${permission.grant.identity}`,
+      });
+    },
+  };
+  const browser = await fakeVoiceSdk.connect({ params: permission.params });
   assert.equal(browser.statusCode, 200);
+  assert.match(browser.body, /<Stream/, JSON.stringify(f.events));
   const local = await f.media(
     call.id,
     'local',
@@ -829,6 +989,12 @@ test('two signed fake telephone legs use the server-issued identity and owner ha
     'both fake media legs attached',
   );
   assert.equal(f.counters.bridge, 1);
+  assert.equal(f.bridgeOptions[0].translationEngine, 'pocket-prefix');
+  assert.equal(
+    f.manager.available,
+    false,
+    'Cloud control never sets global local presence',
+  );
   assert.equal((await f.status(tokenB)).json().activeSession, null);
   assert.equal((await f.hangup(call.id, tokenB)).statusCode, 404);
   const ended = await f.hangup(call.id);
@@ -854,7 +1020,8 @@ test('failed fake cleanup stays busy and private error text is not returned unti
   assert.equal(failed.statusCode, 503);
   assert.ok(!failed.body.includes('private-provider-cleanup-secret'));
   assert.equal(f.manager.activeSession?.status, 'ending');
-  assert.equal((await f.call(tokenB)).statusCode, 409);
+  assert.equal((await f.call(tokenB)).statusCode, 403);
+  assert.equal((await f.acquire(tokenB)).statusCode, 409);
   f.providerState.failHangup = false;
   assert.equal((await f.hangup(call.id)).statusCode, 200);
   assert.equal(f.manager.activeSession, null);
@@ -889,11 +1056,21 @@ test('accepted hangup cleanup continues after revocation while its response is w
 test('revoked owner cannot join its old signed browser callback and it is cleaned without another fake dial', async (t) => {
   const f = await fixture(t);
   const call = (await f.call()).json();
+  assert.equal((await f.voice(call.id)).statusCode, 200);
   f.identity.sessions.get(tokenA)!.revoked = true;
   await until(
     () => f.manager.activeSession === null,
     'old owner cleanup before new call',
   );
+  assert.equal(
+    (await f.acquire(tokenB)).statusCode,
+    409,
+    'A revoked login does not silently transfer a still-live controller lease',
+  );
+  f.identity.now = (
+    f.proofs.get(tokenA) as ControllerProof & { expiresAt: number }
+  ).expiresAt;
+  assert.equal((await f.acquire(tokenB)).statusCode, 200);
   const second = (await f.call(tokenB)).json();
   assert.ok(second.id && second.id !== call.id);
   const result = await f.signed('/voice/client', {
@@ -916,4 +1093,390 @@ test('revoked owner cannot join its old signed browser callback and it is cleane
     2,
     'Late old callback cannot create another session',
   );
+});
+
+async function fakeSdkTelephone(
+  f: Awaited<ReturnType<typeof fixture>>,
+  call: { id: string; connectionParams: { nonce: string } },
+) {
+  const response = await f.voice(call.id);
+  assert.equal(response.statusCode, 200, response.body);
+  const permission = f.voiceGrants.get(call.id)!;
+  const fakeVoiceSdk = {
+    connect: ({ params }: { params: Record<string, string> }) => {
+      assert.deepEqual(params, permission.params);
+      return f.signed('/voice/client', {
+        ...params,
+        CallSid: localSid,
+        From: `client:${permission.grant.identity}`,
+      });
+    },
+  };
+  const joined = await fakeVoiceSdk.connect({ params: permission.params });
+  assert.equal(joined.statusCode, 200);
+  assert.match(joined.body, /<Stream/, JSON.stringify(f.events));
+  const browser = await f.media(
+    call.id,
+    'local',
+    call.connectionParams.nonce,
+    localSid,
+  );
+  await until(
+    () => f.created.length === 1,
+    'fake supplier dial after permitted SDK join',
+  );
+  const callback = new URL(String(f.created[0].url));
+  assert.equal(
+    (
+      await f.signed(`${callback.pathname}${callback.search}`, {
+        CallSid: remoteSid,
+      })
+    ).statusCode,
+    200,
+  );
+  const phone = await f.media(
+    call.id,
+    'remote',
+    callback.searchParams.get('nonce')!,
+    remoteSid,
+  );
+  await until(
+    () => f.manager.activeSession?.status === 'active',
+    'fake SDK two-leg flow',
+  );
+  return { permission, browser, phone };
+}
+
+test('actual controller routes protect same-session secondary tabs, reject stale epochs, and never return an existing lease', async (t) => {
+  const f = await fixture(t, { listen: true });
+  const proof = f.proofs.get(tokenA)!;
+  assert.equal((await f.acquire(tokenA, 'tab-a')).statusCode, 409);
+  assert.equal((await f.acquire(tokenA, 'tab-b')).statusCode, 409);
+  assert.equal((await f.acquire(tokenB, 'tab-c')).statusCode, 409);
+  const stream = await f.eventsFor();
+  assert.equal((await f.status()).statusCode, 200);
+  assert.ok(!JSON.stringify(stream.frames).includes(proof.leaseId));
+  assert.ok(!(await f.status()).body.includes(proof.leaseId));
+  for (const invalidProof of [
+    undefined,
+    { ...proof, tabId: 'tab-b' },
+    { ...proof, leaseId: 'forged-lease' },
+    { ...proof, epoch: proof.epoch - 1 },
+  ]) {
+    assert.equal(
+      (await f.call(tokenA, { controller: invalidProof })).statusCode,
+      403,
+    );
+    if (invalidProof)
+      assert.equal(
+        (await f.controller('renew', tokenA, invalidProof)).statusCode,
+        403,
+      );
+  }
+  const call = (await f.call()).json();
+  assert.equal((await f.acquire(tokenA, 'tab-b')).statusCode, 409);
+  assert.equal(
+    (await f.voice(call.id, tokenA, { ...proof, tabId: 'tab-b' })).statusCode,
+    403,
+  );
+  assert.equal(
+    (
+      await f.app.inject({
+        method: 'POST',
+        url: `/api/calls/${call.id}/hangup`,
+        headers: writeHeaders(),
+        payload: { controller: { ...proof, tabId: 'tab-b' } },
+      })
+    ).statusCode,
+    403,
+  );
+  assert.equal(f.manager.activeSession?.id, call.id);
+  assert.equal((await f.hangup(call.id)).statusCode, 200);
+  assert.equal((await f.revoke()).statusCode, 200);
+  const replacement = await f.acquire(tokenA, 'tab-b');
+  assert.equal(replacement.statusCode, 200);
+  assert.ok(replacement.json().epoch > proof.epoch);
+  assert.notEqual(replacement.json().leaseId, proof.leaseId);
+  assert.equal((await f.call(tokenA, { controller: proof })).statusCode, 403);
+  stream.close();
+});
+
+test('actual per-call Voice permission refuses missing durable admission and signer instead of using local token secrets', async (t) => {
+  const f = await fixture(t, { voiceReady: false });
+  const call = (await f.call()).json();
+  const result = await f.voice(call.id);
+  assert.equal(result.statusCode, 503);
+  assert.deepEqual(result.json(), { error: 'VOICE_CONNECTION_NOT_READY' });
+  assert.equal(f.grants.length, 0);
+  assert.equal(f.created.length, 0);
+  assert.equal(f.manager.available, false);
+  assert.equal((await f.hangup(call.id)).statusCode, 200);
+});
+
+test('a prepared Voice join binds call and identity and is consumed once by the signed real callback', async (t) => {
+  const f = await fixture(t);
+  const first = (await f.call()).json();
+  assert.equal((await f.voice(first.id)).statusCode, 200);
+  const firstGrant = f.voiceGrants.get(first.id)!;
+  assert.equal((await f.hangup(first.id)).statusCode, 200);
+  const second = (await f.call()).json();
+  assert.equal((await f.voice(second.id)).statusCode, 200);
+  const permission = f.voiceGrants.get(second.id)!;
+  const crossCall = await f.signed('/voice/client', {
+    ...permission.params,
+    join: firstGrant.join,
+    CallSid: localSid,
+    From: `client:${permission.grant.identity}`,
+  });
+  assert.equal(crossCall.statusCode, 403);
+  assert.equal(f.created.length, 0);
+  const body = {
+    ...permission.params,
+    CallSid: localSid,
+    From: `client:${permission.grant.identity}`,
+  };
+  assert.equal((await f.signed('/voice/client', body)).statusCode, 200);
+  assert.equal(
+    (await f.signed('/voice/client', body)).statusCode,
+    200,
+    'Same signed provider SID replay remains idempotent',
+  );
+  assert.equal(
+    (
+      await f.signed('/voice/client', {
+        ...body,
+        CallSid: `CA${'5'.repeat(32)}`,
+      })
+    ).statusCode,
+    403,
+    'The consumed join cannot admit a second SDK leg',
+  );
+  assert.equal(
+    f.created.length,
+    0,
+    'SDK join alone does not dial before media attach',
+  );
+  assert.equal((await f.hangup(second.id)).statusCode, 200);
+  assert.deepEqual(f.terminated, [localSid]);
+});
+
+test('controller revoke during asynchronous Voice preparation yields no token or usable join', async (t) => {
+  const entered = deferred();
+  const release = deferred();
+  const f = await fixture(t, {
+    voicePreparation: async () => {
+      entered.resolve();
+      await release.promise;
+    },
+  });
+  const call = (await f.call()).json();
+  const pending = f.voice(call.id);
+  await entered.promise;
+  assert.equal((await f.revoke()).statusCode, 200);
+  release.resolve();
+  const denied = await pending;
+  assert.equal(denied.statusCode, 403);
+  assert.ok(!denied.body.includes('test-only-fake-voice-'));
+  assert.equal(f.voiceGrants.size, 0);
+  assert.equal(f.created.length, 0);
+  await until(
+    () => f.manager.activeSession === null,
+    'revoked reservation cleanup',
+  );
+});
+
+test('fake SDK call receives paired owner captions and SSE reconnection cannot extend the controller lease', async (t) => {
+  const f = await fixture(t, { listen: true });
+  const originalStream = await f.eventsFor();
+  const readonlyStream = await f.eventsFor(tokenB);
+  const call = (await f.call()).json();
+  const { browser, phone, permission } = await fakeSdkTelephone(f, call);
+  assert.equal(f.bridgeOptions[0].translationEngine, 'pocket-prefix');
+  assert.match(permission.token, /^test-only-fake-voice-/);
+  const emitCaption = f.bridgeOptions[0].onConversationTranscript!;
+  emitCaption({
+    id: 'fake-source',
+    utteranceId: 'fake-utterance',
+    role: 'local',
+    kind: 'original',
+    text: '我想明天下午预约。',
+    final: true,
+    at: f.identity.now,
+  });
+  emitCaption({
+    id: 'fake-translation',
+    utteranceId: 'fake-utterance',
+    role: 'local',
+    kind: 'translation',
+    text: 'I would like an appointment tomorrow afternoon.',
+    final: true,
+    at: f.identity.now,
+  });
+  await until(
+    () =>
+      originalStream.frames.filter((frame) => frame.event === 'conversation')
+        .length === 2,
+    'paired owner caption events',
+  );
+  const captions = originalStream.frames
+    .filter((frame) => frame.event === 'conversation')
+    .map(
+      (frame) =>
+        frame.data as { utteranceId: string; kind: string; text: string },
+    );
+  assert.equal(captions[0].utteranceId, captions[1].utteranceId);
+  assert.deepEqual(
+    captions.map((event) => event.kind),
+    ['original', 'translation'],
+  );
+  assert.ok(!JSON.stringify(readonlyStream.frames).includes('appointment'));
+  const expiry = (
+    f.proofs.get(tokenA) as ControllerProof & { expiresAt: number }
+  ).expiresAt;
+  f.identity.now = expiry - 1;
+  assert.equal((await f.status()).json().activeSession.id, call.id);
+  originalStream.close();
+  const reconnected = await f.eventsFor();
+  assert.equal((await f.status()).json().activeSession.id, call.id);
+  f.identity.now = expiry;
+  await until(
+    () => f.manager.activeSession === null,
+    'unrenewed controller expiry cleans fake legs',
+  );
+  assert.deepEqual([...f.terminated].sort(), [localSid, remoteSid].sort());
+  assert.equal((await f.call()).statusCode, 403);
+  const count = reconnected.frames.length;
+  emitCaption({
+    id: 'late',
+    utteranceId: 'fake-late',
+    role: 'local',
+    kind: 'translation',
+    text: 'must not publish after controller expiry',
+    final: true,
+    at: f.identity.now,
+  });
+  await delay(20);
+  assert.equal(reconnected.frames.length, count);
+  reconnected.close();
+  readonlyStream.close();
+  browser.terminate();
+  phone.terminate();
+});
+
+test('lease expiry after signing but before the real Voice response write withholds the fake token', async (t) => {
+  const entered = deferred();
+  const release = deferred();
+  const f = await fixture(t, {
+    voiceResponsePause: async () => {
+      entered.resolve();
+      await release.promise;
+    },
+  });
+  const call = (await f.call()).json();
+  const pending = f.voice(call.id);
+  await entered.promise;
+  assert.equal(f.grants.length, 1, 'Signer completed before the response hook');
+  f.identity.now = (
+    f.proofs.get(tokenA) as ControllerProof & { expiresAt: number }
+  ).expiresAt;
+  release.resolve();
+  const denied = await pending;
+  assert.equal(denied.statusCode, 403);
+  assert.ok(!denied.body.includes('test-only-fake-voice-'));
+  assert.ok(!denied.body.includes('join'));
+  assert.equal(f.voiceGrants.size, 0);
+  assert.equal(f.created.length, 0);
+});
+
+test('controller revoke during actual call readiness cancels reservation before any publish or provider', async (t) => {
+  const entered = deferred();
+  const release = deferred();
+  const f = await fixture(t, {
+    publicChecker: async () => {
+      entered.resolve();
+      await release.promise;
+      return { status: 'ready', code: 'PUBLIC_CALLBACK_READY' };
+    },
+  });
+  const pending = f.call();
+  await entered.promise;
+  assert.equal((await f.revoke()).statusCode, 200);
+  assert.equal(
+    (await f.acquire(tokenB)).statusCode,
+    409,
+    'Preparation prevents takeover',
+  );
+  release.resolve();
+  const denied = await pending;
+  assert.equal(denied.statusCode, 403);
+  assert.equal(f.counters.factory, 0);
+  assert.equal(f.events.length, 0);
+  assert.equal(f.manager.activeSession, null);
+  assert.equal((await f.acquire(tokenB)).statusCode, 200);
+});
+
+test('only explicit authenticated controller renew extends the lease, and Voice permission still requires write credentials', async (t) => {
+  const f = await fixture(t);
+  const proof = f.proofs.get(tokenA)!;
+  const oldDeadline = (proof as ControllerProof & { expiresAt: number })
+    .expiresAt;
+  f.identity.now += 1000;
+  const renewal = await f.controller('renew', tokenA, proof);
+  assert.equal(renewal.statusCode, 200);
+  assert.equal(renewal.json().leaseId, proof.leaseId);
+  assert.equal(renewal.json().epoch, proof.epoch);
+  assert.ok(renewal.json().expiresAt > oldDeadline);
+  const call = (await f.call()).json();
+  for (const headers of [
+    { ...writeHeaders(), cookie: '' },
+    { ...writeHeaders(), origin: 'https://evil.test' },
+    { ...writeHeaders(), 'x-phone-csrf': '' },
+  ]) {
+    const denied = await f.app.inject({
+      method: 'POST',
+      url: `/api/calls/${call.id}/voice`,
+      headers,
+      payload: { controller: proof },
+    });
+    assert.ok([401, 403].includes(denied.statusCode));
+    assert.ok(!denied.body.includes('test-only-fake-voice-'));
+  }
+  assert.equal(f.grants.length, 0);
+  assert.equal((await f.voice(call.id, tokenB)).statusCode, 404);
+  assert.equal((await f.hangup(call.id)).statusCode, 200);
+});
+
+test('expired controller cleanup failure keeps both fake legs busy until termination is confirmed', async (t) => {
+  const f = await fixture(t, { listen: true });
+  const call = (await f.call()).json();
+  const { browser, phone } = await fakeSdkTelephone(f, call);
+  f.providerState.failHangup = true;
+  f.identity.now = (
+    f.proofs.get(tokenA) as ControllerProof & { expiresAt: number }
+  ).expiresAt;
+  await until(
+    () => f.manager.activeSession?.status === 'ending',
+    'expiry accepts end intent',
+  );
+  await until(
+    () => f.terminated.includes(localSid) && f.terminated.includes(remoteSid),
+    'expiry attempts both fake legs',
+  );
+  assert.equal(f.manager.isCleanupConfirmed(call.id), false);
+  const blocked = await f.acquire(tokenB);
+  assert.equal(blocked.statusCode, 409);
+  assert.ok(!blocked.body.includes('private-provider-cleanup-secret'));
+  assert.equal((await f.call(tokenB)).statusCode, 403);
+  f.providerState.failHangup = false;
+  await until(
+    () => f.manager.activeSession === null,
+    'retry confirms both legs clean',
+  );
+  assert.equal(f.manager.isCleanupConfirmed(call.id), true);
+  assert.equal((await f.acquire(tokenB)).statusCode, 200);
+  const next = await f.call(tokenB);
+  assert.equal(next.statusCode, 200, next.body);
+  assert.notEqual(next.json().id, call.id);
+  browser.terminate();
+  phone.terminate();
 });

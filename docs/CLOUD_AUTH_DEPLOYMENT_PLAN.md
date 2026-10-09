@@ -2,7 +2,7 @@
 
 日期：2026-10-09。状态：**推荐待确认，仅文档；当前 cloud 仍拒绝启动 `CLOUD_AUTH_NOT_IMPLEMENTED`**。配置齐全不等于 ready。本轮不实现公网 API、不生成密码/凭据、不增加依赖、不部署、不改 Twilio 回调、不调用付费接口；本机 loopback 安全边界继续保留。
 
-后续获批的小里程碑仅实现 [独立会话/通话授权组件](CLOUD_ACCESS_BOUNDARY.md) 与离线 HTTP/浏览器 WS 拒绝和隔离测试。它要求服务端同步查询当前已验证会话，没有选择或实现本文推荐的登录方案，没有注册生产路由；cloud guard 保持不变。GET/HEAD无Origin时采用严格same-origin Fetch Metadata，写操作/WS继续要求Origin；真实Chromium已观察同源fetch/EventSource头。生产SSE与异步后端事务仍未实现，边界见组件记录。
+后续获批里程碑实现了 [独立会话/通话授权组件](CLOUD_ACCESS_BOUNDARY.md)、[实际应用的离线接线](CLOUD_PHONE_APPLICATION_INTEGRATION.md)及[控制租约与Voice许可](CLOUD_CONTROLLER_VOICE.md)。它们要求服务端同步查询当前已验证会话，没有选择或实现本文推荐的登录方案，也没有启用生产入口；cloud guard 保持不变。GET/HEAD无Origin时采用严格same-origin Fetch Metadata，写操作/WS继续要求Origin；真实Chromium已观察同源fetch/EventSource头。owner SSE和租约/join有模拟依赖证据，生产签名器、持久预算/intent及异步后端事务仍未实现。
 
 ## 推荐身份方案与现有基础
 

@@ -7,13 +7,16 @@ import {
   type CloudAccessContext,
 } from './cloud-access';
 import type { SoloConfig } from './config';
+import {
+  CloudControllerLeases,
+  type BoundControllerLease,
+  type ControllerProof,
+} from './controller-lease';
+import { CloudVoiceJoin, type PreparedCloudVoice } from './cloud-voice-join';
 import type { checkPublicReadiness } from './public-readiness';
 import type { checkTranslationEngine } from './provider-checks';
 import { SessionError, SessionManager, type CallView } from './session-manager';
-import {
-  isTranslationEngine,
-  type TranslationEngine,
-} from './translation-engine';
+import type { TranslationEngine } from './translation-engine';
 
 export type PreparedCloudCall = Readonly<{
   to: string;
@@ -36,7 +39,7 @@ const eventNames = new Set([
   'error',
 ]);
 
-/** Server-only dependency bundle, not login, lease, budget or durable recovery.
+/** Server-only dependency bundle, not login or durable recovery.
  * Every side-effect dependency is explicit; no real provider/readiness fallback.
  * Startup remains local-only. Tests supply isolated identities and fake backends.
  */
@@ -45,20 +48,46 @@ export class CloudPhoneAccess {
 
   readonly manager: SessionManager;
 
+  readonly controllerLeases: CloudControllerLeases;
+
+  private readonly voiceJoin?: CloudVoiceJoin;
+
   private readonly publicReadinessChecker: typeof checkPublicReadiness;
 
   private readonly translationReadinessChecker: typeof checkTranslationEngine;
 
   private readonly prepared = new WeakMap<
     PreparedCloudCall,
-    { context: CloudAccessContext; config: SoloConfig }
+    {
+      context: CloudAccessContext;
+      config: SoloConfig;
+      controller: BoundControllerLease;
+    }
   >();
 
   private readonly intents = new WeakMap<CloudCleanupIntent, string>();
 
-  private readonly calls = new Map<string, CloudAccessContext>();
+  private readonly issuedVoice = new WeakMap<
+    PreparedCloudVoice,
+    {
+      context: CloudAccessContext;
+      callId: string;
+      controller: BoundControllerLease;
+    }
+  >();
+
+  private readonly calls = new Map<
+    string,
+    {
+      context: CloudAccessContext;
+      controller: BoundControllerLease;
+      joined: boolean;
+    }
+  >();
 
   private readonly cleaning = new Set<string>();
+
+  private readonly releasing = new Map<string, Promise<void>>();
 
   private preparing = false;
 
@@ -69,6 +98,8 @@ export class CloudPhoneAccess {
   constructor(options: {
     policy: CloudAccessPolicy;
     manager: SessionManager;
+    controllerLeases: CloudControllerLeases;
+    voiceJoin?: CloudVoiceJoin;
     publicReadinessChecker: typeof checkPublicReadiness;
     translationReadinessChecker: typeof checkTranslationEngine;
     maxCalls?: number;
@@ -80,6 +111,11 @@ export class CloudPhoneAccess {
       !(options?.policy instanceof CloudAccessPolicy) ||
       !(options.manager instanceof SessionManager) ||
       !options.manager.hasExplicitControlDependencies ||
+      !(options.controllerLeases instanceof CloudControllerLeases) ||
+      options.controllerLeases.policy !== options.policy ||
+      (options.voiceJoin !== undefined &&
+        (!(options.voiceJoin instanceof CloudVoiceJoin) ||
+          options.voiceJoin.policy !== options.policy)) ||
       typeof options.publicReadinessChecker !== 'function' ||
       typeof options.translationReadinessChecker !== 'function' ||
       !Number.isSafeInteger(maxCalls) ||
@@ -92,6 +128,8 @@ export class CloudPhoneAccess {
       throw new CloudAccessError('FORBIDDEN');
     this.policy = options.policy;
     this.manager = options.manager;
+    this.controllerLeases = options.controllerLeases;
+    this.voiceJoin = options.voiceJoin;
     this.publicReadinessChecker = options.publicReadinessChecker;
     this.translationReadinessChecker = options.translationReadinessChecker;
     this.maxCalls = maxCalls;
@@ -100,7 +138,104 @@ export class CloudPhoneAccess {
   }
 
   assertConfig(config: SoloConfig): void {
-    if (config.PUBLIC_BASE_URL !== this.policy.publicOrigin)
+    if (
+      config.PUBLIC_BASE_URL !== this.policy.publicOrigin ||
+      (this.voiceJoin &&
+        this.voiceJoin.outgoingApplicationSid !== config.TWILIO_TWIML_APP_SID)
+    )
+      throw new CloudAccessError('FORBIDDEN');
+  }
+
+  acquireController(context: CloudAccessContext, tabId: string) {
+    this.releaseCompletedCalls();
+    return this.controllerLeases.acquire(context, tabId, {
+      busy:
+        this.preparing ||
+        this.manager.controlAdmissionBlocked ||
+        !!this.voiceJoin?.cleanupUnconfirmed,
+    });
+  }
+
+  renewController(context: CloudAccessContext, proof: ControllerProof) {
+    return this.controllerLeases.renew(context, proof);
+  }
+
+  revokeController(context: CloudAccessContext, proof: ControllerProof): void {
+    this.controllerLeases.authorize(context, proof);
+    this.controllerLeases.revoke(context, proof);
+    const active = this.manager.activeSession;
+    if (active && this.calls.has(active.id))
+      this.cleanupOwnedCall(active.id, 'CONTROLLER_REVOKED');
+  }
+
+  private authorizeController(
+    context: CloudAccessContext,
+    proof: ControllerProof,
+    callId?: string,
+  ): BoundControllerLease {
+    const controller = this.controllerLeases.authorize(context, proof);
+    if (callId !== undefined) {
+      const original = this.calls.get(callId)?.controller;
+      if (
+        !original ||
+        controller.leaseId !== original.leaseId ||
+        controller.tabId !== original.tabId ||
+        controller.epoch !== original.epoch
+      )
+        throw new CloudAccessError('FORBIDDEN');
+      this.controllerLeases.authorizeCurrent(original);
+    }
+    return controller;
+  }
+
+  recheckController(
+    context: CloudAccessContext,
+    proof: ControllerProof,
+    callId?: string,
+  ): void {
+    if (callId !== undefined) this.readAccess(context, callId, 'mutate');
+    this.authorizeController(context, proof, callId);
+  }
+
+  async prepareVoice(
+    context: CloudAccessContext,
+    callId: string,
+    proof: ControllerProof,
+  ) {
+    this.readAccess(context, callId, 'mutate');
+    const controller = this.authorizeController(context, proof, callId);
+    if (!this.voiceJoin)
+      throw new SessionError('VOICE_CONNECTION_NOT_READY', 503);
+    const result = await this.voiceJoin.prepareGrant(context, callId);
+    this.readAccess(context, callId, 'mutate');
+    this.controllerLeases.authorizeCurrent(controller);
+    if (
+      this.manager.isCleanupConfirmed(callId) ||
+      this.manager.activeSession?.id !== callId
+    )
+      throw new CloudAccessError('FORBIDDEN');
+    this.issuedVoice.set(result, { context, callId, controller });
+    return result;
+  }
+
+  /** The token response itself is a private issued capability, checked by the
+   * actual route's final onSend hook after asynchronous response preparation. */
+  assertVoiceResponseCurrent(
+    context: CloudAccessContext,
+    callId: string,
+    response: PreparedCloudVoice,
+  ): void {
+    const issued = this.issuedVoice.get(response);
+    if (!issued || issued.context !== context || issued.callId !== callId)
+      throw new CloudAccessError('UNAUTHORIZED');
+    this.readAccess(context, callId, 'mutate');
+    this.controllerLeases.authorizeCurrent(issued.controller);
+    this.voiceJoin.assertPreparedCurrent(context, callId, response);
+    const active = this.manager.activeSession;
+    if (
+      active?.id !== callId ||
+      ['ending', 'completed', 'failed'].includes(active.status)
+    )
       throw new CloudAccessError('FORBIDDEN');
   }
 
@@ -108,15 +243,23 @@ export class CloudPhoneAccess {
     context: CloudAccessContext,
     config: SoloConfig,
     to: string,
-    translationEngine: TranslationEngine = 'legacy',
+    translationEngine: TranslationEngine = 'pocket-prefix',
+    proof?: ControllerProof,
   ): Promise<PreparedCloudCall> {
     this.policy.revalidate(context, 'mutate');
+    this.releaseCompletedCalls();
+    const controller = this.authorizeController(context, proof);
     this.assertConfig(config);
     if (typeof to !== 'string') throw new SessionError('INVALID_DESTINATION');
-    if (!isTranslationEngine(translationEngine))
+    if (
+      translationEngine !== 'pocket-prefix' &&
+      translationEngine !== 'pocket-captions'
+    )
       throw new SessionError('INVALID_TRANSLATION_ENGINE');
     if (this.preparing || this.manager.activeSession)
       throw new SessionError('BUSY', 409);
+    if (this.voiceJoin?.cleanupUnconfirmed)
+      throw new SessionError('CALL_CLEANUP_UNCONFIRMED', 409);
     if (this.calls.size >= this.maxCalls)
       throw new CloudAccessError('FORBIDDEN');
     this.preparing = true;
@@ -129,9 +272,10 @@ export class CloudPhoneAccess {
         throw new SessionError('CLOUD_READINESS_UNAVAILABLE', 503);
       }
       this.policy.revalidate(context, 'mutate');
+      this.controllerLeases.authorizeCurrent(controller);
       if (ready?.status !== 'ready')
         throw new SessionError('PUBLIC_CALLBACK_UNREACHABLE', 503);
-      if (translationEngine !== 'legacy') {
+      {
         let translation: Awaited<ReturnType<typeof checkTranslationEngine>>;
         try {
           translation = await this.translationReadinessChecker(
@@ -142,11 +286,12 @@ export class CloudPhoneAccess {
           throw new SessionError('CLOUD_READINESS_UNAVAILABLE', 503);
         }
         this.policy.revalidate(context, 'mutate');
+        this.controllerLeases.authorizeCurrent(controller);
         if (translation?.status !== 'passed')
           throw new SessionError('TRANSLATION_ENGINE_UNAVAILABLE', 503);
       }
       const result = Object.freeze({ to: to.trim(), translationEngine });
-      this.prepared.set(result, { context, config: snapshot });
+      this.prepared.set(result, { context, config: snapshot, controller });
       return result;
     } finally {
       this.preparing = false;
@@ -157,14 +302,21 @@ export class CloudPhoneAccess {
     const state = this.prepared.get(prepared);
     if (!state) throw new CloudAccessError('UNAUTHORIZED');
     this.prepared.delete(prepared);
+    this.releaseCompletedCalls();
+    if (this.voiceJoin?.cleanupUnconfirmed)
+      throw new SessionError('CALL_CLEANUP_UNCONFIRMED', 409);
     if (this.calls.size >= this.maxCalls)
       throw new CloudAccessError('FORBIDDEN');
     let callId: string | undefined;
     let rollback: (() => void) | undefined;
+    let rollbackVoice: (() => void) | undefined;
     const authorizeCurrent = () => {
       this.policy.revalidate(state.context, 'mutate');
+      this.controllerLeases.authorizeCurrent(state.controller);
       if (callId !== undefined)
         this.policy.authorizeCall(state.context, callId, 'mutate');
+      if (callId !== undefined && this.calls.get(callId)?.joined)
+        this.voiceJoin.assertJoinedCurrent(callId);
     };
     try {
       return this.policy.runAuthorizedSession(state.context, 'mutate', () =>
@@ -174,15 +326,56 @@ export class CloudPhoneAccess {
           prepared.translationEngine,
           {
             browserIdentity: `cloud-phone-${randomBytes(18).toString('hex')}`,
+            deferBrowserJoin: true,
+            authorizeBrowserJoin: (fields) => {
+              if (!this.voiceJoin)
+                throw new SessionError('VOICE_CONNECTION_NOT_READY', 503);
+              const result = this.voiceJoin.consume({
+                sessionId: fields.sessionId,
+                nonce: fields.nonce,
+                From: fields.From,
+                CallSid: fields.CallSid,
+                join: fields.join,
+              });
+              if (result === 'join' || result === 'replay')
+                this.calls.get(callId).joined = true;
+              return result;
+            },
             authorizeCurrent,
-            beforePublish: (id) => {
+            beforePublish: (id, connection) => {
               if (callId !== undefined) throw new CloudAccessError('FORBIDDEN');
               rollback = this.policy.registerCallWithRollback(
                 state.context,
                 id,
               );
-              this.calls.set(id, state.context);
+              this.calls.set(id, {
+                context: state.context,
+                controller: state.controller,
+                joined: false,
+              });
               callId = id;
+              if (this.voiceJoin)
+                rollbackVoice = this.voiceJoin.registerCall(
+                  state.context,
+                  {
+                    callId: id,
+                    identity: connection.identity,
+                    nonce: connection.nonce,
+                  },
+                  () => {
+                    if (
+                      this.manager.hasSession(id) &&
+                      (this.manager.activeSession?.id !== id ||
+                        ['ending', 'completed', 'failed'].includes(
+                          this.manager.activeSession.status,
+                        ))
+                    )
+                      throw new CloudAccessError('FORBIDDEN');
+                    return this.controllerLeases.authorizeCurrent(
+                      state.controller,
+                    );
+                  },
+                );
             },
           },
         ),
@@ -190,6 +383,7 @@ export class CloudPhoneAccess {
     } catch (error) {
       if (callId !== undefined && !this.manager.hasSession(callId)) {
         rollback?.();
+        rollbackVoice?.();
         this.calls.delete(callId);
       } else if (callId !== undefined)
         this.cleanupOwnedCall(callId, 'CALL_CREATION_FAILED');
@@ -222,11 +416,17 @@ export class CloudPhoneAccess {
     });
   }
 
-  beginHangup(context: CloudAccessContext, callId: string): CloudCleanupIntent {
+  beginHangup(
+    context: CloudAccessContext,
+    callId: string,
+    proof?: ControllerProof,
+  ): CloudCleanupIntent {
     this.readAccess(context, callId, 'mutate');
+    const controller = this.authorizeController(context, proof, callId);
     let accepted = false;
     try {
       this.policy.runAuthorizedCall(context, callId, 'mutate', () => {
+        this.controllerLeases.authorizeCurrent(controller);
         accepted = true;
         this.manager.beginEndIntent(callId);
       });
@@ -246,6 +446,7 @@ export class CloudPhoneAccess {
     if (!callId) throw new CloudAccessError('UNAUTHORIZED');
     // Cleanup of an accepted server intent must continue after owner revocation.
     await this.manager.end(callId);
+    await this.releaseConfirmedCall(callId);
   }
 
   recheckCleanup(context: CloudAccessContext, callId: string): boolean {
@@ -290,11 +491,14 @@ export class CloudPhoneAccess {
   }
 
   private checkLifecycle(): void {
+    this.releaseCompletedCalls();
     const active = this.manager.activeSession;
-    const context = active && this.calls.get(active.id);
-    if (!active || !context || this.cleaning.has(active.id)) return;
+    const state = active && this.calls.get(active.id);
+    if (!active || !state || this.cleaning.has(active.id)) return;
     try {
-      this.policy.authorizeCall(context, active.id, 'mutate');
+      this.policy.authorizeCall(state.context, active.id, 'mutate');
+      this.controllerLeases.authorizeCurrent(state.controller);
+      if (state.joined) this.voiceJoin.assertJoinedCurrent(active.id);
       return;
     } catch {
       // This is private safety cleanup, not a fresh browser mutation permission.
@@ -313,6 +517,7 @@ export class CloudPhoneAccess {
     try {
       this.manager
         .end(callId)
+        .then(() => this.releaseConfirmedCall(callId))
         .catch(() => {})
         .finally(() => this.cleaning.delete(callId));
     } catch {
@@ -320,7 +525,28 @@ export class CloudPhoneAccess {
     }
   }
 
-  close(): void {
+  private releaseCompletedCalls(): void {
+    for (const callId of this.calls.keys())
+      if (this.manager.isCleanupConfirmed(callId))
+        this.releaseConfirmedCall(callId).catch(() => {});
+  }
+
+  private releaseConfirmedCall(callId: string): Promise<void> {
+    if (!this.voiceJoin || !this.manager.isCleanupConfirmed(callId))
+      return Promise.resolve();
+    const existing = this.releasing.get(callId);
+    if (existing) return existing;
+    const task = this.voiceJoin.releaseCall(callId).finally(() => {
+      if (this.releasing.get(callId) === task) this.releasing.delete(callId);
+    });
+    this.releasing.set(callId, task);
+    return task;
+  }
+
+  async close(): Promise<void> {
     clearInterval(this.timer);
+    await Promise.all(
+      [...this.calls.keys()].map((id) => this.releaseConfirmedCall(id)),
+    );
   }
 }

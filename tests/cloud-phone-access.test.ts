@@ -12,6 +12,8 @@ import {
 } from '../src/solo/cloud-access';
 import { createCloudAccessTransport } from '../src/solo/cloud-access-transport';
 import { CloudPhoneAccess } from '../src/solo/cloud-phone-access';
+import { CloudControllerLeases } from '../src/solo/controller-lease';
+import { CloudVoiceJoin } from '../src/solo/cloud-voice-join';
 import type { SoloConfig } from '../src/solo/config';
 import { SessionManager } from '../src/solo/session-manager';
 
@@ -43,6 +45,9 @@ function fixture(
     hangup?: () => Promise<void>;
     publicChecker?: () => Promise<any>;
     factoryThrows?: boolean;
+    leaseTtlMs?: number;
+    noVoice?: boolean;
+    voiceRelease?: () => Promise<void>;
   } = {},
 ) {
   let now = 10000;
@@ -93,7 +98,23 @@ function fixture(
       throw new Error('Unexpected test bridge creation');
     },
   });
-  manager.setPresence(true);
+  const controllerLeases = new CloudControllerLeases({
+    policy,
+    now: () => now,
+    ttlMs: options.leaseTtlMs ?? 5000,
+  });
+  const voiceJoin = new CloudVoiceJoin({
+    policy,
+    now: () => now,
+    outgoingApplicationSid: config.TWILIO_TWIML_APP_SID,
+    signer: async () => 'offline-fake-token',
+    admission: {
+      reserve: async () => ({
+        assertCurrent: () => {},
+        release: async () => { await options.voiceRelease?.(); },
+      }),
+    },
+  });
   const originalCreate = manager.createOutbound.bind(manager);
   manager.createOutbound = (...args) => {
     admissions.push(args[3]);
@@ -102,6 +123,8 @@ function fixture(
   const access = new CloudPhoneAccess({
     policy,
     manager,
+    controllerLeases,
+    voiceJoin: options.noVoice ? undefined : voiceJoin,
     maxCalls: options.maxCalls,
     revalidationIntervalMs: 10,
     publicReadinessChecker: async () => {
@@ -116,8 +139,8 @@ function fixture(
     },
   });
   t.after(async () => {
-    access.close();
     await manager.close();
+    await access.close();
   });
   const headers = (other = false) => ({
     host: 'phone.example.com',
@@ -135,14 +158,24 @@ function fixture(
       surface: 'http',
       method: 'GET',
     });
+  const proof = access.acquireController(post(), 'offline-tab-a');
   const create = async () =>
     access.createPrepared(
-      await access.prepareCreate(post(), config, '+14155550123'),
+      await access.prepareCreate(
+        post(),
+        config,
+        '+14155550123',
+        'pocket-prefix',
+        proof,
+      ),
     );
   return {
     access,
     manager,
     policy,
+    proof,
+    controllerLeases,
+    voiceJoin,
     session,
     otherSession,
     headers,
@@ -190,6 +223,7 @@ test('service requires the complete explicit dependency bundle and matching fixe
     },
     { publicReadinessChecker: undefined },
     { translationReadinessChecker: undefined },
+    { controllerLeases: undefined },
     { revalidationIntervalMs: 1001 },
     { maxCalls: 101 },
   ])
@@ -198,6 +232,7 @@ test('service requires the complete explicit dependency bundle and matching fixe
         new CloudPhoneAccess({
           policy: f.policy,
           manager: f.manager,
+          controllerLeases: f.controllerLeases,
           publicReadinessChecker: async () => ({
             status: 'ready',
             code: 'PUBLIC_CALLBACK_READY',
@@ -240,7 +275,10 @@ test('first real manager publication already has server-owned authorization; sam
     }),
     false,
   );
-  denied(() => f.access.beginHangup(f.post(true), call.id), 'NOT_FOUND');
+  denied(
+    () => f.access.beginHangup(f.post(true), call.id, f.proof),
+    'NOT_FOUND',
+  );
   denied(() => f.access.readAccess({ ...read }, call.id), 'UNAUTHORIZED');
   assert.equal(f.counts().hangups, 0);
   f.manager.removeAllListeners('event');
@@ -252,13 +290,15 @@ test('prepared admissions are unforgeable and one-use with random per-call brows
     f.post(),
     config,
     '+14155550123',
+    'pocket-prefix',
+    f.proof,
   );
   denied(() => f.access.createPrepared({ ...prepared }), 'UNAUTHORIZED');
   const call = f.access.createPrepared(prepared);
   denied(() => f.access.createPrepared(prepared), 'UNAUTHORIZED');
   assert.match(f.admissions[0].browserIdentity, /^cloud-phone-[0-9a-f]{36}$/);
   assert.notEqual(f.admissions[0].browserIdentity, 'ai-phone');
-  await f.access.finishHangup(f.access.beginHangup(f.post(), call.id));
+  await f.access.finishHangup(f.access.beginHangup(f.post(), call.id, f.proof));
   await f.create();
   assert.notEqual(
     f.admissions[0].browserIdentity,
@@ -274,7 +314,13 @@ test('readiness waits and prepared results cannot commit after revocation or epo
         release = resolve;
       }),
   });
-  const pending = f.access.prepareCreate(f.post(), config, '+14155550123');
+  const pending = f.access.prepareCreate(
+    f.post(),
+    config,
+    '+14155550123',
+    'pocket-prefix',
+    f.proof,
+  );
   f.session.revoked = true;
   release({ status: 'ready', code: 'PUBLIC_CALLBACK_READY' });
   await assert.rejects(pending, (error: any) => error.code === 'UNAUTHORIZED');
@@ -285,6 +331,8 @@ test('readiness waits and prepared results cannot commit after revocation or epo
     g.post(),
     config,
     '+14155550123',
+    'pocket-prefix',
+    g.proof,
   );
   g.session.epoch += 1;
   denied(() => g.access.createPrepared(prepared), 'UNAUTHORIZED');
@@ -299,9 +347,21 @@ test('single in-flight readiness admission is bounded and its permit releases af
         release = resolve;
       }),
   });
-  const first = f.access.prepareCreate(f.post(), config, '+14155550123');
+  const first = f.access.prepareCreate(
+    f.post(),
+    config,
+    '+14155550123',
+    'pocket-prefix',
+    f.proof,
+  );
   await assert.rejects(
-    f.access.prepareCreate(f.post(), config, '+14155550123'),
+    f.access.prepareCreate(
+      f.post(),
+      config,
+      '+14155550123',
+      'pocket-prefix',
+      f.proof,
+    ),
     (error: any) => error.code === 'BUSY',
   );
   assert.equal(f.counts().publicChecks, 1);
@@ -310,7 +370,13 @@ test('single in-flight readiness admission is bounded and its permit releases af
     first,
     (error: any) => error.code === 'PUBLIC_CALLBACK_UNREACHABLE',
   );
-  const next = f.access.prepareCreate(f.post(), config, '+14155550123');
+  const next = f.access.prepareCreate(
+    f.post(),
+    config,
+    '+14155550123',
+    'pocket-prefix',
+    f.proof,
+  );
   assert.equal(f.counts().publicChecks, 2);
   release({ status: 'ready', code: 'PUBLIC_CALLBACK_READY' });
   f.access.createPrepared(await next);
@@ -323,6 +389,8 @@ test('unpublished factory failures roll back registrations without revoked-owner
       f.post(),
       config,
       '+14155550123',
+      'pocket-prefix',
+      f.proof,
     );
     assert.throws(
       () => f.access.createPrepared(prepared),
@@ -333,7 +401,10 @@ test('unpublished factory failures roll back registrations without revoked-owner
   const g = fixture(t, { maxCalls: 1 });
   const original = g.manager.createOutbound;
   g.manager.createOutbound = (_config, _to, _engine, admission) => {
-    admission.beforePublish('unpublished-attempt');
+    admission.beforePublish('unpublished-attempt', {
+      identity: admission.browserIdentity,
+      nonce: 'fake-nonce',
+    });
     g.session.revoked = true;
     throw new Error('Unpublished test failure');
   };
@@ -341,6 +412,8 @@ test('unpublished factory failures roll back registrations without revoked-owner
     g.post(),
     config,
     '+14155550123',
+    'pocket-prefix',
+    g.proof,
   );
   assert.throws(
     () => g.access.createPrepared(prepared),
@@ -369,6 +442,8 @@ test('published creation failure retains ownership and immediately enters safety
     f.post(),
     config,
     '+14155550123',
+    'pocket-prefix',
+    f.proof,
   );
   assert.throws(
     () => f.access.createPrepared(prepared),
@@ -395,13 +470,14 @@ test('hangup accepts synchronous intent before provider cleanup and cleanup cont
       }),
   });
   const call = await f.create();
+  const voice = await f.access.prepareVoice(f.post(), call.id, f.proof);
   f.manager.connectBrowser({
-    ...call.connectionParams,
+    ...voice.params,
     From: `client:${f.admissions[0].browserIdentity}`,
     CallSid: `CA${'1'.repeat(32)}`,
   });
   const context = f.post();
-  const intent = f.access.beginHangup(context, call.id);
+  const intent = f.access.beginHangup(context, call.id, f.proof);
   assert.equal(f.counts().hangups, 0);
   assert.equal(f.manager.activeSession?.status, 'ending');
   assert.equal(f.manager.isCleanupConfirmed(call.id), false);
@@ -422,8 +498,9 @@ test('hangup accepts synchronous intent before provider cleanup and cleanup cont
 test('lifecycle expires an owned active call without an SSE subscriber and never treats POST context as read', async (t) => {
   const f = fixture(t);
   const call = await f.create();
+  const voice = await f.access.prepareVoice(f.post(), call.id, f.proof);
   f.manager.connectBrowser({
-    ...call.connectionParams,
+    ...voice.params,
     From: `client:${f.admissions[0].browserIdentity}`,
     CallSid: `CA${'2'.repeat(32)}`,
   });
@@ -436,8 +513,9 @@ test('lifecycle expires an owned active call without an SSE subscriber and never
 test('an observer failure after an authorized end intent cannot strand provider cleanup', async (t) => {
   const f = fixture(t);
   const call = await f.create();
+  const voice = await f.access.prepareVoice(f.post(), call.id, f.proof);
   f.manager.connectBrowser({
-    ...call.connectionParams,
+    ...voice.params,
     From: `client:${f.admissions[0].browserIdentity}`,
     CallSid: `CA${'3'.repeat(32)}`,
   });
@@ -446,10 +524,13 @@ test('an observer failure after an authorized end intent cannot strand provider 
       throw new Error('End subscriber test failure');
   };
   f.manager.on('event', listener);
-  denied(() => f.access.beginHangup(f.post(true), call.id), 'NOT_FOUND');
+  denied(
+    () => f.access.beginHangup(f.post(true), call.id, f.proof),
+    'NOT_FOUND',
+  );
   assert.equal(f.counts().hangups, 0);
   assert.throws(
-    () => f.access.beginHangup(f.post(), call.id),
+    () => f.access.beginHangup(f.post(), call.id, f.proof),
     /End subscriber test failure/,
   );
   f.manager.off('event', listener);
@@ -564,4 +645,175 @@ test('session commit rejects declared async callbacks before effects and stale c
     'UNAUTHORIZED',
   );
   assert.equal(effects, 0);
+});
+
+test('controlled reservations require a lease and use Pocket without global browser presence', async (t) => {
+  const f = fixture(t);
+  assert.equal(f.manager.available, false);
+  await assert.rejects(
+    f.access.prepareCreate(f.post(), config, '+14155550123'),
+    (error: any) => error.code === 'FORBIDDEN',
+  );
+  for (const engine of ['legacy', 'continuous', 'nano-captions'] as const)
+    await assert.rejects(
+      f.access.prepareCreate(f.post(), config, '+14155550123', engine, f.proof),
+      (error: any) => error.code === 'INVALID_TRANSLATION_ENGINE',
+    );
+  assert.equal(f.counts().publicChecks, 0);
+  assert.equal(f.counts().factories, 0);
+  const prepared = await f.access.prepareCreate(
+    f.post(),
+    config,
+    '+14155550123',
+    undefined,
+    f.proof,
+  );
+  assert.equal(prepared.translationEngine, 'pocket-prefix');
+  const call = f.access.createPrepared(prepared);
+  assert.equal(call.translationEngine, 'pocket-prefix');
+  assert.equal(f.counts().translationChecks, 1);
+  denied(() => f.access.beginHangup(f.post(), call.id), 'FORBIDDEN');
+  denied(
+    () =>
+      f.access.beginHangup(f.post(), call.id, {
+        ...f.proof,
+        tabId: 'other-tab',
+      }),
+    'FORBIDDEN',
+  );
+  denied(
+    () =>
+      f.access.beginHangup(f.post(), call.id, {
+        ...f.proof,
+        epoch: f.proof.epoch - 1,
+      }),
+    'FORBIDDEN',
+  );
+  assert.equal(f.access.ownedActive(f.read())?.id, call.id);
+  assert.throws(
+    () => f.access.acquireController(f.post(), 'other-tab'),
+    (error: any) => error.code === 'CONTROLLER_BUSY',
+  );
+});
+
+test('revoking the controller during readiness refuses creation with the login still valid', async (t) => {
+  let release: (result: any) => void;
+  const f = fixture(t, {
+    publicChecker: () =>
+      new Promise((resolve) => {
+        release = resolve;
+      }),
+  });
+  const pending = f.access.prepareCreate(
+    f.post(),
+    config,
+    '+14155550123',
+    'pocket-prefix',
+    f.proof,
+  );
+  f.access.revokeController(f.post(), f.proof);
+  release({ status: 'ready', code: 'PUBLIC_CALLBACK_READY' });
+  await assert.rejects(pending, (error: any) => error.code === 'FORBIDDEN');
+  assert.equal(f.session.revoked, false);
+  assert.equal(f.manager.activeSession, null);
+  assert.equal(f.counts().factories, 0);
+});
+
+test('a missing Voice permission port rejects connection rather than falling back to local token identity', async (t) => {
+  const f = fixture(t, { noVoice: true });
+  const call = await f.create();
+  await assert.rejects(
+    f.access.prepareVoice(f.post(), call.id, f.proof),
+    (error: any) =>
+      error.code === 'VOICE_CONNECTION_NOT_READY' && error.statusCode === 503,
+  );
+  assert.throws(
+    () =>
+      f.manager.connectBrowser({
+        ...call.connectionParams,
+        From: `client:${f.admissions[0].browserIdentity}`,
+        CallSid: `CA${'5'.repeat(32)}`,
+        join: 'not-a-permit',
+      }),
+    (error: any) => error.code === 'VOICE_CONNECTION_NOT_READY',
+  );
+  assert.equal(f.counts().hangups, 0);
+});
+
+test('Voice delivery uses its private response and invalid callbacks cannot consume a legitimate join', async (t) => {
+  const f = fixture(t);
+  const call = await f.create();
+  const context = f.post();
+  const voice = await f.access.prepareVoice(context, call.id, f.proof);
+  f.access.assertVoiceResponseCurrent(context, call.id, voice);
+  denied(
+    () => f.access.assertVoiceResponseCurrent(context, call.id, { ...voice }),
+    'UNAUTHORIZED',
+  );
+  const fields = {
+    ...voice.params,
+    From: `client:${voice.grant.identity}`,
+    CallSid: `CA${'6'.repeat(32)}`,
+  };
+  for (const bad of [
+    { nonce: 'wrong' },
+    { From: 'client:ai-phone' },
+    { CallSid: 'invalid-sid' },
+  ])
+    assert.throws(() => f.manager.connectBrowser({ ...fields, ...bad }));
+  assert.equal(f.counts().hangups, 0);
+  assert.match(f.manager.connectBrowser(fields), /<Stream/);
+  assert.match(f.manager.connectBrowser(fields), /<Stream/); // Same provider SID retry; no fresh grant.
+  assert.throws(
+    () =>
+      f.manager.connectBrowser({ ...fields, CallSid: `CA${'7'.repeat(32)}` }),
+    (error: any) => error.code === 'CALL_SID_MISMATCH',
+  );
+});
+
+test('controller loss expires a live browser leg while authenticated read access remains valid', async (t) => {
+  const f = fixture(t, { leaseTtlMs: 1000 });
+  const call = await f.create();
+  const voice = await f.access.prepareVoice(f.post(), call.id, f.proof);
+  f.manager.connectBrowser({
+    ...voice.params,
+    From: `client:${voice.grant.identity}`,
+    CallSid: `CA${'8'.repeat(32)}`,
+  });
+  f.advance(11000);
+  f.access.readAccess(f.read(), call.id); // Reading does not extend the controller lease.
+  await waitFor(() => f.manager.isCleanupConfirmed(call.id));
+  assert.equal(f.session.revoked, false);
+  assert.equal(f.counts().hangups, 1);
+  assert.equal(f.manager.activeSession, null);
+  assert.throws(
+    () => f.access.renewController(f.post(), f.proof),
+    (error: any) => error.code === 'FORBIDDEN',
+  );
+  const next = f.access.acquireController(f.post(), 'new-tab-after-cleanup');
+  assert.ok(next.epoch > f.proof.epoch);
+});
+
+test('natural completion retries unconfirmed reservation release and blocks the next controller and call', async (t) => {
+  let releaseAttempts = 0;
+  let failRelease = true;
+  const f = fixture(t, { voiceRelease: async () => {
+    releaseAttempts += 1;
+    if (failRelease) throw new Error('OFFLINE_RELEASE_UNCONFIRMED');
+  } });
+  const call = await f.create();
+  await f.access.prepareVoice(f.post(), call.id, f.proof);
+  await f.manager.end(call.id); // Natural/setup failure cleanup, not service hangup.
+  assert.equal(f.manager.activeSession, null);
+  await assert.rejects(f.access.prepareCreate(f.post(), config, '+14155550123', 'pocket-prefix', f.proof),
+    (error: any) => error.code === 'CALL_CLEANUP_UNCONFIRMED');
+  f.access.revokeController(f.post(), f.proof);
+  assert.throws(() => f.access.acquireController(f.post(), 'next-tab'),
+    (error: any) => error.code === 'CONTROLLER_BUSY');
+  await waitFor(() => releaseAttempts > 0);
+  assert.equal(f.voiceJoin.cleanupUnconfirmed, true);
+  failRelease = false;
+  await waitFor(() => !f.voiceJoin.cleanupUnconfirmed);
+  const next = f.access.acquireController(f.post(), 'next-tab');
+  assert.ok(next.epoch > f.proof.epoch);
 });
