@@ -24,6 +24,11 @@
     "mountPath": "/data",
     "privateDirectory": "/data/phone-journal",
     "ownerMode": "0700",
+    "applicationStorageBudgetBytes": 1048576,
+    "platformMinimumVolumeSizeVerified": false,
+    "persistentStorageLifecycleApprovalRequired": true,
+    "neonAdapterImplemented": false,
+    "automaticLedgerDeletion": false,
     "automaticCrashLockRemoval": false
   },
   "supplierCallsDuringStartup": 0,

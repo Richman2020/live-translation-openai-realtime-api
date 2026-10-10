@@ -38,6 +38,8 @@
 
 ## 配置与启动
 
+持久存储仍是部署阻塞：代码读取账本上限 64 KiB，连同原子替换临时副本、64 字节初始化标记、锁和目录，应用侧预留约 1 MiB 已有余量；这不是平台卷最小规格。[官方卷参考](https://docs.railway.com/volumes/reference)列出 Hobby 默认 5 GB、暂不支持缩小，并按实际占用计费（空卷也有文件系统元数据）。停进程不能视为停止卷费用，一小时应用截止不会回收存储。测试后仍可能有未知 SID 或 usage pending，不能删除账本并重建余额；主线程须先落实获批的费用/保留期限、私有持久归档与卷删除生命周期。本轮不创建卷、关闭保护或自动删除账本。当前没有已实现并验收的无常驻收费适配器；已批准的 Neon 免费项目可作后续设计候选，但尚无事务 journal 适配，不能冒充可直接替换。
+
 主线程已分配 `https://ai-phone-test-staging.up.railway.app`，尚未部署或核验健康。未来 `CLOUD_PUBLIC_ORIGIN` 与 `PUBLIC_BASE_URL` 均精确使用此 origin；Google redirect URI 为 `https://ai-phone-test-staging.up.railway.app/auth/google/callback`。TwiML App Voice Request URL 为 `https://ai-phone-test-staging.up.railway.app/voice/client`、POST；媒体为 `wss://ai-phone-test-staging.up.railway.app/voice/media`，健康路径为 `/api/health`。每通 `/voice/connect`、`/voice/status`、`/voice/stream-status` 的 `sessionId/role/nonce` 查询由服务器生成，不能配置为缺参数的全局回调；所有语音回调仍须供应商签名、账户与当前通话归属检查。云候选不开放 `/voice/incoming`，不要运行旧本机自动改绑脚本。
 
 安全填写分工如下，完整名单及默认拒绝值见下面模板；本任务没有设置任何实际变量：

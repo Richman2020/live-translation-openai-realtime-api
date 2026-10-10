@@ -31,6 +31,10 @@
 
 下一步仅由主线程协调真实安全配置、Google 固定 `${CLOUD_PUBLIC_ORIGIN}/auth/google/callback`、唯一身份/目标、所选模式全部模型能力和费率上界、持久卷与实际平台 HTTPS/WSS/代理头/health/单实例验证。确认标记是运维声明而非 API 连通证据；应用截止也不封顶基础设施账单。真实登录、麦克风到普通手机、数字否定/修订、持续积压、自然度与耳听延迟均未验收，不承诺零延迟或本人声音。完成开发分支推送与精确 CI 后停止，不合并或自行开启付费/下载/数据库/部署实验。
 
+代码提交 `3f862353831bc598b84a051dbcc60f5ca1778656` 的 [真实 CI run 38040204802](https://github.com/Richman2020/live-translation-openai-realtime-api/actions/runs/38040204802) 已完整成功，job `114178754127`。checkout merge `5ac36510723e32a883b0d8fdfd47a750c16329bf` 明确将该头合测到功能 base `df3c447`。锁定安装、SDK 准备/构建、类型、1093 项回归、真实云 Docker build、镜像 SDK 哈希/无私密 env、无网络容器编译入口缺配置拒绝、全部五组浏览器及 diff 均通过；本地 Docker 未完成的限制保留历史，远端镜像可构建已有实际证据。最终文档补充头及精确 CI 以 PR 回读为准。
+
+补充当前停止点：主线程明确一小时试验结束后持续卷费用尚未授权，停止进程不停止存储计费。应用账本读取上限 64 KiB，含替换副本/锁/标记预留约 1 MiB 即有余量；Railway Hobby 官方默认 5 GB、不可缩小，不能把应用容量当平台最小卷或声称空卷免费。没有已验收的无常驻收费持久适配器，Neon 尚未接线；不能临时替换或删账本重置预算。须先协调持久归档、残余 SID/usage 责任与卷删除/费用生命周期，本任务不创建卷。细节见限时云候选说明。
+
 ## 此前：Google单账号登录与Pocket官方材料审计（2026-10-09）
 
 - 从真实远端干净基线 `3d4660bcaac1beddc5c74f574329b383b8827dc5` 继续，该头 [CI run 37920837788](https://github.com/Richman2020/live-translation-openai-realtime-api/actions/runs/37920837788) 已成功；沿用 `codex/cloud-phone-conversation-20261009` / [草稿PR #3](https://github.com/Richman2020/live-translation-openai-realtime-api/pull/3)，base仍为PR #2功能分支 `df3c447`。用户明确取消不等于暂停，已选择Google和Railway Hobby；真实账号、测试电话与秘密不写仓库、示例或日志，没有连接用户电脑或覆盖并发修改。
