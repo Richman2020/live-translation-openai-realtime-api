@@ -1,0 +1,13 @@
+**
+!Dockerfile.cloud
+!Dockerfile.cloud.dockerignore
+!package.json
+!package-lock.json
+!tsconfig.json
+!tsconfig.build.json
+!src/
+!src/**
+!public/
+!public/**
+!scripts/
+!scripts/prepare-desktop.mjs

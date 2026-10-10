@@ -13,6 +13,21 @@ export type TranscriptEvent = {
   text: string;
   final: boolean;
   at: number;
+  /** Explicit source/translation correspondence, never inferred from text. */
+  utteranceId?: string;
+  pairing?: 'explicit' | 'unpaired';
+  boundary?: 'utterance' | 'semantic' | 'diagnostic';
+  revision?: number;
+};
+
+export type UtterancePlaybackEvent = {
+  utteranceId: string;
+  role: TranslationRole;
+  at: number;
+  status: 'queued' | 'sent' | 'cancelled';
+  /** Producer complete; all delivery marks are still needed for played state. */
+  sealed?: boolean;
+  expectedDeliveryCount?: number;
 };
 
 export type TranslationMetric = {
@@ -50,6 +65,8 @@ export type CaptionState = {
 };
 
 export type TranslationAudioDiagnostic = {
+  /** Set only when the bridge knows the precise translated source segment. */
+  utteranceId?: string;
   audioKind?: 'original' | 'translation';
   prefixSequence?: number;
   role: TranslationRole;
@@ -105,6 +122,8 @@ export type TranslationBridgeOptions = {
   transcriptionModel?: string;
   proxyUrl?: string;
   onTranscript: (event: TranscriptEvent) => void;
+  onConversationTranscript?: (event: TranscriptEvent) => void;
+  onUtterancePlayback?: (event: UtterancePlaybackEvent) => void;
   onFailure: (reason: string) => void;
   onMetric?: (metric: TranslationMetric) => void;
   onConnection?: (event: TranslationConnection) => void;
@@ -916,6 +935,9 @@ export class TranslationBridge {
       throw new Error('transcript_too_large');
     const update: TranscriptEvent = {
       id,
+      utteranceId: `${role}:${itemId}:${event.content_index}`,
+      pairing: 'explicit',
+      boundary: 'utterance',
       role,
       kind,
       text,

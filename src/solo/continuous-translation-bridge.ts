@@ -7,11 +7,13 @@ import {
   type ContinuousTranslationAudioMetadata,
   type ContinuousTranslationClient,
   type ContinuousTranslationOptions,
+  type ContinuousTranslationTransportUsage,
 } from './continuous-translation-client';
 import { muLawToPcm16, Pcm24kToPcmu, PcmuToPcm24k } from './translation-pcm';
 import { createNanoTextCommitter } from './nano-text-committer';
 import {
   createOutgoingPrefixClient,
+  type OutgoingPrefixClient,
   type OutgoingPrefixOptions,
 } from './outgoing-prefix-client';
 import {
@@ -24,6 +26,7 @@ import type {
   TranslationAudioDiagnostic,
   TranslationBridgeOptions,
   TranslationRole,
+  UtterancePlaybackEvent,
 } from './translation-bridge';
 
 export type LocalVoiceSynthesizer = {
@@ -59,7 +62,44 @@ export type ContinuousTranslationBridgeOptions = TranslationBridgeOptions & {
   /** Remote PCMU goes straight to the headset; ASR/text is an independent branch. */
   remoteCaptions?: boolean;
   createCaptionClient?: (options: RemoteCaptionOptions) => RemoteCaptionClient;
+  /** Independent paired text captions; never gate or replace native speech. */
+  outgoingCaptions?: boolean;
+  onOutgoingCaptionState?: (event: {
+    role: 'local';
+    state: 'connecting' | 'ready' | 'failed';
+    translationSource: 'independent_text';
+  }) => void;
+  admitAudio?: (event: ContinuousBridgeAudioAdmission) => boolean;
+  onNativeTransportUsage?: (
+    event: ContinuousTranslationTransportUsage & { role: TranslationRole },
+  ) => void;
 };
+
+export type ContinuousBridgeAudioAdmission = {
+  role: TranslationRole;
+  path:
+    | 'native_translation'
+    | 'outgoing_captions'
+    | 'remote_captions'
+    | 'return_original';
+  stage: 'connect' | 'input' | 'output';
+  /** PCM16 at 24 kHz, except return_original which is PCMU at 8 kHz. */
+  bytes: number;
+  audioMs: number;
+};
+
+/** Text translation of a source section, not a transcript of native speech. */
+export type IndependentOutgoingCaption = TranscriptEvent & {
+  captionSource: 'independent_text';
+  audioCorrespondence: 'none';
+};
+
+/** Unpaired append-only native text, never a final semantic sentence. */
+export type NativeContinuousCaption = TranscriptEvent &
+  (
+    | { captionSource: 'native_output'; audioCorrespondence: 'generated_only' }
+    | { captionSource: 'native_input'; audioCorrespondence: 'none' }
+  );
 
 type Phone = {
   socket: WebSocket;
@@ -76,8 +116,12 @@ type Provider = {
   transcript: string;
   transcriptSequence: number;
   transcriptAt: number;
+  sourceTranscript: string;
+  sourceTranscriptSequence: number;
+  sourceTranscriptAt: number;
 };
 type Delivery = {
+  utteranceId?: string;
   role: TranslationRole;
   recipientRole: TranslationRole;
   streamSid: string;
@@ -201,7 +245,13 @@ export class ContinuousTranslationBridge {
     text: string;
     at: number;
     prefixSequence?: number;
+    utteranceId?: string;
+    finalPart?: boolean;
   }[] = [];
+
+  private readonly pendingUtterances = new Set<string>();
+
+  private readonly utteranceDeliveryCounts = new Map<string, number>();
 
   private prefixSequence = 0;
 
@@ -223,6 +273,20 @@ export class ContinuousTranslationBridge {
 
   private captionPendingBytes = 0;
 
+  private readonly captionUtterances = new Set<string>();
+
+  private outgoingCaptionClient?: OutgoingPrefixClient;
+
+  private outgoingCaptionReady = false;
+
+  private outgoingCaptionFailed = false;
+
+  private readonly outgoingCaptionInput = new PcmuToPcm24k();
+
+  private outgoingCaptionPending: Buffer[] = [];
+
+  private outgoingCaptionPendingBytes = 0;
+
   private directDelivery?: Delivery;
 
   private directMarkTimer?: ReturnType<typeof setTimeout>;
@@ -242,6 +306,16 @@ export class ContinuousTranslationBridge {
       (!options.localVoice || !options.remoteCaptions)
     )
       throw new Error('INVALID_PREFIX_BRIDGE_OPTIONS');
+    if (
+      options.outgoingCaptions &&
+      (options.localVoice || options.outgoingPrefixes)
+    )
+      throw new Error('INVALID_OUTGOING_CAPTION_BRIDGE_OPTIONS');
+    if (
+      options.admitAudio !== undefined &&
+      typeof options.admitAudio !== 'function'
+    )
+      throw new Error('INVALID_CONTINUOUS_ADMISSION_OPTIONS');
     if (options.localVoice && !options.outgoingPrefixes) {
       this.nanoCommitter = createNanoTextCommitter({
         boundaryDelayMs: options.sentenceBoundaryDelayMs,
@@ -411,11 +485,13 @@ export class ContinuousTranslationBridge {
     this.listen(socket, 'error', () =>
       this.shutdown(`continuous_phone_error:${role}`),
     );
-    // Prepare the new local text pipeline while the destination is ringing.
+    // The controlled browser flow waits for local provider readiness before
+    // dialing. Prepare its native/text pipeline while the destination rings.
     // Microphone packets remain ignored until both authenticated legs attach.
     if (
       role === 'local' &&
-      this.options.outgoingPrefixes &&
+      (this.options.outgoingPrefixes ||
+        (this.options.remoteCaptions && !this.options.localVoice)) &&
       !this.providers.has('local')
     )
       this.startProvider('local');
@@ -428,6 +504,8 @@ export class ContinuousTranslationBridge {
             this.startCaptions();
           else this.startProvider(source);
         }
+        if (source === 'local' && this.options.outgoingCaptions && !this.closed)
+          this.startOutgoingCaptions();
       }
     }
   }
@@ -454,6 +532,7 @@ export class ContinuousTranslationBridge {
   }
 
   private startProvider(role: TranslationRole): void {
+    if (!this.admit(role, 'native_translation', 'connect', 0, 0)) return;
     const provider: Provider = {
       ready: false,
       input: new PcmuToPcm24k(),
@@ -461,6 +540,9 @@ export class ContinuousTranslationBridge {
       transcript: '',
       transcriptSequence: 0,
       transcriptAt: 0,
+      sourceTranscript: '',
+      sourceTranscriptSequence: 0,
+      sourceTranscriptAt: 0,
     };
     this.providers.set(role, provider);
     try {
@@ -472,7 +554,10 @@ export class ContinuousTranslationBridge {
               targetLanguage: role === 'local' ? 'en' : 'zh',
               proxyUrl: this.options.proxyUrl,
               timeoutMs: this.options.sessionTimeoutMs,
-              createWebSocket: this.options.createWebSocket,
+              createWebSocket: this.guardedSocketFactory(
+                role,
+                'native_translation',
+              ),
               onAudio: (pcm, metadata) =>
                 this.onAudio(role, provider, pcm, metadata),
               onSessionMetadata: (metadata) => {
@@ -489,6 +574,17 @@ export class ContinuousTranslationBridge {
                 }
               },
               onTranscript: (delta) => this.onTranscript(role, provider, delta),
+              onInputTranscript: (delta) =>
+                this.onTranscript(role, provider, delta, 'original'),
+              onTransportUsage: (event) => {
+                if (this.closed || this.providers.get(role) !== provider)
+                  return;
+                try {
+                  this.options.onNativeTransportUsage?.({ ...event, role });
+                } catch {
+                  // Transport observations never bypass the synchronous gate.
+                }
+              },
               ...(role === 'local' && this.nanoCommitter
                 ? {
                     onTranslatedText: (delta: string) =>
@@ -545,10 +641,23 @@ export class ContinuousTranslationBridge {
           /* UI only. */
         }
       },
+      onConversationTranscript: (event) => {
+        if (this.closed || this.providers.get('local') !== provider) return;
+        try {
+          this.options.onConversationTranscript?.(event);
+        } catch {
+          /* Captions cannot interrupt speech. */
+        }
+      },
       onCommit: (segment) => {
         if (this.closed || this.providers.get('local') !== provider) return;
         this.prefixSequence += 1;
-        this.enqueueNano(segment.text, this.prefixSequence);
+        this.enqueueNano(
+          segment.text,
+          this.prefixSequence,
+          segment.utteranceId,
+          segment.finalPart,
+        );
         try {
           const at = (this.options.now || Date.now)();
           this.options.onMetric?.({
@@ -614,6 +723,7 @@ export class ContinuousTranslationBridge {
 
   private startCaptions(): void {
     this.captionState('connecting');
+    if (!this.admit('remote', 'remote_captions', 'connect', 0, 0)) return;
     try {
       const client = (
         this.options.createCaptionClient || createRemoteCaptionClient
@@ -622,10 +732,12 @@ export class ContinuousTranslationBridge {
         proxyUrl: this.options.proxyUrl,
         textModel: this.options.model,
         timeoutMs: this.options.sessionTimeoutMs,
-        createWebSocket: this.options.createWebSocket,
+        createWebSocket: this.guardedSocketFactory('remote', 'remote_captions'),
         now: this.options.now,
         onTranscript: (event) => {
           if (!this.closed && !this.captionFailed) {
+            this.separateNativeDisplay(event);
+            if (this.captionFailed) return;
             try {
               this.options.onTranscript(event);
             } catch {
@@ -672,14 +784,204 @@ export class ContinuousTranslationBridge {
       return;
     }
     try {
-      for (let offset = 0; offset < audio.length; offset += MAX_APPEND_BYTES)
-        this.captionClient.append(
-          this.captionInput.push(
-            audio.subarray(offset, offset + MAX_APPEND_BYTES),
-          ),
+      for (let offset = 0; offset < audio.length; offset += MAX_APPEND_BYTES) {
+        const pcm = this.captionInput.push(
+          audio.subarray(offset, offset + MAX_APPEND_BYTES),
         );
+        if (
+          !this.admit(
+            'remote',
+            'remote_captions',
+            'input',
+            pcm.length,
+            pcm.length / 48,
+          )
+        )
+          return;
+        this.captionClient.append(pcm);
+      }
     } catch {
       this.failCaptions();
+    }
+  }
+
+  private admit(
+    role: TranslationRole,
+    path: ContinuousBridgeAudioAdmission['path'],
+    stage: ContinuousBridgeAudioAdmission['stage'],
+    bytes: number,
+    audioMs: number,
+  ): boolean {
+    if (this.closed) return false;
+    try {
+      if (
+        !this.options.admitAudio ||
+        this.options.admitAudio({ role, path, stage, bytes, audioMs }) === true
+      )
+        return !this.closed;
+    } catch {
+      // Never expose admission exceptions or permit an asynchronous result.
+    }
+    if (path === 'outgoing_captions') this.failOutgoingCaptions();
+    else if (path === 'remote_captions') this.failCaptions();
+    else this.shutdown(`continuous_audio_admission_denied:${role}`);
+    return false;
+  }
+
+  private guardedSocketFactory(
+    role: TranslationRole,
+    path: 'native_translation' | 'outgoing_captions' | 'remote_captions',
+  ): NonNullable<RemoteCaptionOptions['createWebSocket']> {
+    const active = () =>
+      !this.closed &&
+      (path === 'native_translation' ||
+        !(path === 'outgoing_captions'
+          ? this.outgoingCaptionFailed
+          : this.captionFailed));
+    return (url, settings) => {
+      // Recheck each native/ASR/text creation after branch-level preflight.
+      if (!active() || !this.admit(role, path, 'connect', 0, 0))
+        throw new Error('CONTINUOUS_ADMISSION_DENIED');
+      const socket = this.options.createWebSocket
+        ? this.options.createWebSocket(
+            url,
+            settings as Parameters<
+              NonNullable<TranslationBridgeOptions['createWebSocket']>
+            >[1],
+          )
+        : new WebSocket(url, settings);
+      const send = socket.send.bind(socket);
+      socket.send = ((...args: Parameters<WebSocket['send']>) => {
+        // Delayed session.update, ASR results and timers can submit requests
+        // without another audio append. Recheck every send. Zero
+        // bytes here is a guard, not a second audio charge or token estimate.
+        if (!active() || !this.admit(role, path, 'input', 0, 0)) {
+          const callback = args.at(-1);
+          if (typeof callback === 'function')
+            callback(new Error('CONTINUOUS_ADMISSION_DENIED'));
+          return;
+        }
+        send(...args);
+      }) as WebSocket['send'];
+      return socket;
+    };
+  }
+
+  private outgoingCaptionState(state: 'connecting' | 'ready' | 'failed'): void {
+    try {
+      this.options.onOutgoingCaptionState?.({
+        role: 'local',
+        state,
+        translationSource: 'independent_text',
+      });
+    } catch {
+      // Presentation cannot change audio delivery.
+    }
+  }
+
+  private failOutgoingCaptions(): void {
+    if (this.closed || this.outgoingCaptionFailed) return;
+    this.outgoingCaptionFailed = true;
+    this.outgoingCaptionReady = false;
+    this.outgoingCaptionPending = [];
+    this.outgoingCaptionPendingBytes = 0;
+    this.outgoingCaptionInput.reset();
+    try {
+      this.outgoingCaptionClient?.abort();
+    } catch {
+      /* Independent teardown. */
+    }
+    this.outgoingCaptionState('failed');
+  }
+
+  private startOutgoingCaptions(): void {
+    this.outgoingCaptionState('connecting');
+    if (!this.admit('local', 'outgoing_captions', 'connect', 0, 0)) return;
+    try {
+      const client = (
+        this.options.createPrefixClient || createOutgoingPrefixClient
+      )({
+        apiKey: this.options.apiKey,
+        proxyUrl: this.options.proxyUrl,
+        textModel: this.options.model,
+        timeoutMs: this.options.sessionTimeoutMs,
+        createWebSocket: this.guardedSocketFactory(
+          'local',
+          'outgoing_captions',
+        ),
+        now: this.options.now,
+        // Prefix diagnostic turns have different IDs. Only its explicit semantic
+        // source/translation callback is safe to show as a paired conversation.
+        onTranscript: () => {},
+        onConversationTranscript: (event) => {
+          if (this.closed || this.outgoingCaptionFailed) return;
+          const caption: IndependentOutgoingCaption = {
+            ...event,
+            captionSource: 'independent_text',
+            audioCorrespondence: 'none',
+          };
+          try {
+            this.options.onConversationTranscript?.(caption);
+          } catch {
+            /* UI only. */
+          }
+        },
+        // The independent translation never synthesizes or queues speech and
+        // never receives a native audio delivery/played association.
+        onCommit: () => {},
+        onError: () => this.failOutgoingCaptions(),
+      });
+      this.outgoingCaptionClient = client;
+      if (this.closed || this.outgoingCaptionFailed) {
+        client.abort();
+        return;
+      }
+      client.ready
+        .then(() => {
+          if (this.closed || this.outgoingCaptionFailed) return;
+          this.outgoingCaptionReady = true;
+          this.outgoingCaptionState('ready');
+          const pending = this.outgoingCaptionPending;
+          this.outgoingCaptionPending = [];
+          this.outgoingCaptionPendingBytes = 0;
+          for (const audio of pending) this.appendOutgoingCaption(audio);
+        })
+        .catch(() => this.failOutgoingCaptions());
+    } catch {
+      this.failOutgoingCaptions();
+    }
+  }
+
+  private appendOutgoingCaption(audio: Buffer): void {
+    if (this.closed || this.outgoingCaptionFailed) return;
+    if (!this.outgoingCaptionReady) {
+      if (this.outgoingCaptionPendingBytes + audio.length > MAX_PENDING_BYTES) {
+        this.failOutgoingCaptions();
+        return;
+      }
+      this.outgoingCaptionPending.push(Buffer.from(audio));
+      this.outgoingCaptionPendingBytes += audio.length;
+      return;
+    }
+    try {
+      for (let offset = 0; offset < audio.length; offset += MAX_APPEND_BYTES) {
+        const pcm = this.outgoingCaptionInput.push(
+          audio.subarray(offset, offset + MAX_APPEND_BYTES),
+        );
+        if (
+          !this.admit(
+            'local',
+            'outgoing_captions',
+            'input',
+            pcm.length,
+            pcm.length / 48,
+          )
+        )
+          return;
+        this.outgoingCaptionClient.append(pcm);
+      }
+    } catch {
+      this.failOutgoingCaptions();
     }
   }
 
@@ -729,6 +1031,16 @@ export class ContinuousTranslationBridge {
     if (this.closed) return;
     if (role === 'remote' && this.options.remoteCaptions) {
       // Forward first: no model handshake, endpointing, ASR or TTS on this path.
+      if (
+        !this.admit(
+          'remote',
+          'return_original',
+          'output',
+          audio.length,
+          audio.length / 8,
+        )
+      )
+        return;
       this.forwardOriginal(audio);
       this.appendCaption(audio);
       return;
@@ -741,9 +1053,13 @@ export class ContinuousTranslationBridge {
       }
       phone.pending.push(audio);
       phone.pendingBytes += audio.length;
+      if (role === 'local' && this.options.outgoingCaptions)
+        this.appendOutgoingCaption(audio);
       return;
     }
     this.append(role, provider, audio);
+    if (role === 'local' && this.options.outgoingCaptions)
+      this.appendOutgoingCaption(audio);
   }
 
   private append(
@@ -756,12 +1072,22 @@ export class ContinuousTranslationBridge {
         let offset = 0;
         offset < audio.length && !this.closed;
         offset += MAX_APPEND_BYTES
-      )
-        provider.client.append(
-          provider.input.push(
-            audio.subarray(offset, offset + MAX_APPEND_BYTES),
-          ),
+      ) {
+        const pcm = provider.input.push(
+          audio.subarray(offset, offset + MAX_APPEND_BYTES),
         );
+        if (
+          !this.admit(
+            role,
+            'native_translation',
+            'input',
+            pcm.length,
+            pcm.length / 48,
+          )
+        )
+          return;
+        provider.client.append(pcm);
+      }
     } catch {
       this.shutdown(`continuous_input_send_failed:${role}`);
     }
@@ -775,6 +1101,16 @@ export class ContinuousTranslationBridge {
   ): void {
     if (this.closed || this.providers.get(role) !== provider) return;
     if (role === 'local' && this.options.localVoice) return;
+    if (
+      !this.admit(
+        role,
+        'native_translation',
+        'output',
+        pcm.length,
+        pcm.length / 48,
+      )
+    )
+      return;
     // The client can deliver output immediately after resolving ready, before
     // its promise continuation runs; client protocol validation owns readiness.
     this.forward(role, provider.output.push(pcm), metadata);
@@ -784,7 +1120,12 @@ export class ContinuousTranslationBridge {
     // together with all remaining audio rather than speaking after departure.
   }
 
-  private enqueueNano(text: string, prefixSequence?: number): void {
+  private enqueueNano(
+    text: string,
+    prefixSequence?: number,
+    utteranceId?: string,
+    finalPart?: boolean,
+  ): void {
     if (this.closed) return;
     // Old mode keeps four whole-sentence jobs. Finer live clauses use the same
     // maximum text allowance (4 * 240 chars) with a separate bounded job count;
@@ -798,6 +1139,7 @@ export class ContinuousTranslationBridge {
       this.nanoQueue.length + Number(this.nanoBusy) >= jobLimit ||
       textChars + text.length > 960
     ) {
+      if (utteranceId) this.utterancePlayback(utteranceId, 'cancelled');
       this.shutdown(`${this.voicePrefix}_synthesis_queue_full:local`);
       return;
     }
@@ -805,7 +1147,12 @@ export class ContinuousTranslationBridge {
       text,
       at: (this.options.now || Date.now)(),
       ...(prefixSequence === undefined ? {} : { prefixSequence }),
+      ...(utteranceId ? { utteranceId, finalPart } : {}),
     });
+    if (utteranceId && !this.pendingUtterances.has(utteranceId)) {
+      this.pendingUtterances.add(utteranceId);
+      this.utterancePlayback(utteranceId, 'queued');
+    }
     this.processNano().catch(() =>
       this.shutdown(`${this.voicePrefix}_synthesis_failed:local`),
     );
@@ -878,7 +1225,17 @@ export class ContinuousTranslationBridge {
             });
           }
           if (this.closed) return;
-          this.forward('local', chunk);
+          this.forward(
+            'local',
+            chunk,
+            undefined,
+            job.prefixSequence,
+            job.utteranceId,
+          );
+        }
+        if (!this.closed && job.utteranceId && job.finalPart) {
+          this.pendingUtterances.delete(job.utteranceId);
+          this.utterancePlayback(job.utteranceId, 'sent', true);
         }
       }
     } catch {
@@ -900,6 +1257,8 @@ export class ContinuousTranslationBridge {
     text: string;
     at: number;
     prefixSequence?: number;
+    utteranceId?: string;
+    finalPart?: boolean;
   }): Promise<void> {
     const voice = this.options.localVoice;
     const converter = new Pcm24kToPcmu();
@@ -983,6 +1342,7 @@ export class ContinuousTranslationBridge {
       await this.forwardLocalVoice(
         converter.push(generated.pcm),
         job.prefixSequence,
+        job.utteranceId,
       );
     }
     if (this.closed) return;
@@ -991,7 +1351,12 @@ export class ContinuousTranslationBridge {
     await this.forwardLocalVoice(
       converter.push(Buffer.alloc(384)),
       job.prefixSequence,
+      job.utteranceId,
     );
+    if (!this.closed && job.utteranceId && job.finalPart) {
+      this.pendingUtterances.delete(job.utteranceId);
+      this.utterancePlayback(job.utteranceId, 'sent', true);
+    }
     // Completion is bridge consumption, including queue/phone backpressure; it
     // is not an isolated measure of Python computation or actual phone hearing.
     if (!this.closed) metric('pocket_synthesis_complete_ms');
@@ -1000,6 +1365,7 @@ export class ContinuousTranslationBridge {
   private async forwardLocalVoice(
     audio: Buffer,
     prefixSequence?: number,
+    utteranceId?: string,
   ): Promise<void> {
     for (
       let offset = 0;
@@ -1018,7 +1384,7 @@ export class ContinuousTranslationBridge {
         });
       }
       if (this.closed) return;
-      this.forward('local', chunk, undefined, prefixSequence);
+      this.forward('local', chunk, undefined, prefixSequence, utteranceId);
     }
   }
 
@@ -1026,6 +1392,32 @@ export class ContinuousTranslationBridge {
     const waiters = [...this.nanoPlaybackWaiters];
     this.nanoPlaybackWaiters.clear();
     waiters.forEach((resolve) => resolve());
+  }
+
+  private utterancePlayback(
+    utteranceId: string,
+    status: UtterancePlaybackEvent['status'],
+    sealed = false,
+  ): void {
+    try {
+      this.options.onUtterancePlayback?.({
+        utteranceId,
+        role: 'local',
+        status,
+        at: (this.options.now || Date.now)(),
+        ...(sealed
+          ? {
+              sealed: true,
+              expectedDeliveryCount:
+                this.utteranceDeliveryCounts.get(utteranceId) || 0,
+            }
+          : {}),
+      });
+    } catch {
+      // Queue presentation must never interrupt audio or cleanup.
+    }
+    if (sealed || status === 'cancelled')
+      this.utteranceDeliveryCounts.delete(utteranceId);
   }
 
   private forwardOriginal(audio: Buffer): void {
@@ -1123,6 +1515,7 @@ export class ContinuousTranslationBridge {
     audio: Buffer,
     metadata?: ContinuousTranslationAudioMetadata,
     prefixSequence?: number,
+    utteranceId?: string,
   ): void {
     if (this.closed || !audio.length) return;
     const recipientRole = opposite(role);
@@ -1147,6 +1540,7 @@ export class ContinuousTranslationBridge {
       this.sequence += 1;
       const name = `continuous_${this.sequence}`;
       const delivery: Delivery = {
+        ...(utteranceId ? { utteranceId } : {}),
         role,
         recipientRole,
         streamSid: phone.streamSid,
@@ -1175,6 +1569,11 @@ export class ContinuousTranslationBridge {
       delivery.timer.unref?.();
       phone.outstandingBytes += chunk.length;
       this.deliveries.set(name, delivery);
+      if (utteranceId)
+        this.utteranceDeliveryCounts.set(
+          utteranceId,
+          (this.utteranceDeliveryCounts.get(utteranceId) || 0) + 1,
+        );
       this.energy(delivery, chunk);
       this.diagnostic(delivery, 'generated');
       this.send(
@@ -1240,6 +1639,7 @@ export class ContinuousTranslationBridge {
   ): void {
     try {
       this.options.onAudioDiagnostic?.({
+        ...(delivery.utteranceId ? { utteranceId: delivery.utteranceId } : {}),
         ...(this.options.remoteCaptions && delivery.role === 'remote'
           ? { audioKind: 'original' as const }
           : {}),
@@ -1312,42 +1712,103 @@ export class ContinuousTranslationBridge {
     role: TranslationRole,
     provider: Provider,
     delta: string,
+    kind: TranscriptEvent['kind'] = 'translation',
   ): void {
     if (this.closed || this.providers.get(role) !== provider) return;
     // The protocol has no final-sentence boundary. Bounded cumulative display
-    // segments are diagnostic excerpts, not ASR or model-final utterances.
+    // segments are visual excerpts, not ASR-final or paired utterances. Source
+    // and target are separate namespaces even when elapsed alignment matches.
+    const source = kind === 'original';
     for (let offset = 0; offset < delta.length && !this.closed; ) {
-      if (!provider.transcript)
-        provider.transcriptAt = (this.options.now || Date.now)();
+      let text = source ? provider.sourceTranscript : provider.transcript;
+      if (!text) {
+        const at = (this.options.now || Date.now)();
+        if (source) provider.sourceTranscriptAt = at;
+        else provider.transcriptAt = at;
+      }
       const length = Math.min(
-        MAX_TRANSCRIPT_CHARS - provider.transcript.length,
+        MAX_TRANSCRIPT_CHARS - text.length,
         delta.length - offset,
       );
-      provider.transcript += delta.slice(offset, offset + length);
+      text += delta.slice(offset, offset + length);
+      if (source) provider.sourceTranscript = text;
+      else provider.transcript = text;
       offset += length;
-      const event: TranscriptEvent = {
-        id: `continuous_${role}_${provider.transcriptSequence}`,
+      const event: NativeContinuousCaption = {
+        id: source
+          ? `continuous_input_${role}_${provider.sourceTranscriptSequence}`
+          : `continuous_${role}_${provider.transcriptSequence}`,
+        pairing: 'unpaired',
+        boundary: 'diagnostic',
         role,
-        kind: 'translation',
-        text: provider.transcript,
+        kind,
+        text,
         final: false,
-        at: provider.transcriptAt,
+        at: source ? provider.sourceTranscriptAt : provider.transcriptAt,
+        ...(source
+          ? {
+              captionSource: 'native_input' as const,
+              audioCorrespondence: 'none' as const,
+            }
+          : {
+              captionSource: 'native_output' as const,
+              audioCorrespondence: 'generated_only' as const,
+            }),
       };
       try {
         this.options.onTranscript(event);
       } catch {
         // Display failure must never interrupt spoken translation.
       }
-      if (provider.transcript.length === MAX_TRANSCRIPT_CHARS) {
-        provider.transcript = '';
-        provider.transcriptSequence += 1;
+      if (text.length === MAX_TRANSCRIPT_CHARS) {
+        if (source) {
+          provider.sourceTranscript = '';
+          provider.sourceTranscriptSequence += 1;
+        } else {
+          provider.transcript = '';
+          provider.transcriptSequence += 1;
+        }
       }
+    }
+  }
+
+  private separateNativeDisplay(event: TranscriptEvent): void {
+    if (
+      this.options.localVoice ||
+      this.options.outgoingPrefixes ||
+      event.role !== 'remote' ||
+      !event.utteranceId ||
+      !event.text.trim() ||
+      this.captionUtterances.has(event.utteranceId)
+    )
+      return;
+    // Remember the whole session so a late translation or revision of an old
+    // remote turn cannot split the currently displayed local stream again.
+    if (this.captionUtterances.size >= 32768) {
+      this.failCaptions();
+      return;
+    }
+    this.captionUtterances.add(event.utteranceId);
+    const provider = this.providers.get('local');
+    if (!provider) return;
+    // A speaker change is only a display boundary. Never manufacture a final
+    // sentence, pair native streams, or change audio flow and playback evidence.
+    if (provider.transcript) {
+      provider.transcript = '';
+      provider.transcriptSequence += 1;
+    }
+    if (provider.sourceTranscript) {
+      provider.sourceTranscript = '';
+      provider.sourceTranscriptSequence += 1;
     }
   }
 
   private shutdown(reason?: string): void {
     if (this.closed) return;
     this.closed = true;
+    for (const id of this.pendingUtterances)
+      this.utterancePlayback(id, 'cancelled');
+    this.pendingUtterances.clear();
     for (const role of ROLES) this.flushInputEnergy(role);
     clearTimeout(this.directMarkTimer);
     this.directDelivery = undefined;
@@ -1358,27 +1819,34 @@ export class ContinuousTranslationBridge {
     }
     this.captionPending = [];
     this.captionPendingBytes = 0;
+    this.captionUtterances.clear();
     this.captionInput.reset();
+    try {
+      this.outgoingCaptionClient?.abort();
+    } catch {
+      /* Continue audio cleanup. */
+    }
+    this.outgoingCaptionPending = [];
+    this.outgoingCaptionPendingBytes = 0;
+    this.outgoingCaptionInput.reset();
     this.nanoCommitter?.close();
     this.nanoAbort.abort();
     this.nanoQueue.length = 0;
     this.wakeNanoPlayback();
     this.removeListeners.splice(0).forEach((remove) => remove());
     const phones = [...this.phones.values()];
-    if (this.options.localVoice) {
-      for (const phone of phones) {
-        try {
-          if (
-            phone.socket.readyState === WebSocket.OPEN &&
-            phone.socket.bufferedAmount < MAX_TRANSPORT_BYTES
-          )
-            phone.socket.send(
-              JSON.stringify({ event: 'clear', streamSid: phone.streamSid }),
-              () => {},
-            );
-        } catch {
-          /* Best effort; the session manager also ends both calls. */
-        }
+    for (const phone of phones) {
+      try {
+        if (
+          phone.socket.readyState === WebSocket.OPEN &&
+          phone.socket.bufferedAmount < MAX_TRANSPORT_BYTES
+        )
+          phone.socket.send(
+            JSON.stringify({ event: 'clear', streamSid: phone.streamSid }),
+            () => {},
+          );
+      } catch {
+        /* Best effort; the session manager also ends both calls. */
       }
     }
     for (const [role, provider] of this.providers) {

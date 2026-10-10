@@ -1,0 +1,89 @@
+{
+  "purpose": "Reviewable settings only; not an automatically applied Railway config",
+  "publicOrigin": "https://ai-phone-test-staging.up.railway.app",
+  "publicAddressStatus": "Assigned by the parent task; no deployment or health verified",
+  "googleRedirectUri": "https://ai-phone-test-staging.up.railway.app/auth/google/callback",
+  "twimlAppVoiceRequest": {
+    "url": "https://ai-phone-test-staging.up.railway.app/voice/client",
+    "method": "POST",
+    "requiresTwilioSignature": true
+  },
+  "builder": "DOCKERFILE",
+  "dockerfilePath": "Dockerfile.cloud",
+  "startCommand": "node --import=extensionless/register dist/solo/cloud-index.js",
+  "region": "us-east4-eqdc4a",
+  "replicas": 1,
+  "serverless": false,
+  "healthcheckPath": "/api/health",
+  "healthcheckTimeoutSeconds": 30,
+  "restartPolicy": "NEVER",
+  "deploymentOverlapSeconds": 0,
+  "drainingSeconds": 40,
+  "journal": {
+    "requiresExplicitPersistentVolume": true,
+    "mountPath": "/data",
+    "privateDirectory": "/data/phone-journal",
+    "ownerMode": "0700",
+    "applicationStorageBudgetBytes": 1048576,
+    "platformMinimumVolumeSizeVerified": false,
+    "persistentStorageLifecycleApprovalRequired": true,
+    "neonAdapterImplemented": false,
+    "automaticLedgerDeletion": false,
+    "automaticCrashLockRemoval": false
+  },
+  "supplierCallsDuringStartup": 0,
+  "deploymentPerformed": false,
+  "serviceModeReview": {
+    "default": "phone",
+    "environmentVariable": "CLOUD_SERVICE_MODE",
+    "phone": {
+      "retainsOriginalReviewedSettings": true,
+      "requiresFullProviderAuthorizationAndDurableBudget": true
+    },
+    "webVerification": {
+      "explicitValue": "web-verification",
+      "callsEnabled": false,
+      "requiresGoogleIdentityAndAbsoluteDeadline": true,
+      "nonGmailRequiresExpectedHostedDomainOrPinnedSubject": true,
+      "requiresProviderSecretsOrTarget": false,
+      "requiresPaidCapabilityConfirmationsOrRates": false,
+      "createsProviderJournalOrVoiceComponents": false,
+      "requiresPersistentVolume": false,
+      "publicLoginShell": "/controlled",
+      "authenticatedFixedStatus": "/api/status",
+      "disabledSurfaces": [
+        "call-control",
+        "voice",
+        "media",
+        "WebSocket upgrades"
+      ],
+      "documentation": "docs/CLOUD_WEB_VERIFICATION.md"
+    }
+  },
+  "phaseNotes": {
+    "source": {
+      "stagedCommit": "004f7ee62c2960db296880bfa987bdac9d57b0aa",
+      "newWebVerificationCodeAppliedToRailway": false,
+      "deploymentPerformed": false
+    },
+    "resourceWindow": {
+      "railwayServices": 2,
+      "combinedAuthorizedUsd": 0.5,
+      "maximumMinutes": 60,
+      "sharedStartAndStopCoordinatedByParentTask": true,
+      "applicationDeadlineIsNotPlatformBillingCap": true
+    },
+    "persistentVolume": {
+      "state": "STAGED",
+      "provisioned": false,
+      "capacityGb": 5,
+      "retentionUntilAcceptanceApproved": true,
+      "usdPerActualUsedGbMonth": 0.15,
+      "billingIncludesFilesystemMetadata": true,
+      "parentTaskOwnsProvisioningAndRetention": true,
+      "webVerificationRequiresVolume": false
+    },
+    "actualGoogleLoginVerified": false,
+    "actualPhoneCallVerified": false
+  }
+}

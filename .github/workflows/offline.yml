@@ -1,0 +1,89 @@
+name: Offline phone regression
+
+on:
+  pull_request:
+  push:
+    branches:
+      - 'codex/cloud-phone-conversation-*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: offline-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  offline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24.19.0'
+          cache: npm
+      - name: Install the existing lockfile without lifecycle scripts
+        run: npm ci --ignore-scripts --no-audit --no-fund --registry=https://registry.npmjs.org
+      - name: Prepare the locked browser SDK and build
+        run: |
+          npm run prepare:desktop
+          npm run build
+      - name: Type-check source and all test fixtures
+        run: npm run typecheck
+      - name: Offline regression (mock providers, no model download)
+        run: npm test
+      - name: Check browser JavaScript syntax
+        run: |
+          for file in public/*.js; do node --check "$file"; done
+      - name: Build the cloud image and check its offline artifact boundary
+        run: |
+          docker build --file Dockerfile.cloud --tag ai-phone-cloud-offline .
+          docker run --rm --network none --entrypoint node ai-phone-cloud-offline -e "const fs=require('node:fs'); const assert=require('node:assert/strict'); const hash=require('node:crypto').createHash('sha256').update(fs.readFileSync('public/vendor/twilio.min.js')).digest('hex'); assert.equal(hash, '35d3cb1b22e309f9884724a89250aecd2de4f1556ad7b67a7bc5e06c73dcb74a'); for (const path of ['dist/solo/cloud-index.js','dist/solo/cloud-web-verification-config.js','dist/solo/cloud-web-verification-service.js','public/web-verification.html','public/web-verification.js']) assert.ok(fs.existsSync(path), path); assert.equal(fs.existsSync('.env'), false); console.log('CLOUD_ARTIFACT_OFFLINE_OK');"
+          if docker run --rm --network none --entrypoint node ai-phone-cloud-offline --import=extensionless/register dist/solo/cloud-index.js --check > cloud-config-check.log 2>&1; then
+            exit 1
+          fi
+          node -e "require('node:assert/strict').equal(require('node:fs').readFileSync('cloud-config-check.log','utf8').trim(), 'CLOUD_RUNTIME_REQUIRED')"
+          node --input-type=module <<'JS'
+          import assert from 'node:assert/strict';
+          import { spawnSync } from 'node:child_process';
+          const fixture = {
+            CLOUD_SERVICE_MODE: 'web-verification', AI_PHONE_RUNTIME_MODE: 'cloud', PORT: '8080',
+            CLOUD_PUBLIC_ORIGIN: 'https://phone.example.com', PUBLIC_BASE_URL: 'https://phone.example.com',
+            GOOGLE_CLIENT_ID: 'fixture.apps.googleusercontent.com', GOOGLE_CLIENT_SECRET: 'offline-fixture-secret',
+            GOOGLE_ALLOWED_EMAIL: 'fixture@example.com', GOOGLE_SUBJECT: 'offline-fixture-subject',
+            CLOUD_TEST_DEADLINE: new Date(Date.now() + 600_000).toISOString(),
+          };
+          const args = ['run', '--rm', '--network', 'none', '--entrypoint', 'node'];
+          for (const [key, value] of Object.entries(fixture)) args.push('-e', `${key}=${value}`);
+          args.push('ai-phone-cloud-offline', '--import=extensionless/register', 'dist/solo/cloud-index.js', '--check');
+          const result = spawnSync('docker', args, { encoding: 'utf8' });
+          assert.equal(result.error, undefined);
+          assert.equal(result.status, 0, result.stderr);
+          assert.deepEqual(JSON.parse(result.stdout), {
+            ok: true, mode: 'cloud', serviceMode: 'web-verification', configOnly: true,
+            externalProvidersContacted: false, callsEnabled: false, supplierCallsEnabled: false,
+            phoneJournalRequired: false, singleInstance: true,
+          });
+          console.log('CLOUD_WEB_CONFIG_OFFLINE_OK');
+          JS
+      - name: Real browser acceptance with synthetic conversation events
+        run: npm run test:conversation:browser
+      - name: Actual controlled workbench with explicit offline Voice suppliers
+        run: npm run test:controlled:browser
+      - name: Continuous audio workbench and independent paired text
+        run: npm run test:controlled:continuous:browser
+      - name: Continuous audio workbench with outgoing captions disabled
+        run: npm run test:controlled:continuous:browser
+        env:
+          CONTROLLED_BROWSER_OUTGOING_PAIRED_CAPTIONS: 'false'
+      - name: Actual Google login and logout with an intercepted offline provider
+        run: npm run test:google:browser
+      - name: Web verification mode with strict offline Google login and calls disabled
+        run: npm run test:web-verification:browser
+      - name: Check patch formatting
+        # A PR checkout is a merge commit: its first parent is the PR base.
+        # Fetch that parent so the check covers this change, not the whole tree.
+        run: git diff --check HEAD^1 HEAD

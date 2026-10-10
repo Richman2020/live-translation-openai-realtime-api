@@ -10,6 +10,7 @@ import {
   type ContinuousTranslationAudioMetadata,
   type ContinuousTranslationSessionMetadata,
   type ContinuousTranslationOptions,
+  type ContinuousTranslationTransportUsage,
 } from '../src/solo/continuous-translation-client';
 
 // Protocol fixtures only: no credentials, provider calls or proof of spoken
@@ -797,4 +798,344 @@ test('aborting before ready cancels the deadline and permits callers to await la
   await assert.rejects(f.client.finish(), /CLIENT_ABORTED/);
   assert.deepEqual(f.errors, []);
   assert.equal(f.socket.closeCount, 1);
+});
+
+test('native transport observations count complete PCM including silence without implying billing', async () => {
+  const usage: ContinuousTranslationTransportUsage[] = [];
+  const f = fixture({ onTransportUsage: (event) => usage.push(event) });
+  f.acknowledge();
+  await f.client.ready;
+  f.client.append(Buffer.alloc(960));
+  f.client.append(Buffer.alloc(480));
+  f.socket.receive({
+    type: 'session.output_audio.delta',
+    delta: Buffer.alloc(1920).toString('base64'),
+  });
+  assert.deepEqual(
+    usage.map(
+      ({
+        direction,
+        pcmBytes,
+        inputPcmBytes,
+        outputPcmBytes,
+        inputAudioMs,
+        outputAudioMs,
+        scope,
+        billed,
+      }) => ({
+        direction,
+        pcmBytes,
+        inputPcmBytes,
+        outputPcmBytes,
+        inputAudioMs,
+        outputAudioMs,
+        scope,
+        billed,
+      }),
+    ),
+    [
+      {
+        direction: 'input',
+        pcmBytes: 960,
+        inputPcmBytes: 960,
+        outputPcmBytes: 0,
+        inputAudioMs: 20,
+        outputAudioMs: 0,
+        scope: 'transport_observed',
+        billed: false,
+      },
+      {
+        direction: 'input',
+        pcmBytes: 480,
+        inputPcmBytes: 1440,
+        outputPcmBytes: 0,
+        inputAudioMs: 30,
+        outputAudioMs: 0,
+        scope: 'transport_observed',
+        billed: false,
+      },
+      {
+        direction: 'output',
+        pcmBytes: 1920,
+        inputPcmBytes: 1440,
+        outputPcmBytes: 1920,
+        inputAudioMs: 30,
+        outputAudioMs: 40,
+        scope: 'transport_observed',
+        billed: false,
+      },
+    ],
+  );
+  f.client.abort();
+  f.socket.receive({
+    type: 'session.output_audio.delta',
+    delta: Buffer.alloc(960).toString('base64'),
+  });
+  assert.equal(usage.length, 3);
+  assert.deepEqual(f.audio, [Buffer.alloc(1920)]);
+});
+
+test('native input admission denies before submission, including thrown and asynchronous answers', async () => {
+  for (const admitAudio of [
+    () => false,
+    () => {
+      throw new Error('PRIVATE_BUDGET');
+    },
+    (() => Promise.resolve(true)) as unknown as NonNullable<
+      ContinuousTranslationOptions['admitAudio']
+    >,
+  ]) {
+    const usage: unknown[] = [];
+    const f = fixture({
+      admitAudio,
+      onTransportUsage: (event) => usage.push(event),
+    });
+    f.acknowledge();
+    await f.client.ready;
+    assert.throws(
+      () => f.client.append(Buffer.alloc(960)),
+      /PROVIDER_AUDIO_ADMISSION_DENIED/,
+    );
+    assert.equal(f.socket.sent.length, 1);
+    assert.deepEqual(usage, []);
+    assert.deepEqual(f.errors, ['PROVIDER_AUDIO_ADMISSION_DENIED']);
+    assert.equal(f.socket.readyState, WebSocket.CLOSED);
+  }
+});
+
+test('native denied output is observed once but never forwarded or resumed', async () => {
+  const usage: ContinuousTranslationTransportUsage[] = [];
+  const admissions: unknown[] = [];
+  const f = fixture({
+    admitAudio: (event) => {
+      admissions.push(event);
+      return event.direction === 'input';
+    },
+    onTransportUsage: (event) => usage.push(event),
+  });
+  f.acknowledge();
+  await f.client.ready;
+  f.socket.receive({
+    type: 'session.output_audio.delta',
+    delta: Buffer.alloc(96000).toString('base64'),
+  });
+  assert.deepEqual(admissions, [
+    { direction: 'output', pcmBytes: 96000, audioMs: 2000 },
+  ]);
+  assert.equal(
+    usage[0].outputPcmBytes,
+    96000,
+    'variable complete deltas remain counted',
+  );
+  assert.deepEqual(f.audio, []);
+  assert.deepEqual(f.errors, ['PROVIDER_AUDIO_ADMISSION_DENIED']);
+  f.socket.receive({
+    type: 'session.output_audio.delta',
+    delta: Buffer.alloc(960).toString('base64'),
+  });
+  assert.equal(usage.length, 1);
+});
+
+test('native admission cannot resurrect a reentrant abort and optional accounting exceptions cannot suppress audio', async () => {
+  let stop: () => void;
+  const denied = fixture({
+    admitAudio: () => {
+      stop();
+      return true;
+    },
+  });
+  stop = () => denied.client.abort();
+  denied.acknowledge();
+  await denied.client.ready;
+  assert.throws(
+    () => denied.client.append(Buffer.alloc(960)),
+    /PROVIDER_AUDIO_ADMISSION_DENIED/,
+  );
+  assert.equal(denied.socket.sent.length, 1);
+  const observer = fixture({
+    onTransportUsage: () => {
+      throw new Error('PRIVATE_OBSERVER');
+    },
+    admitAudio: () => true,
+  });
+  observer.acknowledge();
+  await observer.client.ready;
+  observer.client.append(Buffer.alloc(960));
+  observer.socket.receive({
+    type: 'session.output_audio.delta',
+    delta: Buffer.alloc(960).toString('base64'),
+  });
+  assert.deepEqual(observer.audio, [Buffer.alloc(960)]);
+  assert.deepEqual(observer.errors, []);
+  observer.client.abort();
+});
+
+test('native text appends exact deltas despite missing or repeated alignment and delayed optional source', async (t) => {
+  const source: { delta: string; metadata: unknown }[] = [];
+  const f = fixture({
+    onInputTranscript: (delta, metadata) => source.push({ delta, metadata }),
+  });
+  t.after(() => f.client.abort());
+  f.acknowledge();
+  await f.client.ready;
+  const pcm = Buffer.alloc(960, 1);
+  f.socket.receive({
+    type: 'session.output_audio.delta',
+    delta: pcm.toString('base64'),
+  });
+  assert.deepEqual(
+    f.audio,
+    [pcm],
+    'native audio precedes any optional source text',
+  );
+  for (const event of [
+    { event_id: 'target_1', delta: 'Hel' },
+    { event_id: 'target_2', delta: 'lo', elapsed_ms: 1200 },
+    { event_id: 'target_2', delta: 'lo', elapsed_ms: 1200 },
+    { event_id: 'target_3', delta: ' world', elapsed_ms: 1200 },
+    { delta: '!' },
+    { delta: '!' },
+  ])
+    f.socket.receive({ type: 'session.output_transcript.delta', ...event });
+  f.socket.receive({
+    type: 'session.input_transcript.delta',
+    event_id: 'source_1',
+    delta: '明',
+    elapsed_ms: 1200,
+  });
+  f.socket.receive({
+    type: 'session.input_transcript.delta',
+    event_id: 'source_2',
+    delta: '天',
+    elapsed_ms: 1200,
+  });
+  f.socket.receive({ type: 'session.input_transcript.delta', delta: '。' });
+  assert.equal(f.transcripts.join(''), 'Hello world!!');
+  assert.deepEqual(source, [
+    { delta: '明', metadata: { providerElapsedMs: 1200 } },
+    { delta: '天', metadata: { providerElapsedMs: 1200 } },
+    { delta: '。', metadata: {} },
+  ]);
+  assert.equal(
+    f.socket.sent[0].session.audio.input,
+    undefined,
+    'a source consumer never requests optional transcription',
+  );
+  assert.deepEqual(f.errors, []);
+});
+
+test('session event IDs prevent old duplicate audio and text beyond 512 events and remain isolated in a new client', async (t) => {
+  const first = fixture();
+  t.after(() => first.client.abort());
+  first.acknowledge();
+  await first.client.ready;
+  const audioEvent = {
+    type: 'session.output_audio.delta',
+    event_id: 'audio_old',
+    delta: Buffer.alloc(960, 1).toString('base64'),
+    elapsed_ms: 0,
+  };
+  const textEvent = {
+    type: 'session.output_transcript.delta',
+    event_id: 'text_old',
+    delta: 'Hello',
+    elapsed_ms: 0,
+  };
+  first.socket.receive(audioEvent);
+  first.socket.receive(textEvent);
+  for (let index = 0; index < 600; index += 1)
+    first.socket.receive({
+      type: 'session.output_transcript.delta',
+      event_id: `text_${index}`,
+      delta: '.',
+      elapsed_ms: 0,
+    });
+  first.socket.receive(audioEvent);
+  first.socket.receive(textEvent);
+  assert.equal(first.audio.length, 1);
+  assert.equal(first.transcripts.join(''), `Hello${'.'.repeat(600)}`);
+  first.client.abort();
+  const second = fixture();
+  t.after(() => second.client.abort());
+  second.acknowledge();
+  await second.client.ready;
+  second.socket.receive(audioEvent);
+  second.socket.receive(textEvent);
+  first.socket.receive({
+    ...textEvent,
+    event_id: 'late_old_client',
+    delta: 'STALE',
+  });
+  assert.deepEqual(second.transcripts, ['Hello']);
+  assert.equal(second.audio.length, 1);
+  assert.doesNotMatch(first.transcripts.join(''), /STALE/);
+});
+
+test('invalid provider IDs and exhausted session deduplication fail with bounded sanitized codes', async (t) => {
+  for (const id of [null, '', 'bad\nID', 'x'.repeat(257), ['array']]) {
+    const f = fixture();
+    t.after(() => f.client.abort());
+    f.acknowledge();
+    await f.client.ready;
+    f.socket.receive({
+      type: 'session.output_transcript.delta',
+      event_id: id,
+      delta: 'PRIVATE_TEXT',
+    });
+    assert.deepEqual(f.transcripts, []);
+    assert.deepEqual(f.errors, ['INVALID_PROVIDER_EVENT_ID']);
+  }
+  const bounded = fixture();
+  t.after(() => bounded.client.abort());
+  bounded.acknowledge();
+  await bounded.client.ready;
+  for (let index = 0; index <= 32768; index += 1)
+    bounded.socket.receive({
+      type: 'session.output_transcript.delta',
+      event_id: `bounded_${index}`,
+      delta: '',
+    });
+  assert.equal(bounded.transcripts.length, 32768);
+  assert.deepEqual(bounded.errors, ['PROVIDER_EVENT_LIMIT']);
+  assert.equal(bounded.socket.readyState, WebSocket.CLOSED);
+});
+
+test('finish drains source and translated text tails until session.closed while abort discards them immediately', async (t) => {
+  const source: string[] = [];
+  const drain = fixture({ onInputTranscript: (delta) => source.push(delta) });
+  t.after(() => drain.client.abort());
+  drain.acknowledge();
+  await drain.client.ready;
+  const done = drain.client.finish();
+  drain.socket.receive({
+    type: 'session.output_transcript.delta',
+    event_id: 'target_tail',
+    delta: 'Tail.',
+  });
+  drain.socket.receive({
+    type: 'session.input_transcript.delta',
+    event_id: 'source_tail',
+    delta: '尾句。',
+  });
+  assert.deepEqual(drain.transcripts, ['Tail.']);
+  assert.deepEqual(source, ['尾句。']);
+  drain.socket.receive({ type: 'session.closed' });
+  await done;
+  drain.socket.receive({
+    type: 'session.output_transcript.delta',
+    delta: 'Late.',
+  });
+  assert.deepEqual(drain.transcripts, ['Tail.']);
+  const abort = fixture();
+  abort.acknowledge();
+  await abort.client.ready;
+  const interrupted = abort.client.finish();
+  abort.client.abort();
+  await assert.rejects(interrupted, /CLIENT_ABORTED/);
+  abort.socket.receive({
+    type: 'session.output_transcript.delta',
+    delta: 'Late.',
+  });
+  assert.deepEqual(abort.transcripts, []);
+  assert.equal(abort.socket.listenerCount('message'), 0);
 });

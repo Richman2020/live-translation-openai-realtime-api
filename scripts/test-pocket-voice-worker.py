@@ -2,7 +2,11 @@
 import base64
 import hashlib
 import importlib.util
+import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -12,6 +16,28 @@ spec.loader.exec_module(worker)
 
 
 class PocketWorkerTests(unittest.TestCase):
+    def test_runtime_directory_is_local_absolute_and_explicit(self):
+        with tempfile.TemporaryDirectory(prefix="pocket fixture ") as directory:
+            self.assertEqual(worker.runtime_directory(directory), Path(directory))
+        for value in ("", "relative/model", "https://model.invalid/", "/tmp/model\nprivate", "/tmp/\0model", " /tmp/model"):
+            with self.assertRaisesRegex(ValueError, "INVALID_RUNTIME_PATH"):
+                worker.runtime_directory(value)
+
+    def test_configured_empty_runtime_fails_closed_before_model_import(self):
+        with tempfile.TemporaryDirectory() as directory:
+            environment = {key: value for key, value in os.environ.items()
+                           if key in ("PATH", "SYSTEMROOT", "WINDIR", "TEMP", "TMP")}
+            environment.update(POCKET_RUNTIME_DIR=directory, HF_HUB_OFFLINE="1",
+                               TRANSFORMERS_OFFLINE="1", PYTHONDONTWRITEBYTECODE="1")
+            result = subprocess.run([sys.executable, "-u", str(Path(worker.__file__))],
+                                    input="", text=True, capture_output=True,
+                                    env=environment, timeout=10, check=False)
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(json.loads(result.stdout),
+                             {"type": "fatal", "code": "POCKETVOICE_ASSET_MISMATCH"})
+            self.assertNotIn(directory, result.stdout)
+            self.assertEqual(list(Path(directory).iterdir()), [], "Runtime must not install or download")
+
     def test_text_and_request_validation(self):
         for text in ("", "中文", "x" * 241, "Hello\nthere.", "[laugh]", "<html>", "!!!"):
             with self.assertRaises(ValueError):
