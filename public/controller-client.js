@@ -14,7 +14,7 @@ const messages = {
   INVALID_RESPONSE: '服务返回无法使用的许可，已停止本次操作。',
   VOICE_CONNECTION_NOT_READY: '电话连接许可尚未就绪；生产预算与恢复材料仍需完成。',
   LOGOUT_UNCONFIRMED: '本页已停止控制，服务器退出尚未确认。请检查连接后重新登录。',
-  INVALID_TRANSLATION_ENGINE: '请选择固定 Michael 输出的 Pocket 翻译策略。',
+  INVALID_TRANSLATION_ENGINE: '请选择此服务允许的翻译策略。',
 };
 const fail = code => Object.assign(new Error(messages[code] || code), { code });
 const safeError = error => {
@@ -26,7 +26,7 @@ const disconnect = call => { try { call?.disconnect?.(); } catch { /* Cleanup mu
 const validId = value => typeof value === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(value);
 function safeCall(call) {
   if (!call || !validId(call.id) || typeof call.status !== 'string') return null;
-  return Object.freeze(Object.fromEntries(['id', 'status', 'to', 'from', 'translationEngine', 'translationReady', 'captionState', 'error', 'cleanupUnconfirmed']
+  return Object.freeze(Object.fromEntries(['id', 'status', 'to', 'from', 'translationEngine', 'translationReady', 'captionState', 'outgoingCaptionState', 'error', 'cleanupUnconfirmed']
     .filter(key => typeof call[key] === 'string' || typeof call[key] === 'boolean')
     .map(key => [key, call[key]])));
 }
@@ -46,7 +46,8 @@ export function createControllerClient({
   let cleanupPending = false, cleanupRequests = 0, disposed = false, renewPaused = false, attempt = null;
   let generation = 0, readSequence = 0, pendingAcquire = false, pendingRenew = false, pendingLogout = false;
   let deadlineTimer = null, renewalTimer = null;
-  let engines = ['pocket-prefix', 'pocket-captions'], defaultEngine = 'pocket-prefix';
+  let engines = [], defaultEngine = '';
+  let outgoingPairedCaptions = false;
   const requests = new Set();
   // Only in-flight cleanup retains these capabilities. They cannot restore a
   // lease or authorize a new call; each request keeps its existing timeout.
@@ -63,6 +64,7 @@ export function createControllerClient({
       controller, lease: holdsControl ? Object.freeze({ tabId: lease.tabId, epoch: lease.epoch, expiresAt: lease.expiresAt }) : null,
       call, error, cleanupPending, renewPaused, busy,
       translationEngines: Object.freeze([...engines]), defaultTranslationEngine: defaultEngine,
+      outgoingPairedCaptions,
       canAcquire: !disposed && authenticated && readConfirmed && connected && visible && controller?.mode === 'available' && !lease && !busy && !cleanupPending && !pendingAcquire,
       canControl, canStart: canControl && !activeCall() && !attempt && !busy,
       canHangup: holdsControl && cleanupRequests === 0 && Boolean(attempt || activeCall() || (cleanupPending && call)),
@@ -174,12 +176,15 @@ export function createControllerClient({
   function applyBootstrap(value) {
     if (value?.mode !== 'controlled' || typeof value.csrfToken !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(value.csrfToken) ||
         !value.controller || !['held', 'available'].includes(value.controller.mode) || typeof value.busy !== 'boolean' ||
-        !Array.isArray(value.translationEngines) || !value.translationEngines.length ||
-        value.translationEngines.some(engine => !['pocket-prefix', 'pocket-captions'].includes(engine)) ||
+        !Array.isArray(value.translationEngines) || !value.translationEngines.length || value.translationEngines.length > 3 ||
+        new Set(value.translationEngines).size !== value.translationEngines.length ||
+        value.translationEngines.some(engine => !['pocket-prefix', 'pocket-captions', 'continuous-captions'].includes(engine)) ||
+        typeof value.outgoingPairedCaptions !== 'boolean' ||
         !value.translationEngines.includes(value.defaultTranslationEngine)) throw fail('INVALID_RESPONSE');
     csrf = value.csrfToken; authenticated = true; readConfirmed = true;
     controller = Object.freeze(Object.fromEntries(['mode', 'ownSession', 'tabMatches', 'epoch', 'expiresAt'].map(key => [key, value.controller[key]]))); busy = value.busy;
     engines = [...value.translationEngines]; defaultEngine = value.defaultTranslationEngine;
+    outgoingPairedCaptions = value.outgoingPairedCaptions;
     const nextCall = safeCall(value.activeSession);
     if (nextCall) call = nextCall;
     else if (!busy && !attempt) call = null;

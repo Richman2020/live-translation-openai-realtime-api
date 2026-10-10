@@ -9,7 +9,14 @@ const sourceTime = value => typeof value === 'number' ? value : Date.parse(value
 export function adaptTranscriptEvent(value, options = {}) {
   if (!value || !validId(value.id) || !roles.has(value.role)
     || !['original', 'translation'].includes(value.kind) || typeof value.text !== 'string'
-    || value.conversationVisible === false) return null;
+    || (value.conversationVisible === false && !['native_output', 'native_input'].includes(value.captionSource))) return null;
+  const native = ['native_output', 'native_input'].includes(value.captionSource);
+  const nativeOutput = value.captionSource === 'native_output';
+  if (native && (value.role !== 'local' || value.kind !== (nativeOutput ? 'translation' : 'original')
+    || value.pairing !== 'unpaired' || value.boundary !== 'diagnostic'
+    || value.audioCorrespondence !== (nativeOutput ? 'generated_only' : 'none'))) return null;
+  if (value.captionSource !== undefined && !['native_output', 'native_input', 'independent_text'].includes(value.captionSource)) return null;
+  if (value.captionSource === 'independent_text' && value.audioCorrespondence !== 'none') return null;
   const sessionId = value.sessionId || options.sessionId;
   if (!validId(sessionId)) return null;
   const match = /^(local|remote):(original|translation):([A-Za-z0-9_-]{1,256}):(0|[1-9]\d*)$/.exec(value.id);
@@ -18,12 +25,13 @@ export function adaptTranscriptEvent(value, options = {}) {
   if (!Number.isFinite(at)) return null;
   return {
     type: 'text', sessionId,
-    utteranceId: value.utteranceId || (paired ? `${value.role}:${match[3]}:${match[4]}` : `unpaired:${value.id}`),
+    utteranceId: native ? `${nativeOutput ? 'native' : 'native-input'}:${value.id}` : value.utteranceId || (paired ? `${value.role}:${match[3]}:${match[4]}` : `unpaired:${value.id}`),
     role: value.role, kind: value.kind, text: value.text,
     final: value.final === true, revision: value.revision ?? options.revision ?? 1,
     at, sequence: value.sequence ?? options.sequence ?? 0,
     pairing: value.pairing || (paired ? 'explicit' : 'unpaired'),
     boundary: value.boundary || (paired ? 'utterance' : 'diagnostic'),
+    ...(value.captionSource ? { captionSource: value.captionSource, audioCorrespondence: value.audioCorrespondence } : {}),
   };
 }
 
@@ -61,11 +69,13 @@ export function createConversationModel(options) {
   function rowFor(event) {
     let row = utterances.get(event.utteranceId);
     if (row && row.role !== event.role) return null;
+    if (row && event.type === 'text' && (row.captionSource !== event.captionSource || row.audioCorrespondence !== event.audioCorrespondence)) return null;
     if (!row) {
       row = {
         id: event.utteranceId, sessionId, role: event.role,
         at: event.at, sequence: event.sequence ?? 0,
         pairing: event.pairing || 'unpaired', boundary: event.boundary || 'diagnostic',
+        ...(event.captionSource ? { captionSource: event.captionSource, audioCorrespondence: event.audioCorrespondence } : {}),
         original: null, translation: null, deliveries: new Map(),
         sealed: false, expectedDeliveryCount: null, lifecycle: null,
       };
@@ -86,6 +96,12 @@ export function createConversationModel(options) {
         || event.text.length > 32000 || typeof event.final !== 'boolean'
         || !['explicit', 'unpaired'].includes(event.pairing)
         || !['utterance', 'semantic', 'diagnostic'].includes(event.boundary)) return false;
+      if (event.captionSource !== undefined && !['native_output', 'native_input', 'independent_text'].includes(event.captionSource)) return false;
+      if (['native_output', 'native_input'].includes(event.captionSource) && (event.role !== 'local'
+        || event.kind !== (event.captionSource === 'native_output' ? 'translation' : 'original')
+        || event.pairing !== 'unpaired' || event.boundary !== 'diagnostic'
+        || event.audioCorrespondence !== (event.captionSource === 'native_output' ? 'generated_only' : 'none'))) return false;
+      if (event.captionSource === 'independent_text' && event.audioCorrespondence !== 'none') return false;
       const row = rowFor(event);
       if (!row) return false;
       const part = row[event.kind];
@@ -114,6 +130,7 @@ export function createConversationModel(options) {
       || (event.deliveryId !== undefined && !validId(event.deliveryId))
       || (event.sealed === true && (!Number.isSafeInteger(event.expectedDeliveryCount)
         || event.expectedDeliveryCount < 1 || event.expectedDeliveryCount > 100000))) return false;
+    if (['native_output', 'native_input', 'independent_text'].includes(utterances.get(event.utteranceId)?.captionSource)) return false;
     const row = rowFor(event);
     if (!row) return false;
     const previous = event.deliveryId ? row.deliveries.get(event.deliveryId) : row.lifecycle;
@@ -161,6 +178,7 @@ export function createConversationModel(options) {
     if (!row.snapshot) row.snapshot = Object.freeze({
       id: row.id, sessionId, role: row.role, at: row.at, sequence: row.sequence,
       pairing: row.pairing, boundary: row.boundary,
+      ...(row.captionSource ? { captionSource: row.captionSource, audioCorrespondence: row.audioCorrespondence } : {}),
       original: row.original && Object.freeze({ ...row.original }),
       translation: row.translation && Object.freeze({ ...row.translation }),
       playback: Object.freeze(playbackFor(row)),

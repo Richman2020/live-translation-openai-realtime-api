@@ -33,8 +33,20 @@ import {
   SessionManager,
   type BridgeOptions,
 } from '../src/solo/session-manager';
+import type { TranslationEngine } from '../src/solo/translation-engine';
+import type { NativeContinuousCaption } from '../src/solo/continuous-translation-bridge';
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const configuredEngine = process.env.CONTROLLED_BROWSER_TRANSLATION_ENGINE;
+if (configuredEngine && !['pocket-prefix', 'continuous-captions'].includes(configuredEngine))
+  throw new Error('Offline browser fixture supports pocket-prefix or continuous-captions.');
+const translationEngine: TranslationEngine = configuredEngine === 'continuous-captions' ? 'continuous-captions' : 'pocket-prefix';
+const continuous = translationEngine === 'continuous-captions';
+const pairedCaptionOption = process.env.CONTROLLED_BROWSER_OUTGOING_PAIRED_CAPTIONS;
+if (pairedCaptionOption !== undefined && !['true', 'false'].includes(pairedCaptionOption))
+  throw new Error('Offline outgoing paired captions flag must be true or false.');
+const outgoingPairedCaptions = !continuous || pairedCaptionOption !== 'false';
+const artifactDirectory = continuous ? outgoingPairedCaptions ? 'controlled-continuous-browser' : 'controlled-continuous-return-only-browser' : 'controlled-browser';
 const executable =
   process.env.CHROME_BIN ||
   [
@@ -505,6 +517,8 @@ try {
       return {
         attach: (role) => {
           parameters.onConnection?.({ role, state: 'ready' });
+          if (continuous && outgoingPairedCaptions && role === 'local')
+            parameters.onOutgoingCaptionState?.({ role: 'local', state: 'ready', translationSource: 'independent_text' });
           if (role === 'remote')
             parameters.onCaptionState?.({ state: 'ready' });
         },
@@ -543,6 +557,8 @@ try {
     manager,
     controllerLeases: leases,
     voiceJoin,
+    ...(continuous ? { allowedTranslationEngines: [translationEngine], defaultTranslationEngine: translationEngine } : {}),
+    outgoingPairedCaptions,
     publicReadinessChecker: async () => {
       preparations.public++;
       const gate = publicGate;
@@ -658,8 +674,23 @@ try {
   );
   check(
     (await page.state()).engine,
-    'pocket-prefix',
-    'controlled page defaults to fixed Pocket outgoing voice and original-English return',
+    translationEngine,
+    'controlled page follows the service outgoing strategy and original-English return',
+  );
+  check(
+    await page.evaluate(`[...document.getElementById('translation-engine').options].map(option=>option.value)`),
+    continuous ? ['continuous-captions'] : ['pocket-prefix', 'pocket-captions'],
+    'actual selector displays only strategies advertised by the service',
+  );
+  check(
+    await page.evaluate(`document.getElementById('connection-mode-label').textContent`),
+    continuous ? '连续英文译音 · 英文原声回程' : 'Pocket Michael 英文译音 · 英文原声回程',
+    'mode description matches the actual service strategy',
+  );
+  if (continuous) check(
+    await page.evaluate(`document.getElementById('transcript-engine-note').textContent.includes(${JSON.stringify(outgoingPairedCaptions ? '原生英文译音文字独立显示' : '显示原生英文译音文字')}) && document.getElementById('transcript-engine-note').textContent.includes('字幕不能确认译音已播放')`),
+    true,
+    outgoingPairedCaptions ? 'continuous captions distinguish native text from reference translation and playback confirmation' : 'default captions include native English and paired remote Chinese without local pairing',
   );
   await page.click('enable-device');
   await eventually(
@@ -708,10 +739,23 @@ try {
     (item) => item.path === '/api/calls' && item.method === 'POST',
   ).length;
   await dial();
-  await eventually(
-    () => manager.activeSession?.status === 'active' && bridges.length > 0,
-    'Real signed two-leg call',
-  );
+  try {
+    await eventually(
+      () => manager.activeSession?.status === 'active' && bridges.length > 0,
+      'Real signed two-leg call',
+    );
+  } catch (failure) {
+    console.error(JSON.stringify({
+      fixture: 'initial-call',
+      page: await page.state(),
+      serverStatus: manager.activeSession?.status || 'none',
+      fakeProviderCreates: providerCreates.length,
+      bridgeCount: bridges.length,
+      routes: apiRequests.map(item => ({ method: item.method, path: new URL(item.path, origin).pathname })),
+      fixtureFaults: faults,
+    }));
+    throw failure;
+  }
   await eventually(
     async () => (await page.state()).mute,
     'Page accepts real call state',
@@ -727,6 +771,16 @@ try {
     providerCreates.length,
     1,
     'actual join and bridge readiness trigger one fake dial',
+  );
+  check(
+    manager.activeSession?.translationEngine,
+    translationEngine,
+    'actual create route receives the browser selected service strategy',
+  );
+  check(
+    await page.evaluate(`document.getElementById('translation-engine').disabled`),
+    true,
+    'strategy cannot switch while the actual call is active',
   );
   check(
     await page.evaluate('window.__offlineVoice.connects'),
@@ -754,28 +808,41 @@ try {
   );
   const bridge = bridges.at(-1)!;
   const at = Date.now();
-  bridge.onConversationTranscript?.({
-    id: 'browser-local',
-    utteranceId: 'browser-local',
-    role: 'local',
-    kind: 'original',
-    text: '不是十五美元，是五十美元以内。',
-    final: true,
-    at,
-    pairing: 'explicit',
-    boundary: 'semantic',
-  });
-  bridge.onConversationTranscript?.({
-    id: 'browser-local',
-    utteranceId: 'browser-local',
-    role: 'local',
-    kind: 'translation',
-    text: 'Not fifteen dollars; under fifty dollars.',
-    final: true,
-    at,
-    pairing: 'explicit',
-    boundary: 'semantic',
-  });
+  const nativeText = 'Keep the total below fifty dollars, not fifteen.';
+  const nativeTranscript: NativeContinuousCaption = {
+    id: 'native-output', role: 'local', kind: 'translation', text: 'Keep the total',
+    final: false, at, pairing: 'unpaired', boundary: 'diagnostic',
+    captionSource: 'native_output', audioCorrespondence: 'generated_only',
+  };
+  if (continuous) {
+    bridge.onTranscript?.(nativeTranscript);
+  }
+  if (outgoingPairedCaptions) {
+    bridge.onConversationTranscript?.({
+      id: 'browser-local',
+      utteranceId: 'browser-local',
+      role: 'local',
+      kind: 'original',
+      text: '不是十五美元，是五十美元以内。',
+      final: true,
+      at,
+      pairing: 'explicit',
+      boundary: 'semantic',
+      ...(continuous ? { captionSource: 'independent_text' as const, audioCorrespondence: 'none' as const } : {}),
+    });
+    bridge.onConversationTranscript?.({
+      id: 'browser-local',
+      utteranceId: 'browser-local',
+      role: 'local',
+      kind: 'translation',
+      text: 'Not fifteen dollars; under fifty dollars.',
+      final: true,
+      at,
+      pairing: 'explicit',
+      boundary: 'semantic',
+      ...(continuous ? { captionSource: 'independent_text' as const, audioCorrespondence: 'none' as const } : {}),
+    });
+  }
   bridge.onTranscript?.({
     id: 'browser-remote',
     utteranceId: 'browser-remote',
@@ -796,10 +863,16 @@ try {
     at: at + 1,
     pairing: 'explicit',
   });
+  if (continuous) bridge.onTranscript?.({
+    ...nativeTranscript,
+    id: 'native-output-after-interruption',
+    text: ' below fifty dollars, not fifteen.',
+    at: at + 10,
+  });
   await eventually(
     () =>
       page.evaluate(
-        `document.querySelectorAll('article[data-utterance-id]').length===2`,
+        `document.querySelectorAll('article[data-utterance-id]').length===${(outgoingPairedCaptions ? 2 : 1) + (continuous ? 2 : 0)}`,
       ),
     'Native SSE paired captions',
   );
@@ -808,19 +881,49 @@ try {
       `[...document.querySelectorAll('article[data-utterance-id]')].map(row=>({id:row.dataset.utteranceId,original:row.querySelector('.conversation-original .transcript-text').textContent,translation:row.querySelector('.conversation-translation .transcript-text').textContent}))`,
     ),
     [
-      {
+      ...(continuous ? [{ id: 'native:native-output', original: '', translation: nativeTranscript.text }] : []),
+      ...(outgoingPairedCaptions ? [{
         id: 'browser-local',
         original: '不是十五美元，是五十美元以内。',
         translation: 'Not fifteen dollars; under fifty dollars.',
-      },
+      }] : []),
       {
         id: 'browser-remote',
         original: 'We can do that.',
         translation: '我们可以做到。',
       },
+      ...(continuous ? [{ id: 'native:native-output-after-interruption', original: '', translation: ' below fifty dollars, not fifteen.' }] : []),
     ],
-    'actual alternating conversation cards pair each original and translation',
+    outgoingPairedCaptions ? 'native text and sentence reference pairs remain separate in chronological conversation' : 'default shows native English and paired remote captions without inventing a local source pair',
   );
+  if (continuous) check(
+    await page.evaluate(`[...document.querySelectorAll('article[data-caption-source="native_output"] .conversation-translation .transcript-text')].map(node=>node.textContent).join('')`),
+    nativeText,
+    'native fragments preserve all characters across the intervening remote utterance',
+  );
+  if (continuous) check(
+    await page.evaluate(`(() => { const row=document.querySelector('article[data-caption-source="native_output"]'); return {label:row.querySelector('.conversation-translation .conversation-language').textContent,originalHidden:row.querySelector('.conversation-original').hidden,status:row.querySelector('.utterance-playback').dataset.playbackStatus,playback:row.querySelector('.utterance-playback').textContent}; })()`),
+    { label: '原生英文译音文字', originalHidden: true, status: 'unknown', playback: '英文译音生成文字 · 未与原文配对 · 播放未确认' },
+    'actual native text stays visible without a fabricated Chinese pair or played claim',
+  );
+  if (continuous && outgoingPairedCaptions) check(
+    await page.evaluate(`document.querySelector('article[data-caption-source="independent_text"] .conversation-translation .conversation-language').textContent`),
+    'English 参考翻译',
+    'independent English wording is labelled reference translation alongside different native text',
+  );
+  if (continuous && outgoingPairedCaptions) check(
+    await page.evaluate(`document.querySelector('article[data-utterance-id="browser-local"] .utterance-playback').dataset.playbackStatus`),
+    'unknown',
+    'paired independent text cannot invent native translated audio playback confirmation',
+  );
+  if (continuous && outgoingPairedCaptions) {
+    bridge.onOutgoingCaptionState?.({ role: 'local', state: 'failed', translationSource: 'independent_text' });
+    await eventually(() => page.evaluate(`document.getElementById('caption-status').textContent.includes('本页逐句文字暂不可用')`), 'Independent local caption failure');
+    check(await page.evaluate(`document.getElementById('caption-status').textContent.includes('对方中文字幕旁路已就绪') && !document.getElementById('mute-button').disabled`), true,
+      'local captions failing preserves remote caption status and active native audio controls');
+    bridge.onOutgoingCaptionState?.({ role: 'local', state: 'ready', translationSource: 'independent_text' });
+    await eventually(() => page.evaluate(`document.getElementById('caption-status').textContent.includes('本页逐句文字旁路已就绪')`), 'Independent local caption recovery fixture');
+  }
   const screenshotScroll = await page.evaluate('window.scrollY');
   await page.evaluate(
     `document.getElementById('transcript-scroll').scrollTop=0; document.querySelector('.transcript-card').scrollIntoView({block:'center'});`,
@@ -1510,7 +1613,7 @@ try {
     [],
     'actual page contacts no external service',
   );
-  const output = join(repo, '.runtime', 'controlled-browser');
+  const output = join(repo, '.runtime', artifactDirectory);
   await mkdir(output, { recursive: true });
   const screenshot = await page.send('Page.captureScreenshot', {
     format: 'png',
@@ -1539,10 +1642,12 @@ try {
     realSupplierCalls: 0,
     fakeProviderCreates: providerCreates.length,
     fakeProviderHangups: providerHangups.length,
+    translationEngine,
+    outgoingPairedCaptions,
     artifacts: [
-      '.runtime/controlled-browser/conversation.png',
-      '.runtime/controlled-browser/conversation-remote.png',
-      '.runtime/controlled-browser/acceptance.png',
+      `.runtime/${artifactDirectory}/conversation.png`,
+      `.runtime/${artifactDirectory}/conversation-remote.png`,
+      `.runtime/${artifactDirectory}/acceptance.png`,
     ],
     browser: await page.send('Browser.getVersion'),
   };
@@ -1553,7 +1658,7 @@ try {
   console.log(
     JSON.stringify({
       ...result,
-      screenshot: '.runtime/controlled-browser/acceptance.png',
+      screenshot: `.runtime/${artifactDirectory}/acceptance.png`,
     }),
   );
 } finally {

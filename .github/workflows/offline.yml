@@ -27,8 +27,10 @@ jobs:
           cache: npm
       - name: Install the existing lockfile without lifecycle scripts
         run: npm ci --ignore-scripts --no-audit --no-fund --registry=https://registry.npmjs.org
-      - name: Build
-        run: npm run build
+      - name: Prepare the locked browser SDK and build
+        run: |
+          npm run prepare:desktop
+          npm run build
       - name: Type-check source and all test fixtures
         run: npm run typecheck
       - name: Offline regression (mock providers, no model download)
@@ -36,10 +38,24 @@ jobs:
       - name: Check browser JavaScript syntax
         run: |
           for file in public/*.js; do node --check "$file"; done
+      - name: Build the cloud image and check its offline artifact boundary
+        run: |
+          docker build --file Dockerfile.cloud --tag ai-phone-cloud-offline .
+          docker run --rm --network none --entrypoint node ai-phone-cloud-offline -e "const fs=require('node:fs'); const assert=require('node:assert/strict'); const hash=require('node:crypto').createHash('sha256').update(fs.readFileSync('public/vendor/twilio.min.js')).digest('hex'); assert.equal(hash, '35d3cb1b22e309f9884724a89250aecd2de4f1556ad7b67a7bc5e06c73dcb74a'); assert.ok(fs.existsSync('dist/solo/cloud-index.js')); assert.equal(fs.existsSync('.env'), false); console.log('CLOUD_ARTIFACT_OFFLINE_OK');"
+          if docker run --rm --network none --entrypoint node ai-phone-cloud-offline --import=extensionless/register dist/solo/cloud-index.js --check > cloud-config-check.log 2>&1; then
+            exit 1
+          fi
+          node -e "require('node:assert/strict').equal(require('node:fs').readFileSync('cloud-config-check.log','utf8').trim(), 'CLOUD_RUNTIME_REQUIRED')"
       - name: Real browser acceptance with synthetic conversation events
         run: npm run test:conversation:browser
       - name: Actual controlled workbench with explicit offline Voice suppliers
         run: npm run test:controlled:browser
+      - name: Continuous audio workbench and independent paired text
+        run: npm run test:controlled:continuous:browser
+      - name: Continuous audio workbench with outgoing captions disabled
+        run: npm run test:controlled:continuous:browser
+        env:
+          CONTROLLED_BROWSER_OUTGOING_PAIRED_CAPTIONS: 'false'
       - name: Actual Google login and logout with an intercepted offline provider
         run: npm run test:google:browser
       - name: Check patch formatting

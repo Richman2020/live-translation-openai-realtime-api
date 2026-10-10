@@ -1,0 +1,15 @@
+# Explicit cloud build only; the existing desktop/Flex entry points stay intact.
+# Version matches the offline CI runtime. Dependencies come from package-lock.
+FROM node:24.19.0-bookworm-slim@sha256:a9f5f7c91a432850b2a8a7797adf5eadb6c733ceed61167806cee7ea7fbc29df
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci --ignore-scripts --no-audit --no-fund --registry=https://registry.npmjs.org --fetch-retries=0 --fetch-timeout=30000
+COPY tsconfig.json tsconfig.build.json ./
+COPY src ./src
+COPY public ./public
+COPY scripts/prepare-desktop.mjs ./scripts/prepare-desktop.mjs
+RUN npm run prepare:desktop && npm run build
+ENV NODE_ENV=production
+# Railway volumes are mounted at runtime; the journal validates owner/modes and
+# never falls back to an ephemeral directory. No model or secret enters the image.
+CMD ["node", "--import=extensionless/register", "dist/solo/cloud-index.js"]

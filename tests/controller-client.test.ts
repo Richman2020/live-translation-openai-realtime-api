@@ -30,7 +30,7 @@ function clock() {
     timers,
   };
 }
-function fixture() {
+function fixture({ translationEngines = ['pocket-prefix', 'pocket-captions'], defaultTranslationEngine = 'pocket-prefix', outgoingPairedCaptions = defaultTranslationEngine !== 'continuous-captions' } = {}) {
   const time = clock();
   const requests: any[] = [];
   let serverLease: any = null, active: any = null, epoch = 0, busy = false;
@@ -45,7 +45,7 @@ function fixture() {
       const held = serverLease && serverLease.expiresAt > time.now();
       return response({ mode: 'controlled', csrfToken: csrf,
         controller: { mode: held ? 'held' : 'available', ownSession: !!held, tabMatches: !!held && new URL(path, 'https://test.example').searchParams.get('tabId') === serverLease.tabId, epoch, expiresAt: held ? serverLease.expiresAt : null },
-        activeSession: active, busy, translationEngines: ['pocket-prefix', 'pocket-captions'], defaultTranslationEngine: 'pocket-prefix' });
+        activeSession: active, busy, translationEngines, defaultTranslationEngine, outgoingPairedCaptions });
     }
     if (route === '/api/controller/acquire') {
       if (serverLease && serverLease.expiresAt > time.now() || busy) return response({ error: 'CONTROLLER_BUSY' }, 409);
@@ -236,6 +236,38 @@ test('Pocket-only selection rejects legacy without modifying the ready controlle
   assert.equal(posts(f, '/api/calls').length, 0); assert.equal(f.client.state.canStart, true); await f.close();
 });
 
+test('the service continuous default reaches create and rejects unadvertised Pocket before preparing media', async () => {
+  const f = fixture({ translationEngines: ['continuous-captions'], defaultTranslationEngine: 'continuous-captions' });
+  assert.deepEqual(f.client.state.translationEngines, []);
+  await f.ready();
+  assert.deepEqual(f.client.state.translationEngines, ['continuous-captions']);
+  assert.equal(f.client.state.outgoingPairedCaptions, false);
+  let media = 0;
+  await assert.rejects(f.client.startCall('+15550000000', { translationEngine: 'pocket-prefix', prepareMedia: async () => { media += 1; }, connectVoice: async () => callFixture().call }), { code: 'INVALID_TRANSLATION_ENGINE' });
+  assert.equal(media, 0);
+  assert.equal(posts(f, '/api/calls').length, 0);
+  await f.client.startCall('+15550000000', { connectVoice: async () => callFixture().call });
+  assert.equal(posts(f, '/api/calls')[0].body.translationEngine, 'continuous-captions');
+  assert.equal(f.client.state.call.translationEngine, 'continuous-captions');
+  await f.close();
+});
+
+test('malformed or unsupported bootstrap strategies never grant controller acquisition', async () => {
+  for (const options of [
+    { translationEngines: ['continuous-captions', 'continuous-captions'], defaultTranslationEngine: 'continuous-captions' },
+    { translationEngines: ['legacy'], defaultTranslationEngine: 'legacy' },
+    { translationEngines: ['continuous-captions'], defaultTranslationEngine: 'pocket-prefix' },
+    { outgoingPairedCaptions: 'true' } as any,
+    { outgoingPairedCaptions: null } as any,
+  ]) {
+    const f = fixture(options); await f.client.boot(); f.client.setConnectionState(true);
+    assert.equal(f.client.state.canAcquire, false);
+    assert.equal(f.client.state.authenticated, false);
+    assert.equal(f.client.state.error.code, 'INVALID_RESPONSE');
+    await f.close();
+  }
+});
+
 test('accepted SDK state remains active across status refresh and same-call events', async () => {
   const f = fixture(); await f.ready(); const sdk = callFixture();
   await f.client.startCall('+15550000000', { connectVoice: async () => sdk.call });
@@ -245,6 +277,18 @@ test('accepted SDK state remains active across status refresh and same-call even
   await f.client.refresh(); f.client.handleEvent('call', { id: 'call-1', status: 'active', translationReady: true });
   assert.equal(f.client.state.phase, 'active'); assert.equal(f.client.state.canMute, true);
   assert.equal(f.client.handleEvent('call', { id: 'foreign-call', status: 'active' }), false); await f.close();
+});
+
+test('advertised comparison selection and per-direction caption state survive a controlled call projection', async () => {
+  const f = fixture({ translationEngines: ['continuous-captions', 'pocket-prefix'], defaultTranslationEngine: 'continuous-captions', outgoingPairedCaptions: true });
+  await f.ready();
+  await f.client.startCall('+15550000000', { translationEngine: 'pocket-prefix', connectVoice: async () => callFixture().call });
+  assert.equal(posts(f, '/api/calls')[0].body.translationEngine, 'pocket-prefix');
+  assert.equal(f.client.state.outgoingPairedCaptions, true);
+  f.client.handleEvent('call', { id: 'call-1', status: 'active', captionState: 'ready', outgoingCaptionState: 'failed' });
+  assert.equal(f.client.state.call.captionState, 'ready');
+  assert.equal(f.client.state.call.outgoingCaptionState, 'failed');
+  await f.close();
 });
 
 test('ordinary hangup can retain an unexpired lease but waits for server cleanup confirmation', async () => {
@@ -377,7 +421,7 @@ test('a terminal event cannot unlock dialing before the authoritative cleanup re
   const lease = f.lease();
   reading.resolve(response({ mode: 'controlled', csrfToken: f.csrf,
     controller: { mode: 'held', ownSession: true, tabMatches: true, epoch: lease.epoch, expiresAt: lease.expiresAt },
-    activeSession: null, busy: false, translationEngines: ['pocket-prefix'], defaultTranslationEngine: 'pocket-prefix' }));
+    activeSession: null, busy: false, translationEngines: ['pocket-prefix'], defaultTranslationEngine: 'pocket-prefix', outgoingPairedCaptions: true }));
   await flush(); assert.equal(f.client.state.cleanupPending, false); assert.equal(f.client.state.canStart, true); await f.close();
 });
 

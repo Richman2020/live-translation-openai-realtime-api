@@ -9,8 +9,14 @@ import type WebSocket from 'ws';
 
 import { desktopConnectivity } from './desktop-connectivity';
 import { ConnectionMaintenance } from './connection-maintenance';
-import { ConfigStore } from './config';
-import { loadPhoneRuntime, requireLocalPhoneRuntime } from './cloud-runtime';
+import { checkConfig, ConfigStore } from './config';
+import {
+  loadPhoneRuntime,
+  parsePhoneRuntime,
+  requireLocalPhoneRuntime,
+  type CloudPhoneRuntime,
+} from './cloud-runtime';
+import { CLOUD_CONTROLLED_PUBLIC_PATHS } from './cloud-ingress';
 import { CloudAccessError, type CloudAccessContext } from './cloud-access';
 import { createCloudAccessTransport } from './cloud-access-transport';
 import { CloudPhoneAccess } from './cloud-phone-access';
@@ -44,23 +50,7 @@ import {
 
 // These are public application source/assets, never control or Voice endpoints.
 // The controlled page is the sole HTML entry for an injected browser app.
-const controlledPublicPaths = new Set([
-  '/controlled',
-  '/app.js',
-  '/controller-client.js',
-  '/controlled-workbench.js',
-  '/styles.css',
-  '/favicon.svg',
-  '/vendor/twilio.min.js',
-  '/call-lifecycle.js',
-  '/audio-output.js',
-  '/microphone-input.js',
-  '/rtc-diagnostics.js',
-  '/conversation-model.js',
-  '/conversation-view.js',
-  '/translation-engine.js',
-  '/assets/speaker-test.wav',
-]);
+const controlledPublicPaths = new Set<string>(CLOUD_CONTROLLED_PUBLIC_PATHS);
 const publicContentSecurityPolicy =
   "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' https://*.twilio.com wss://*.twilio.com https://*.twiliocdn.com; img-src 'self' data:; media-src 'self' blob:; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
 
@@ -128,23 +118,75 @@ function controlledPublicRequest(req: FastifyRequest, origin: string): boolean {
   );
 }
 
-export async function buildSoloServer(
-  options: {
-    configStore?: ConfigStore;
-    sessionManager?: SessionManager;
-    publicDir?: string;
-    publicReadinessChecker?: typeof checkPublicReadiness;
-    translationReadinessChecker?: typeof checkTranslationEngine;
-    providerVerifier?: typeof verifyProviders;
-    browserControl?: CloudPhoneAccess;
-    googleLogin?: GoogleBrowserLogin;
-  } = {},
-) {
+type SoloServerOptions = {
+  configStore?: ConfigStore;
+  sessionManager?: SessionManager;
+  publicDir?: string;
+  publicReadinessChecker?: typeof checkPublicReadiness;
+  translationReadinessChecker?: typeof checkTranslationEngine;
+  providerVerifier?: typeof verifyProviders;
+  browserControl?: CloudPhoneAccess;
+  googleLogin?: GoogleBrowserLogin;
+};
+
+export async function buildSoloServer(options: SoloServerOptions = {}) {
   // Exported builders are also entry points: never expose local control APIs by
   // bypassing index.ts in a cloud process.
   requireLocalPhoneRuntime(
     loadPhoneRuntime({ envPath: options.configStore?.envPath }),
   );
+  // eslint-disable-next-line @typescript-eslint/no-use-before-define -- Shared private builder follows guarded public entry points.
+  return buildPhoneApplication(options);
+}
+
+/** Explicit cloud composition. It does not relax the local builder or its APIs.
+ * The application still accepts only actual loopback ingress connections. */
+export async function buildCloudControlledServer(options: {
+  runtime: CloudPhoneRuntime;
+  configStore: ConfigStore;
+  sessionManager: SessionManager;
+  browserControl: CloudPhoneAccess;
+  googleLogin: GoogleBrowserLogin;
+  publicDir?: string;
+}) {
+  if (
+    !(options?.configStore instanceof ConfigStore) ||
+    !(options.sessionManager instanceof SessionManager) ||
+    !(options.browserControl instanceof CloudPhoneAccess) ||
+    !(options.googleLogin instanceof GoogleBrowserLogin) ||
+    options.googleLogin.policy !== options.browserControl.policy ||
+    options.browserControl.manager !== options.sessionManager ||
+    !options.runtime ||
+    options.runtime.mode !== 'cloud'
+  )
+    throw new SessionError('CLOUD_PHONE_DEPENDENCIES_REQUIRED', 503);
+  let pinned: CloudPhoneRuntime;
+  try {
+    pinned = parsePhoneRuntime({
+      AI_PHONE_RUNTIME_MODE: 'cloud',
+      PORT: String(options.runtime.port),
+      CLOUD_PUBLIC_ORIGIN: options.runtime.publicOrigin,
+      CLOUD_WARM_INSTANCES: String(options.runtime.warmInstances),
+    }) as CloudPhoneRuntime;
+  } catch {
+    throw new SessionError('CLOUD_PHONE_DEPENDENCIES_REQUIRED', 503);
+  }
+  if (
+    options.runtime.host !== pinned.host ||
+    options.runtime.mediaOrigin !== pinned.mediaOrigin ||
+    options.runtime.publicOrigin !== pinned.publicOrigin ||
+    options.browserControl.policy.publicOrigin !== pinned.publicOrigin ||
+    options.configStore.value.PUBLIC_BASE_URL !== pinned.publicOrigin
+  )
+    throw new SessionError('CLOUD_PHONE_DEPENDENCIES_REQUIRED', 503);
+  // eslint-disable-next-line @typescript-eslint/no-use-before-define -- Shared private builder follows guarded public entry points.
+  return buildPhoneApplication(options, pinned);
+}
+
+async function buildPhoneApplication(
+  options: SoloServerOptions,
+  cloudRuntime?: CloudPhoneRuntime,
+) {
   const { browserControl } = options;
   const { googleLogin } = options;
   if (
@@ -294,8 +336,12 @@ export async function buildSoloServer(
     return value;
   }
   function requireConfigured() {
-    if (!configStore.configured())
-      throw new SessionError('CONFIGURATION_REQUIRED', 503);
+    const configured = cloudRuntime
+      ? checkConfig(configStore.value)
+          .filter((check) => check.name !== 'LOCAL_ACCESS_TOKEN')
+          .every((check) => check.status === 'ready')
+      : configStore.configured();
+    if (!configured) throw new SessionError('CONFIGURATION_REQUIRED', 503);
   }
   await app.register(formbody);
   await app.register(websocket, { options: { maxPayload: 64 * 1024 } });
@@ -324,8 +370,8 @@ export async function buildSoloServer(
           'Vary',
           'Origin, Sec-Fetch-Site, Sec-Fetch-Mode, Sec-Fetch-Dest, Cookie',
         );
-      // This dependency-injected path remains an offline loopback application
-      // boundary. It cannot enable a cloud listener or bypass startup protection.
+      // Both injected surfaces retain the actual loopback application boundary.
+      // The cloud entry reaches it only through the restricted local ingress.
       const remote = req.raw.socket.remoteAddress || req.ip;
       if (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(remote))
         return reply.code(403).send({ error: 'LOCAL_ACCESS_ONLY' });
@@ -595,7 +641,9 @@ export async function buildSoloServer(
   }>('/api/calls', controllerRoute(), async (req) => {
     const engine = requestedEngine(
       req.body,
-      browserControl ? 'pocket-prefix' : 'legacy',
+      browserControl
+        ? browserControl.configuredDefaultTranslationEngine
+        : 'legacy',
     );
     if (maintenance.active)
       throw new SessionError('CONNECTION_MAINTENANCE_BUSY', 409);
@@ -724,7 +772,10 @@ export async function buildSoloServer(
     '/voice/client',
     async (req, reply) => {
       requireConfigured();
-      return reply.type('text/xml').send(manager.connectBrowser(req.body));
+      const twiml = browserControl
+        ? await manager.connectBrowserControlled(req.body)
+        : manager.connectBrowser(req.body);
+      return reply.type('text/xml').send(twiml);
     },
   );
   app.post<{ Body: Record<string, string> }>(

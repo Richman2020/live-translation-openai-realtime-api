@@ -1,10 +1,37 @@
 # 项目进度与交接
 
-更新日期：2026-10-09。共享仓库：<https://github.com/Richman2020/live-translation-openai-realtime-api>。
+更新日期：2026-10-10。共享仓库：<https://github.com/Richman2020/live-translation-openai-realtime-api>。
 
 需求见 [PROJECT_BRIEF.md](PROJECT_BRIEF.md)，工作规则见 [AGENTS.md](AGENTS.md)，运行步骤见 [LOCAL_SETUP.md](LOCAL_SETUP.md)，后续执行入口见 [LOCAL_CODEX_HANDOFF.md](LOCAL_CODEX_HANDOFF.md)。
 
-## 最新实施：Google单账号登录与Pocket官方材料审计（2026-10-09）
+## 最新实施：限时 Virginia 连续翻译云候选（2026-10-10）
+
+- 从真实远端干净头 `3182eeaba9e0df058eaa75aca8fa0fb699b41c48` 继续，沿用 `codex/cloud-phone-conversation-20261009` / [草稿 PR #3](https://github.com/Richman2020/live-translation-openai-realtime-api/pull/3)，base 仍为 PR #2 功能分支 `df3c447`。没有切旧 main、覆盖用户改动或连接用户电脑。运行环境仍为云端 Linux、Node24.19.0/npm11.9.0，package-lock 未变、未升级依赖或下载 Pocket 模型。
+- 新独立 `start:cloud` 将公开 PORT ingress、内部 loopback Fastify、Google 唯一身份、controller/owner/每通 Voice、真实 SDK 本地签名和文件预算 journal 装配到同一进程。固定 HTTPS/WSS 和路径/代理头检查，旧本机入口拒绝 cloud 的保护保留；仅受控页面/API 与已验签语音路径可转发。官方 Railway health Host 只获得精确健康路径。
+- 出程复用已有 native 连续英文音频，手机英文原声先回浏览器、中文字幕独立处理，无中文合成。默认三条 OpenAI 会话，原生 `session.output_transcript.delta` 英文文字始终显示；显式开启额外两条出程字幕时才有逐句中文原文与 English 参考翻译，不冒充 native 音频逐字稿或已播放。实际 native input 若提供则独立显示，不自动请求额外源 ASR。事件 ID 会话内去重，缺失/重复 elapsed_ms 不去重；delta 原样追加、不插空格，自然 finish 有界等尾部、主动 abort 丢弃迟到输出。原生视觉片段遇新对方 utterance 分段以保持双方时间交替，同句迟到译文及修订原位更新，始终不伪造确定语义句界。
+- 私有持久卷 journal 在 Voice 签发与远端创建前持久预留/提交 intent，原子 fsync、独占锁、初始化标记和 cleanup-only 重启。最多一通、300 秒、总预留最多 5 美元；release 不退款、不自动确认 usage。模型 socket 创建/发送及媒体字节均复核当前许可，未知结果冻结准入、已知 SID 仍独立清理；三次截止清理尝试和可重复信号清理覆盖。它是保守操作预算，不能称供应商账单硬封顶。
+- 真实 manager + bridge 闭环发现并修复单腿等待死锁：浏览器腿供应商 `update({timeLimit})` ACK 前禁止媒体/模型；之后单腿 native 握手自然触发一次远端 `create({timeLimit})`，手机腿加入前丢弃麦克风。远端先到的已验签回调可证明供应商接受，没有额外远端 update ACK。真实静态 ingress 返回的 Twilio SDK 与锁定原件字节及 SHA256 一致；启动与 Docker 显式准备该产物，避免 fresh clone SDK 404。
+
+| 验证 | 实际结果 |
+| --- | --- |
+| 完整回归 | 1093 项：1088 通过、5 个既有 Windows 专属跳过、0 失败；28.18 秒 |
+| 类型/构建/源码 lint/JS/diff | 最终完整源码及测试 typecheck、生产 build、全部修改源码 ESLint、public JS 语法、patch 检查通过；浏览器脚本独立类型检查通过 |
+| 云启动回归 | 10/10 通过；真实 builder/ingress/文件 journal、SDK 原件、期限拒绝和清理重试，真实供应商/模型/Google 调用均 0 |
+| 实际 native 连接合同 | 默认三条、显式五条 2/2；真实 journal/manager/bridge/协议客户端配 fake WS，单腿 0 上传、两腿清理及 SID 终态通过；独立复核 2/2 |
+| 原生协议与字幕重点回归 | 最终 92/92；事件重放、旧 client、无/重复时间戳、尾部/主动关闭、许可拒绝、旁路失败及交替模型合同通过 |
+| 实际 Chromium 工作台 | Pocket 54/54、连续可选参考字幕 60/60、连续默认 57/57；Chrome151.0.7922.173，外部请求/真实供应商调用/异常均 0 |
+| 既有浏览器流程 | 逐句字幕 16/16、Google 登录退出 24/24；外部请求/真实供应商调用/异常均 0，Google 授权导航在外部联网前拦截一次 |
+| 当前配置检查 | 24 个必需变量均缺失，仓库私密 env 文件不存在；源码及编译入口 `--check` 按设计 exit1 / `CLOUD_RUNTIME_REQUIRED`，未创建账本或联系供应商 |
+
+浏览器最终截图已实际查看，位于忽略的 `.runtime/controlled-browser/`、`.runtime/controlled-continuous-browser/`、`.runtime/controlled-continuous-return-only-browser/`；各含配对/原生交替、阅读历史暂停与撤销状态证据。工作台使用 fake Voice/媒体与 bridge；真实云合同另用实际 bridge 和 fake WS，不把两者合成真人端到端通过。独立 58/58、62/62 和 UI 91/91 审查有重叠，不相加到完整回归计数。
+
+交付 [运行与门槛](docs/CLOUD_CONTINUOUS_TRIAL.md)、[仅变量名模板](docs/cloud-trial.env.sample)、固定版本/官方已解析 digest 的 [Dockerfile.cloud](Dockerfile.cloud) 和 Virginia 单 warm 实例 [设置清单](deploy/cloud-service-settings.json)。本开发环境 Docker 首次被只读 HOME 配置目录阻断；改用任务临时目录后取得官方 Node manifest/layers，但锁定 npm ci 阶段持续无进展，已限次停止，没有可称成功的本地云镜像，未获得错误足以断言网络原因。远端 CI 新增真实镜像 build、SDK 哈希和隔离网络下编译入口缺配置拒绝检查；最终镜像与精确 head CI 以回读及 PR 正文记录。
+
+08:55 UTC 用户已同意主线程准备独立 Neon 免费测试项目及两个 Railway 测试服务，基础设施合计操作预算 0.50 美元、最多一小时，计时尚未开始；主线程随后报告空服务已创建、Offline、无部署，Virginia 和资源限制暂存未应用。本代码任务没有写供应商变量、复制旧项目凭据、创建/部署资源或改 Twilio 回调。当前 journal 使用私有持久卷，Neon 尚无适配；创建数据库不能代替该卷或声称持久接线完成。
+
+下一步仅由主线程协调真实安全配置、Google 固定 `${CLOUD_PUBLIC_ORIGIN}/auth/google/callback`、唯一身份/目标、所选模式全部模型能力和费率上界、持久卷与实际平台 HTTPS/WSS/代理头/health/单实例验证。确认标记是运维声明而非 API 连通证据；应用截止也不封顶基础设施账单。真实登录、麦克风到普通手机、数字否定/修订、持续积压、自然度与耳听延迟均未验收，不承诺零延迟或本人声音。完成开发分支推送与精确 CI 后停止，不合并或自行开启付费/下载/数据库/部署实验。
+
+## 此前：Google单账号登录与Pocket官方材料审计（2026-10-09）
 
 - 从真实远端干净基线 `3d4660bcaac1beddc5c74f574329b383b8827dc5` 继续，该头 [CI run 37920837788](https://github.com/Richman2020/live-translation-openai-realtime-api/actions/runs/37920837788) 已成功；沿用 `codex/cloud-phone-conversation-20261009` / [草稿PR #3](https://github.com/Richman2020/live-translation-openai-realtime-api/pull/3)，base仍为PR #2功能分支 `df3c447`。用户明确取消不等于暂停，已选择Google和Railway Hobby；真实账号、测试电话与秘密不写仓库、示例或日志，没有连接用户电脑或覆盖并发修改。
 - 新 `GoogleOidcClient` 使用Node内置能力、固定Google端点、有界异步交换和RSA验签。校验RS256、issuer、audience/azp、时间、nonce、明确唯一邮箱及布尔verified；非Gmail工作身份必须另核验Workspace signed hd或预先确认的固定sub，不能仅相信浏览器邮箱或其后缀。重复JSON字段、非规范编码、JOSE远端密钥和普通对象身份注入拒绝；access/refresh token不保存或交网页。另只读核对官方公开discovery/JWKS，无真实token交换或账号授权。

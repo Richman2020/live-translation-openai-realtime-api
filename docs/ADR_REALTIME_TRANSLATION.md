@@ -1,6 +1,16 @@
 # ADR: retain the phone engines while evaluating native translation
 
-Date: 2026-10-09. Status: candidate evaluation; no engine change or paid request.
+Date: 2026-10-10. Status: existing candidate selected for a bounded cloud trial;
+no paid request or deployment in this milestone.
+
+The user has now approved the existing `continuous-captions` route for the
+Virginia cloud trial. Pocket remains a selectable local comparison with its
+fixed dependency/model hashes. The historical evaluation decision below records
+the previous scope; it does not override this newer approval. The native output
+continues immediately while a separate outgoing caption client supplies stable
+source/translation sentence IDs. Those independently generated text translations
+are not a verbatim transcript of native audio and never receive inferred playback
+confirmation. See [the bounded cloud trial](CLOUD_CONTINUOUS_TRIAL.md).
 
 The approved experience is Chrome dialing a normal mobile phone: Chinese speech
 becomes natural English for the recipient; the recipient's original English is

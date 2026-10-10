@@ -25,7 +25,9 @@ export async function startControlledWorkbench() {
   let record = null;
   let canonicalConversation = false;
   let captionState = null;
+  let outgoingCaptionState = null;
   let localError = '';
+  let selectedEngine = '';
   let loginAvailable = false;
   let authPending = false;
   let authCancelling = false;
@@ -41,6 +43,11 @@ export async function startControlledWorkbench() {
     voice: '正在准备 Voice 加入许可', connecting: '正在连接浏览器电话', ending: '正在确认线路清理',
     releasing: '正在释放控制权', cleanup: '正在确认线路清理',
     'logging-out': '正在退出登录',
+  };
+  const engineNames = {
+    'continuous-captions': '连续英文译音＋中文字幕',
+    'pocket-prefix': 'Pocket Michael 边讲边播',
+    'pocket-captions': 'Pocket Michael 分句译音',
   };
   const conversation = createConversationView({
     container: $('transcript'), scrollContainer: $('transcript-scroll'), emptyNode: $('empty-conversation'),
@@ -105,6 +112,25 @@ export async function startControlledWorkbench() {
     if ((!lease || snapshot.cleanupPending || terminal(snapshot.call?.status)) && (device || lifecycle.current)) clearMedia();
     const call = snapshot.call;
     const live = Boolean(call && !terminal(call.status));
+    const engines = snapshot.translationEngines;
+    const engine = $('translation-engine');
+    if ([...engine.options].map(option => option.value).join(',') !== engines.join(',')) {
+      engine.replaceChildren(...engines.map(value => new Option(engineNames[value], value)));
+    }
+    if (!engines.includes(selectedEngine)) selectedEngine = snapshot.defaultTranslationEngine;
+    const currentEngine = live ? call.translationEngine : selectedEngine;
+    engine.value = currentEngine;
+    engine.disabled = live || pending || engines.length < 2;
+    const continuous = currentEngine === 'continuous-captions';
+    text('translation-engine-help', !currentEngine ? '正在读取此服务允许的翻译策略。'
+      : continuous ? '中文持续译成英文语音。对方英文原声直达，中文字幕独立更新。'
+        : '中文按可靠小节译成英文，由固定 Michael 声音输出。对方英文原声直达，中文字幕独立更新。');
+    text('translation-engine-status', currentEngine ? `本次使用：${engineNames[currentEngine] || '服务指定策略'}。通话中不能切换。` : '翻译策略尚未确认。');
+    text('transcript-engine-note', continuous
+      ? snapshot.outgoingPairedCaptions
+        ? '原生英文译音文字独立显示；另有中文原文与参考翻译，措辞可能不同。字幕不能确认译音已播放。'
+        : '显示原生英文译音文字，以及对方英文原文与逐句中文字幕；原生英文未与中文逐句关联。字幕不能确认译音已播放。'
+      : '每句原文与译文配对；临时文字、译音待播放与线路确认播放分别标明。');
     $('enable-device').disabled = pending || (!lease && !snapshot.canAcquire);
     text('enable-device', lease ? live ? '结束并释放控制' : '释放控制权' : '取得本页控制权');
     $('keep-online-toggle').disabled = $('enable-device').disabled;
@@ -143,11 +169,18 @@ export async function startControlledWorkbench() {
     if (sdkAccepted && call?.status !== 'active') connectionText = '浏览器音频已连接 · 等待对方接听';
     if (snapshot.cleanupPending) connectionText = '线路关闭待确认';
     text('connection-text', connectionText);
-    text('connection-mode-label', 'Pocket Michael 英文译音 · 英文原声回程');
+    text('connection-mode-label', !currentEngine ? '等待翻译策略确认' : continuous ? '连续英文译音 · 英文原声回程' : 'Pocket Michael 英文译音 · 英文原声回程');
     text('bridge-caption', call?.status === 'active' && sdkAccepted && call.translationReady ? '译音线路已就绪 · 请按字幕辅助交流' : '等待电话接通与译音线路就绪');
     text('return-audio-label', 'English 原声 + 中文字幕');
     $('connection-status').classList.toggle('active', call?.status === 'active' && sdkAccepted);
-    text('caption-status', captionState?.state === 'failed' ? '中文字幕暂不可用；英文原声走独立线路。' : captionState?.state === 'ready' ? '中文字幕旁路已就绪。' : '英文原声独立传送；字幕就绪情况按服务事件显示。');
+    const remoteCaption = captionState?.state || call?.captionState;
+    const localCaption = outgoingCaptionState?.state || call?.outgoingCaptionState;
+    const remoteCaptionMessage = remoteCaption === 'failed' ? '对方中文字幕暂不可用；英文原声走独立线路。' : remoteCaption === 'ready' ? '对方中文字幕旁路已就绪。' : '英文原声独立传送；对方字幕就绪情况按服务事件显示。';
+    const localCaptionMessage = !continuous || !snapshot.outgoingPairedCaptions ? '' : localCaption === 'failed'
+      ? '本页逐句文字暂不可用；连续英文译音走独立线路。'
+      : localCaption === 'ready' ? '本页逐句文字旁路已就绪。'
+        : localCaption === 'connecting' ? '本页逐句文字正在准备。' : '';
+    text('caption-status', localCaptionMessage + remoteCaptionMessage);
     $('caption-status').hidden = !call;
     applySession(call, snapshot);
   }
@@ -156,8 +189,8 @@ export async function startControlledWorkbench() {
     if (call && record?.id !== call.id) {
       if (record && !history.some(entry => entry.id === record.id)) history.unshift(record);
       if (history.length > 30) history.length = 30;
-      record = { id: call.id, number: call.to || call.from || '', status: call.status, startedAt: Date.now(), model: createConversationModel(call.id) };
-      model = record.model; canonicalConversation = false; captionState = null; conversation.reset();
+      record = { id: call.id, number: call.to || call.from || '', status: call.status, translationEngine: call.translationEngine, startedAt: Date.now(), model: createConversationModel(call.id) };
+      model = record.model; canonicalConversation = false; captionState = null; outgoingCaptionState = null; conversation.reset();
       renderHistory();
     }
     if (call && record?.id === call.id) record.status = call.status;
@@ -174,6 +207,9 @@ export async function startControlledWorkbench() {
   }
   function receiveConversation(kind, value) {
     if (!record || value?.sessionId !== record.id || !model) return;
+    const native = ['native_output', 'native_input'].includes(value.captionSource);
+    if (value.role === 'local' && record.translationEngine === 'continuous-captions'
+      && !native && !client.state.outgoingPairedCaptions) return;
     if (kind === 'conversation') {
       if (!model.apply(value)) return;
       canonicalConversation = true;
@@ -207,7 +243,7 @@ export async function startControlledWorkbench() {
       try { value = JSON.parse(event.data); } catch { note('状态数据无法读取，请刷新状态；尚未确认线路已结束。'); return; }
       if (kind === 'snapshot' || kind === 'call') { client.handleEvent(kind, value); renderHistory(); }
       else if (kind === 'conversation' || kind === 'transcript') receiveConversation(kind, value);
-      else if (kind === 'caption-status' && value?.sessionId === record?.id) { captionState = value; render(client.state); }
+      else if (kind === 'caption-status' && value?.sessionId === record?.id) { if (value.role === 'local') outgoingCaptionState = value; else captionState = value; render(client.state); }
       else if (kind === 'error') { client.handleEvent(kind, value); }
     });
     source.onerror = event => {
@@ -232,6 +268,7 @@ export async function startControlledWorkbench() {
     text('phone-error', ''); $('phone-number').removeAttribute('aria-invalid'); localError = '';
     let attempt = null;
     await client.startCall(to, {
+      translationEngine: selectedEngine,
       prepareMedia: async ({ isCurrent }) => {
         clearMedia(); attempt = lifecycle.begin();
         const constraints = await microphone.constraints();
@@ -318,9 +355,8 @@ export async function startControlledWorkbench() {
     renew.before(button);
   }
   const refresh = document.querySelector('.preview-notice .text-button'); refresh.removeAttribute('data-navigate'); refresh.id = 'refresh-controlled-state'; refresh.textContent = '刷新状态';
-  const engine = $('translation-engine'); engine.replaceChildren(new Option('Pocket Michael 边讲边播', 'pocket-prefix')); engine.disabled = true;
-  text('translation-engine-help', '中文按可靠小节译成英文，由固定 Michael 声音输出。对方英文原声直达，中文字幕独立更新。');
-  text('translation-engine-status', '受控接入使用 Pocket-prefix；不切换为双向合成或本人声线。');
+  const engine = $('translation-engine'); engine.replaceChildren(); engine.disabled = true;
+  engine.addEventListener('change', () => { if (!engine.disabled && client.state.translationEngines.includes(engine.value)) { selectedEngine = engine.value; render(client.state); } });
   text('transcript-engine-note', '每句原文与译文配对；临时文字、译音待播放与线路确认播放分别标明。');
   text('audio-delivery-remote', '英文原声 → 电脑：与中文字幕独立传送');
   text('translation-timing-remote', '中文字幕生成计时不代表英文原声播放延迟。');
@@ -419,7 +455,10 @@ export async function startControlledWorkbench() {
   $('audio-output').addEventListener('change', () => output.select($('audio-output').value));
   $('test-audio-output').addEventListener('click', () => output.test());
   $('export-current').addEventListener('click', () => {
-    const lines = model?.getUtterances().map(item => `${item.role === 'local' ? '你' : '对方'}\n原文：${item.original?.text || '待更新'}\n译文：${item.translation?.text || '待更新'}`) || [];
+    const lines = model?.getUtterances().map(item => item.captionSource === 'native_output'
+      ? `你 · 原生英文译音文字\n${item.translation?.text || ''}\n未与中文逐句关联；播放未确认`
+      : item.captionSource === 'native_input' ? `你 · 原生中文识别文字\n${item.original?.text || ''}\n未与英文逐句关联；不代表译音播放`
+        : `${item.role === 'local' ? '你' : '对方'}\n原文：${item.original?.text || '待更新'}\n${item.captionSource === 'independent_text' ? '参考翻译' : '译文'}：${item.translation?.text || '待更新'}`) || [];
     if (!lines.length) return;
     const url = URL.createObjectURL(new Blob([lines.join('\n\n')], { type: 'text/plain;charset=utf-8' }));
     const anchor = document.createElement('a'); anchor.href = url; anchor.download = 'conversation.txt'; anchor.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);

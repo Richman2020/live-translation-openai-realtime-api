@@ -43,8 +43,14 @@ export function renderConversationUtterance(utterance, document = globalThis.doc
 
 export function updateConversationUtterance(article, utterance) {
   const { boundary, time, parts, delivery } = article._conversationNodes;
+  const nativeOutput = utterance.captionSource === 'native_output';
+  const nativeInput = utterance.captionSource === 'native_input';
+  const native = nativeOutput || nativeInput;
+  const reference = utterance.captionSource === 'independent_text';
+  if (utterance.captionSource) article.dataset.captionSource = utterance.captionSource;
+  article.classList.toggle('conversation-native-output', native);
   article.classList.toggle('conversation-unpaired', utterance.pairing === 'unpaired');
-  boundary.textContent = utterance.pairing === 'unpaired' ? '未配对文字' : utterance.boundary === 'semantic' ? '语义小节' : '';
+  boundary.textContent = native ? `连续文字流 · 未与${nativeOutput ? '中文' : '英文'}逐句关联` : utterance.pairing === 'unpaired' ? '未配对文字' : utterance.boundary === 'semantic' ? '语义小节' : '';
   boundary.hidden = !boundary.textContent;
   const date = new Date(utterance.at);
   time.textContent = Number.isFinite(date.getTime()) ? date.toLocaleTimeString('zh-CN', { hour12: false }) : '';
@@ -54,18 +60,23 @@ export function updateConversationUtterance(article, utterance) {
     const language = kind === 'original'
       ? utterance.role === 'local' ? '中文原文' : 'English 原文'
       : utterance.role === 'local' ? 'English 译文' : '中文译文';
-    part.label.textContent = language;
-    part.status.textContent = value ? value.final ? '已确定' : '临时 · 更新中' : '';
+    const hiddenNativePart = native && kind === (nativeOutput ? 'original' : 'translation');
+    part.row.hidden = hiddenNativePart;
+    part.label.textContent = native ? nativeOutput ? '原生英文译音文字' : '原生中文识别文字' : reference && kind === 'translation' ? 'English 参考翻译' : language;
+    part.status.textContent = value ? native ? '持续更新' : value.final ? '已确定' : '临时 · 更新中' : '';
     part.row.classList.toggle('conversation-draft', !!value && !value.final);
     part.text.classList.toggle('conversation-pending', !value);
-    const text = value ? value.text : utterance.pairing === 'unpaired'
+    const text = hiddenNativePart ? '' : value ? value.text : utterance.pairing === 'unpaired'
       ? kind === 'original' ? '当前事件未提供对应原文' : '当前事件未提供对应译文'
       : kind === 'original' ? '等待原文…' : '等待译文…';
     if (part.text.textContent !== text) part.text.textContent = text;
   }
   const status = utterance.playback?.status || 'unknown';
   delivery.dataset.playbackStatus = status;
-  delivery.textContent = utterance.role === 'remote' && status === 'unknown'
+  delivery.textContent = nativeOutput ? '英文译音生成文字 · 未与原文配对 · 播放未确认'
+    : nativeInput ? '中文识别文字 · 未与译音配对 · 不代表译音播放'
+    : reference ? '参考翻译 · 未关联实际译音播放'
+    : utterance.role === 'remote' && status === 'unknown'
     ? '英文原声直达 · 字幕不代表已播放' : playbackLabels[status] || playbackLabels.unknown;
   delivery.title = status === 'played'
     ? 'Twilio 线路 mark 返回表示相应队列已播放；不等于人耳听到、听清或准确度已验收。'

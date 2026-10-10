@@ -1,10 +1,14 @@
 export type TextPart = { text: string; final: boolean; revision: number };
+export type CaptionProvenance = {
+  captionSource?: 'native_output' | 'native_input' | 'independent_text';
+  audioCorrespondence?: 'generated_only' | 'none';
+};
 export type ConversationTextEvent = {
   type: 'text'; sessionId: string; utteranceId: string; role: 'local' | 'remote';
   kind: 'original' | 'translation'; text: string; final: boolean; revision: number;
   at: number; sequence: number; pairing: 'explicit' | 'unpaired';
   boundary: 'utterance' | 'semantic' | 'diagnostic';
-};
+} & CaptionProvenance;
 export type ConversationPlaybackEvent = {
   type: 'playback'; sessionId: string; utteranceId: string; role: 'local' | 'remote';
   deliveryId?: string; status: 'queued' | 'sent' | 'played' | 'cancelled' | 'unconfirmed';
@@ -18,7 +22,7 @@ export type ConversationUtterance = {
   original: TextPart | null; translation: TextPart | null;
   playback: { status: 'unknown' | ConversationPlaybackEvent['status'];
     evidence: ConversationPlaybackEvent['evidence']; sealed: boolean; deliveryCount: number; playedCount: number };
-};
+} & CaptionProvenance;
 export function adaptTranscriptEvent(value: any, options?: { sessionId?: string; revision?: number; sequence?: number }): ConversationTextEvent | null;
 export function splitSemanticText(text: string): string[];
 export function createConversationModel(options: string | { sessionId: string }): {

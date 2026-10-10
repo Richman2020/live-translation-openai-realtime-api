@@ -4,7 +4,11 @@ import { setImmediate as tick } from 'node:timers/promises';
 import { test } from 'node:test';
 import WebSocket from 'ws';
 
-import { createSessionBridge } from '../src/solo/session-manager';
+import {
+  createSessionBridge,
+  type BridgeOptions,
+} from '../src/solo/session-manager';
+import { ContinuousTranslationBridge } from '../src/solo/continuous-translation-bridge';
 import { Pcm24kToPcmu, PcmuToPcm24k } from '../src/solo/translation-pcm';
 import {
   isTranslationEngine,
@@ -53,6 +57,7 @@ function fixture(
     | 'continuous-captions'
     | 'pocket-captions'
     | 'pocket-prefix' = 'continuous-captions',
+  settings: Partial<BridgeOptions> = {},
 ) {
   const local = new Socket(),
     remote = new Socket();
@@ -62,6 +67,8 @@ function fixture(
   const transcripts: any[] = [],
     failures: string[] = [],
     states: string[] = [];
+  const outgoingStates: string[] = [],
+    conversations: any[] = [];
   let nanoCalls = 0;
   let pocketCalls = 0;
   const pocketTexts: string[] = [];
@@ -83,6 +90,9 @@ function fixture(
       onTranscript: (event) => transcripts.push(event),
       onFailure: (reason) => failures.push(reason),
       onCaptionState: (event) => states.push(event.state),
+      onOutgoingCaptionState: (event) => outgoingStates.push(event.state),
+      onConversationTranscript: (event) => conversations.push(event),
+      ...settings,
     },
     {
       nano: forbidNano,
@@ -109,7 +119,11 @@ function fixture(
     engine === 'pocket-prefix'
       ? providers.slice(0, 2)
       : providers.filter((item) => item.url.includes('/translations?'));
-  const captions = engine === 'pocket-prefix' ? providers.slice(2) : providers;
+  const captions = providers.slice(-2);
+  const sourceCaptionSockets =
+    engine === 'continuous-captions' && settings.outgoingCaptions
+      ? providers.slice(1, 3).map((item) => item.socket)
+      : [];
   const voice = outgoing.at(-1)!.socket;
   const asr = captions.find((item) =>
     item.url.endsWith('?intent=transcription'),
@@ -149,6 +163,16 @@ function fixture(
     }
     await tick();
   };
+  const readyOutgoingCaptions = async () => {
+    for (const socket of sourceCaptionSockets) {
+      socket.open();
+      socket.receive({
+        type: 'session.updated',
+        session: socket.sent[0].session,
+      });
+    }
+    await tick();
+  };
   t.after(() => bridge.close());
   return {
     bridge,
@@ -161,9 +185,14 @@ function fixture(
     transcripts,
     failures,
     states,
+    outgoingStates,
+    conversations,
+    sourceAsr: sourceCaptionSockets[0],
+    sourceText: sourceCaptionSockets[1],
     media,
     readyVoice,
     readyCaptions,
+    readyOutgoingCaptions,
     nanoCalls: () => nanoCalls,
     pocketCalls: () => pocketCalls,
     pocketTexts,
@@ -293,7 +322,7 @@ test('production native-caption route sends translated English before any text/f
   assert.equal(
     f.providers.length,
     3,
-    'one outgoing translation plus two return caption sockets',
+    'one outgoing translation plus two independent return caption sockets by default',
   );
   const original = Buffer.alloc(160, 0x44);
   f.media('remote', original);
@@ -447,7 +476,7 @@ for (const engine of ['continuous-captions', 'pocket-captions'] as const)
   });
 
 test('native-caption hangup discards late outgoing audio, captions and input', async (t) => {
-  const f = fixture(t);
+  const f = fixture(t, 'continuous-captions', { outgoingCaptions: true });
   await f.readyVoice();
   await f.readyCaptions();
   f.bridge.close();
@@ -468,4 +497,236 @@ test('native-caption hangup discards late outgoing audio, captions and input', a
   assert.equal(f.remote.sent.length, remoteCount);
   assert.deepEqual(f.transcripts, []);
   assert.equal(f.nanoCalls(), 0);
+});
+
+test('native route produces stable paired source subtitles in an independent text branch', async (t) => {
+  const f = fixture(t, 'continuous-captions', { outgoingCaptions: true });
+  await f.readyVoice();
+  const pcm = Buffer.alloc(960, 0x33);
+  f.voice.receive({
+    type: 'session.output_audio.delta',
+    delta: pcm.toString('base64'),
+  });
+  const beforeText = bytes(f.remote);
+  assert.ok(beforeText.length > 0);
+  assert.deepEqual(f.conversations, []);
+  await f.readyOutgoingCaptions();
+  assert.deepEqual(
+    f.sourceAsr.sent[0].session.audio.input.transcription.languages,
+    ['zh-cn'],
+  );
+  assert.deepEqual(f.sourceText.sent[0].session.output_modalities, ['text']);
+  const input = Buffer.alloc(160, 0x55);
+  f.media('local', input);
+  assert.deepEqual(
+    Buffer.concat(
+      f.sourceAsr.sent
+        .filter((event) => event.type === 'input_audio_buffer.append')
+        .map((event) => Buffer.from(event.audio, 'base64')),
+    ),
+    new PcmuToPcm24k().push(input),
+  );
+  f.sourceAsr.receive({
+    type: 'conversation.item.input_audio_transcription.completed',
+    item_id: 'source_one',
+    content_index: 0,
+    transcript: '明天，不是今天。',
+  });
+  const sections = [
+    { source: '明天，', translation: 'Tomorrow,' },
+    { source: '不是今天。', translation: 'not today.' },
+  ];
+  sections.forEach((section, index) => {
+    const request = f.sourceText.sent.filter(
+      (event) => event.type === 'response.create',
+    )[index];
+    assert.ok(request);
+    assert.equal(
+      JSON.parse(request.response.input[0].content[0].text)
+        .current_chinese_prefix,
+      section.source,
+    );
+    const id = `source_translation_${index}`;
+    f.sourceText.receive({
+      type: 'response.created',
+      response: { id, metadata: request.response.metadata },
+    });
+    f.sourceText.receive({
+      type: 'response.output_text.delta',
+      response_id: id,
+      output_index: 0,
+      content_index: 0,
+      delta: section.translation,
+    });
+    f.sourceText.receive({
+      type: 'response.done',
+      response: {
+        id,
+        status: 'completed',
+        output: [
+          {
+            type: 'message',
+            content: [{ type: 'output_text', text: section.translation }],
+          },
+        ],
+      },
+    });
+  });
+  const pair = f.conversations.filter((event) => event.final);
+  assert.equal(pair.length, 4);
+  assert.deepEqual(
+    pair.map((event) => event.kind),
+    ['original', 'translation', 'original', 'translation'],
+  );
+  assert.equal(pair[0].utteranceId, pair[1].utteranceId);
+  assert.equal(pair[2].utteranceId, pair[3].utteranceId);
+  assert.notEqual(pair[0].utteranceId, pair[2].utteranceId);
+  assert.equal(
+    pair
+      .filter((event) => event.kind === 'original')
+      .map((event) => event.text)
+      .join(''),
+    '明天，不是今天。',
+  );
+  assert.equal(
+    pair
+      .filter((event) => event.kind === 'translation')
+      .map((event) => event.text)
+      .join(' '),
+    'Tomorrow, not today.',
+  );
+  assert.ok(
+    pair.every(
+      (event) =>
+        event.captionSource === 'independent_text' &&
+        event.audioCorrespondence === 'none' &&
+        event.boundary === 'semantic',
+    ),
+  );
+  assert.deepEqual(
+    bytes(f.remote),
+    beforeText,
+    'the text branch never synthesizes or queues audio',
+  );
+  f.sourceAsr.receive({
+    type: 'error',
+    error: { message: 'PRIVATE_CAPTION_ERROR' },
+  });
+  f.voice.receive({
+    type: 'session.output_audio.delta',
+    delta: pcm.toString('base64'),
+  });
+  assert.ok(bytes(f.remote).length > beforeText.length);
+  assert.deepEqual(f.failures, []);
+  assert.deepEqual(f.outgoingStates, ['connecting', 'ready', 'failed']);
+  f.bridge.close();
+  const count = f.conversations.length;
+  f.sourceAsr.receive({
+    type: 'conversation.item.input_audio_transcription.completed',
+    item_id: 'late',
+    content_index: 0,
+    transcript: '迟到。',
+  });
+  assert.equal(f.conversations.length, count);
+});
+
+test('caption socket admission rechecks each connection and denies the text socket after the ASR socket', (t) => {
+  const sockets: Socket[] = [];
+  const failures: string[] = [],
+    states: string[] = [];
+  let checks = 0;
+  const bridge = new ContinuousTranslationBridge({
+    apiKey: 'fake',
+    model: 'gpt-realtime-1.5',
+    outgoingCaptions: true,
+    remoteCaptions: true,
+    admitAudio: (event) =>
+      event.path !== 'outgoing_captions' ||
+      event.stage !== 'connect' ||
+      ++checks < 3,
+    createWebSocket: () => {
+      const socket = new Socket();
+      sockets.push(socket);
+      return socket.socket();
+    },
+    onTranscript: () => {},
+    onFailure: (reason) => failures.push(reason),
+    onOutgoingCaptionState: (event) => states.push(event.state),
+  });
+  t.after(() => bridge.close());
+  const local = new Socket(),
+    remote = new Socket();
+  local.open();
+  remote.open();
+  bridge.attach('local', local.socket(), 'MZ_local');
+  bridge.attach('remote', remote.socket(), 'MZ_remote');
+  assert.equal(
+    checks,
+    3,
+    'preflight, ASR, then text each check current admission',
+  );
+  assert.equal(
+    sockets.length,
+    4,
+    'native plus stopped source ASR plus the two independent return sockets',
+  );
+  assert.equal(sockets[1].readyState, WebSocket.CLOSED);
+  assert.deepEqual(states, ['connecting', 'failed']);
+  assert.deepEqual(failures, []);
+});
+
+test('late caption translation requests recheck admission before supplier send', async (t) => {
+  let allowed = true;
+  const f = fixture(t, 'continuous-captions', {
+    outgoingCaptions: true,
+    admitAudio: (event) => event.path !== 'outgoing_captions' || allowed,
+  });
+  await f.readyVoice();
+  await f.readyOutgoingCaptions();
+  allowed = false;
+  f.sourceAsr.receive({
+    type: 'conversation.item.input_audio_transcription.completed',
+    item_id: 'expired',
+    content_index: 0,
+    transcript: '明天，不是今天。',
+  });
+  assert.equal(
+    f.sourceText.sent.filter((event) => event.type === 'response.create')
+      .length,
+    0,
+  );
+  assert.equal(f.outgoingStates.at(-1), 'failed');
+  f.voice.receive({
+    type: 'session.output_audio.delta',
+    delta: Buffer.alloc(960, 0x33).toString('base64'),
+  });
+  assert.ok(bytes(f.remote).length > 0);
+  assert.deepEqual(f.failures, []);
+});
+
+test('delayed native socket opening rechecks revoked admission before session configuration', async (t) => {
+  let allowed = true;
+  const f = fixture(t, 'continuous-captions', { admitAudio: () => allowed });
+  assert.equal(f.providers.length, 3);
+  allowed = false;
+  await f.readyVoice();
+  assert.deepEqual(
+    f.voice.sent,
+    [],
+    'revoked identity cannot submit the delayed session.update',
+  );
+  assert.equal(f.local.readyState, WebSocket.CLOSED);
+  assert.equal(f.remote.readyState, WebSocket.CLOSED);
+  assert.deepEqual(f.failures, ['continuous_audio_admission_denied:local']);
+  assert.ok(
+    f.providers.every(({ socket }) => socket.readyState === WebSocket.CLOSED),
+  );
+  assert.equal(
+    f.local.sent.filter((event) => event.event === 'clear').length,
+    1,
+  );
+  assert.equal(
+    f.remote.sent.filter((event) => event.event === 'clear').length,
+    1,
+  );
 });

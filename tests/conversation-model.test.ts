@@ -76,6 +76,60 @@ test('older explicit turn IDs pair; continuous excerpts and different prefix IDs
   assert.equal(model.snapshot().length, 3);
 });
 
+test('native output retains cumulative English without source pairing or false playback', () => {
+  const model = createConversationModel('call-a');
+  const native = { id: 'continuous_local_0', role: 'local', kind: 'translation', text: 'Keep the total',
+    final: false, at: 100, pairing: 'unpaired', boundary: 'diagnostic', captionSource: 'native_output', audioCorrespondence: 'generated_only' };
+  assert.equal(model.applyTranscript(native), true);
+  assert.equal(model.applyTranscript({ ...native, text: 'Keep the total under fifty.', at: 150 }), true);
+  const row = model.snapshot()[0];
+  assert.equal(row.id, 'native:continuous_local_0');
+  assert.equal(row.at, 100);
+  assert.equal(row.captionSource, 'native_output');
+  assert.equal(row.audioCorrespondence, 'generated_only');
+  assert.equal(row.original, null);
+  assert.equal(row.translation?.text, 'Keep the total under fifty.');
+  assert.equal(row.translation?.final, false);
+  assert.equal(row.playback.status, 'unknown');
+  assert.equal(model.apply(playback({ utteranceId: row.id, status: 'played', evidence: 'twilio_mark' })), false);
+});
+
+test('native English and independent reference wording preserve different provenance even for equal text', () => {
+  const model = createConversationModel('call-a');
+  model.applyTranscript({ id: 'same-id', utteranceId: 'same-id', role: 'local', kind: 'translation', text: 'Hello.', final: false,
+    at: 100, pairing: 'unpaired', boundary: 'diagnostic', captionSource: 'native_output', audioCorrespondence: 'generated_only' });
+  const reference = text({ utteranceId: 'same-id', kind: 'translation', text: 'Hello.', captionSource: 'independent_text', audioCorrespondence: 'none' });
+  assert.equal(model.apply(reference), true);
+  assert.deepEqual(model.snapshot().map(row => row.captionSource).sort(), ['independent_text', 'native_output']);
+  assert.equal(model.apply({ ...reference, captionSource: 'native_output', audioCorrespondence: 'generated_only', revision: 2 }), false);
+  assert.equal(model.apply(playback({ utteranceId: 'same-id', status: 'played', evidence: 'twilio_mark' })), false);
+});
+
+test('native text cannot acquire paired source metadata and the server adapter preserves exact provenance', () => {
+  const native = { id: 'continuous_local_0', role: 'local' as const, kind: 'translation' as const, text: 'Four, not three.', final: false,
+    at: 100, pairing: 'unpaired' as const, boundary: 'diagnostic' as const, captionSource: 'native_output' as const, audioCorrespondence: 'generated_only' as const };
+  assert.equal(adaptTranscriptEvent({ ...native, kind: 'original' }, { sessionId: 'call-a' }), null);
+  assert.equal(adaptTranscriptEvent({ ...native, pairing: 'explicit' }, { sessionId: 'call-a' }), null);
+  assert.equal(adaptTranscriptEvent({ ...native, audioCorrespondence: 'none' }, { sessionId: 'call-a' }), null);
+  const event = new ConversationEventAdapter('call-a').transcript(native);
+  assert.equal(event?.type, 'text');
+  if (event?.type !== 'text') assert.fail('Expected native text event');
+  assert.equal(event.captionSource, 'native_output');
+  assert.equal(event.audioCorrespondence, 'generated_only');
+  assert.equal(event.pairing, 'unpaired');
+});
+
+test('optional native Chinese remains a separate unpaired source stream even at the same output timestamp', () => {
+  const model = createConversationModel('call-a');
+  const shared = { id: 'same-stream-id', role: 'local', final: false, at: 100, pairing: 'unpaired', boundary: 'diagnostic' };
+  model.applyTranscript({ ...shared, kind: 'original', text: '不是三点。', captionSource: 'native_input', audioCorrespondence: 'none' });
+  model.applyTranscript({ ...shared, kind: 'translation', text: 'Not three.', captionSource: 'native_output', audioCorrespondence: 'generated_only' });
+  assert.equal(model.snapshot().length, 2);
+  assert.deepEqual(model.snapshot().map(row => row.id).sort(), ['native-input:same-stream-id', 'native:same-stream-id']);
+  assert.equal(model.snapshot().find(row => row.captionSource === 'native_input')?.translation, null);
+  assert.equal(model.snapshot().find(row => row.captionSource === 'native_output')?.original, null);
+});
+
 test('all delivery marks and the sealed producer count are required before whole-utterance played', () => {
   const model = createConversationModel('call-a');
   model.apply(text());

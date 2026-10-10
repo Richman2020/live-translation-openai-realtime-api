@@ -25,6 +25,12 @@ export type PreparedCloudCall = Readonly<{
 export type CloudCleanupIntent = Readonly<{ callId: string }>;
 export type CloudPhoneEvent = Readonly<{ event: string; data: unknown }>;
 
+const controlledTranslationEngines: readonly TranslationEngine[] = [
+  'pocket-prefix',
+  'pocket-captions',
+  'continuous-captions',
+];
+
 const eventNames = new Set([
   'call',
   'transcript',
@@ -93,6 +99,12 @@ export class CloudPhoneAccess {
 
   private readonly maxCalls: number;
 
+  private readonly allowedTranslationEngines: readonly TranslationEngine[];
+
+  private readonly defaultTranslationEngine: TranslationEngine;
+
+  private readonly outgoingPairedCaptions: boolean;
+
   private readonly timer: ReturnType<typeof setInterval>;
 
   constructor(options: {
@@ -102,11 +114,22 @@ export class CloudPhoneAccess {
     voiceJoin?: CloudVoiceJoin;
     publicReadinessChecker: typeof checkPublicReadiness;
     translationReadinessChecker: typeof checkTranslationEngine;
+    allowedTranslationEngines?: readonly TranslationEngine[];
+    defaultTranslationEngine?: TranslationEngine;
+    outgoingPairedCaptions?: boolean;
     maxCalls?: number;
     revalidationIntervalMs?: number;
   }) {
     const maxCalls = options?.maxCalls ?? 100;
     const interval = options?.revalidationIntervalMs ?? 1000;
+    const engines = options?.allowedTranslationEngines ?? [
+      'pocket-prefix',
+      'pocket-captions',
+    ];
+    const defaultEngine = options?.defaultTranslationEngine ?? 'pocket-prefix';
+    const outgoingPairedCaptions =
+      options?.outgoingPairedCaptions ??
+      defaultEngine !== 'continuous-captions';
     if (
       !(options?.policy instanceof CloudAccessPolicy) ||
       !(options.manager instanceof SessionManager) ||
@@ -118,6 +141,15 @@ export class CloudPhoneAccess {
           options.voiceJoin.policy !== options.policy)) ||
       typeof options.publicReadinessChecker !== 'function' ||
       typeof options.translationReadinessChecker !== 'function' ||
+      !Array.isArray(engines) ||
+      engines.length < 1 ||
+      engines.length > controlledTranslationEngines.length ||
+      new Set(engines).size !== engines.length ||
+      engines.some(
+        (engine) => !controlledTranslationEngines.includes(engine),
+      ) ||
+      !engines.includes(defaultEngine) ||
+      typeof outgoingPairedCaptions !== 'boolean' ||
       !Number.isSafeInteger(maxCalls) ||
       maxCalls < 1 ||
       maxCalls > 100 ||
@@ -133,6 +165,9 @@ export class CloudPhoneAccess {
     this.publicReadinessChecker = options.publicReadinessChecker;
     this.translationReadinessChecker = options.translationReadinessChecker;
     this.maxCalls = maxCalls;
+    this.allowedTranslationEngines = Object.freeze([...engines]);
+    this.defaultTranslationEngine = defaultEngine;
+    this.outgoingPairedCaptions = outgoingPairedCaptions;
     this.timer = setInterval(() => this.checkLifecycle(), interval);
     this.timer.unref();
   }
@@ -144,6 +179,10 @@ export class CloudPhoneAccess {
         this.voiceJoin.outgoingApplicationSid !== config.TWILIO_TWIML_APP_SID)
     )
       throw new CloudAccessError('FORBIDDEN');
+  }
+
+  get configuredDefaultTranslationEngine(): TranslationEngine {
+    return this.defaultTranslationEngine;
   }
 
   acquireController(context: CloudAccessContext, tabId: string) {
@@ -243,7 +282,7 @@ export class CloudPhoneAccess {
     context: CloudAccessContext,
     config: SoloConfig,
     to: string,
-    translationEngine: TranslationEngine = 'pocket-prefix',
+    translationEngine: TranslationEngine = this.defaultTranslationEngine,
     proof?: ControllerProof,
   ): Promise<PreparedCloudCall> {
     this.policy.revalidate(context, 'mutate');
@@ -251,10 +290,7 @@ export class CloudPhoneAccess {
     const controller = this.authorizeController(context, proof);
     this.assertConfig(config);
     if (typeof to !== 'string') throw new SessionError('INVALID_DESTINATION');
-    if (
-      translationEngine !== 'pocket-prefix' &&
-      translationEngine !== 'pocket-captions'
-    )
+    if (!this.allowedTranslationEngines.includes(translationEngine))
       throw new SessionError('INVALID_TRANSLATION_ENGINE');
     if (this.preparing || this.manager.activeSession)
       throw new SessionError('BUSY', 409);
@@ -429,8 +465,9 @@ export class CloudPhoneAccess {
         this.preparing ||
         this.manager.controlAdmissionBlocked ||
         !!this.voiceJoin?.cleanupUnconfirmed,
-      translationEngines: ['pocket-prefix', 'pocket-captions'] as const,
-      defaultTranslationEngine: 'pocket-prefix' as const,
+      translationEngines: this.allowedTranslationEngines,
+      defaultTranslationEngine: this.defaultTranslationEngine,
+      outgoingPairedCaptions: this.outgoingPairedCaptions,
     }));
   }
 

@@ -4,6 +4,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import WebSocket from 'ws';
 import twilio from 'twilio';
 import RequestClient from 'twilio/lib/base/RequestClient';
+import TwilioRestException from 'twilio/lib/base/RestException';
 
 import type { SoloConfig } from './config';
 import { safeEqual } from './security';
@@ -11,6 +12,7 @@ import { ConversationEventAdapter } from './conversation-events';
 import { TranslationBridge } from './translation-bridge';
 import {
   ContinuousTranslationBridge,
+  type ContinuousBridgeAudioAdmission,
   type LocalVoiceSynthesizer,
 } from './continuous-translation-bridge';
 import { getNanoVoiceWorker, getNanoCaptionVoice } from './nano-runtime';
@@ -39,6 +41,7 @@ export type CallView = {
   translationEngine: TranslationEngine;
   translationReady: boolean;
   captionState?: 'connecting' | 'ready' | 'failed';
+  outgoingCaptionState?: 'connecting' | 'ready' | 'failed';
   error?: string;
   providerErrorCode?: number;
   providerHttpStatus?: number;
@@ -47,6 +50,8 @@ export type CallView = {
 export type CallProvider = {
   create(options: Record<string, unknown>): Promise<{ sid: string }>;
   hangup(sid: string): Promise<void>;
+  /** Provider-enforced cap, independent of this process's resident timer. */
+  limit?(sid: string, seconds: number): Promise<void>;
 };
 export type BridgeLike = {
   attach(role: Role, socket: WebSocket, streamSid: string): void;
@@ -56,6 +61,35 @@ export type BridgeOptions = ConstructorParameters<
   typeof TranslationBridge
 >[0] & {
   translationEngine?: TranslationEngine;
+  /** Explicit server choice: this adds two separately metered caption streams. */
+  outgoingCaptions?: boolean;
+  admitAudio?: (event: ContinuousBridgeAudioAdmission) => boolean;
+  onOutgoingCaptionState?: (event: {
+    role: 'local';
+    state: 'connecting' | 'ready' | 'failed';
+    translationSource: 'independent_text';
+  }) => void;
+};
+/** A trusted durable admission port. No browser field can select or bypass it.
+ * Recovery and invoice reconciliation remain separate operator operations.
+ */
+export type CallJournalPort = {
+  assertTarget(target: string): void;
+  assertCallCurrent(callId: string): void;
+  callLimits(callId: string): Readonly<{
+    deadline: number;
+    remainingWallClockMs: number;
+  }>;
+  beginCreate(callId: string, role: Role, target?: string): string;
+  recordCreated(callId: string, role: Role, sid: string): void;
+  markUnknown(callId: string, role?: Role): void;
+  confirmAbsent(callId: string, role: Role): void;
+  confirmTerminal(callId: string, role: Role, sid: string): void;
+  consumeMedia(
+    callId: string,
+    direction: 'input' | 'output',
+    bytes: number,
+  ): void;
 };
 /** Trusted server integration only; never constructed from browser fields. */
 export type OutboundCallAdmission = {
@@ -94,6 +128,9 @@ export function createSessionBridge(
     return new ContinuousTranslationBridge({
       ...settings,
       remoteCaptions: true,
+      outgoingCaptions:
+        settings.translationEngine === 'continuous-captions' &&
+        settings.outgoingCaptions === true,
       outgoingPrefixes: settings.translationEngine === 'pocket-prefix',
       ...(localVoice ? { localVoice } : {}),
     });
@@ -125,6 +162,10 @@ type Session = {
   bridge?: BridgeLike;
   readyRoles: Set<Role>;
   timer?: ReturnType<typeof setTimeout>;
+  deadlineTimer?: ReturnType<typeof setTimeout>;
+  callDeadline?: number;
+  journalUnconfirmed: boolean;
+  localLimitReady: boolean;
   ended: boolean;
   ending?: Promise<void>;
   provider: CallProvider;
@@ -145,6 +186,10 @@ const terminal = new Set([
   'no-answer',
   'canceled',
 ]);
+// The locked SDK exports this module as a nested CJS default in native ESM.
+const ProviderRestException =
+  (TwilioRestException as unknown as { default?: typeof TwilioRestException })
+    .default || TwilioRestException;
 
 export async function terminateCall(call: {
   fetch(): Promise<{ status: string }>;
@@ -186,6 +231,9 @@ export function twilioProvider(config: SoloConfig): CallProvider {
   return {
     create: async (options) => client.calls.create(options as any),
     hangup: async (sid) => terminateCall(client.calls(sid)),
+    limit: async (sid, seconds) => {
+      await client.calls(sid).update({ timeLimit: seconds });
+    },
   };
 }
 
@@ -212,6 +260,10 @@ export class SessionManager extends EventEmitter {
 
   private readonly explicitControlDependencies: boolean;
 
+  private readonly callJournal?: CallJournalPort;
+
+  private journalFault = false;
+
   constructor(
     options: {
       providerFactory?: (config: SoloConfig) => CallProvider;
@@ -219,6 +271,7 @@ export class SessionManager extends EventEmitter {
       now?: () => number;
       setupTimeoutMs?: number;
       maxCallMs?: number;
+      callJournal?: CallJournalPort;
     } = {},
   ) {
     super();
@@ -230,6 +283,25 @@ export class SessionManager extends EventEmitter {
     this.bridgeFactory = options.bridgeFactory || createSessionBridge;
     this.setupTimeoutMs = options.setupTimeoutMs ?? 75000;
     this.maxCallMs = options.maxCallMs ?? 60 * 60 * 1000;
+    this.callJournal = options.callJournal;
+    if (
+      this.callJournal &&
+      (!this.explicitControlDependencies ||
+        ![
+          'assertTarget',
+          'assertCallCurrent',
+          'callLimits',
+          'beginCreate',
+          'recordCreated',
+          'markUnknown',
+          'confirmAbsent',
+          'confirmTerminal',
+          'consumeMedia',
+        ].every(
+          (name) => typeof Reflect.get(this.callJournal!, name) === 'function',
+        ))
+    )
+      throw new SessionError('INVALID_CALL_JOURNAL', 503);
   }
 
   get hasExplicitControlDependencies(): boolean {
@@ -237,7 +309,12 @@ export class SessionManager extends EventEmitter {
   }
 
   get controlAdmissionBlocked(): boolean {
-    return this.closing || !!this.activeId || this.cleanupUnconfirmed;
+    return (
+      this.closing ||
+      this.journalFault ||
+      !!this.activeId ||
+      this.cleanupUnconfirmed
+    );
   }
 
   hasSession(id: string): boolean {
@@ -268,8 +345,94 @@ export class SessionManager extends EventEmitter {
 
   private get cleanupUnconfirmed(): boolean {
     return [...this.sessions.values()].some(
-      (session) => session.pendingCleanup.size || session.uncertainRoles.size,
+      (session) =>
+        session.pendingCleanup.size ||
+        session.uncertainRoles.size ||
+        session.journalUnconfirmed,
     );
+  }
+
+  /** The runtime calls this immediately after reserve, before signing a Voice
+   * capability. The independent timer never restarts at answer or reconnect.
+   */
+  enforceCallDeadline(id: string): void {
+    const session = this.sessions.get(id);
+    if (!session || session.ended || !session.admission || !this.callJournal)
+      throw new SessionError('BUDGET_NOT_READY', 503);
+    session.admission.authorizeCurrent();
+    const limits = this.callJournal.callLimits(id);
+    if (
+      !Number.isSafeInteger(limits.deadline) ||
+      !Number.isSafeInteger(limits.remainingWallClockMs) ||
+      limits.remainingWallClockMs < 1 ||
+      limits.remainingWallClockMs > this.maxCallMs ||
+      (session.callDeadline !== undefined &&
+        session.callDeadline !== limits.deadline)
+    )
+      throw new SessionError('BUDGET_NOT_READY', 503);
+    if (session.deadlineTimer) return;
+    session.callDeadline = limits.deadline;
+    session.deadlineTimer = setTimeout(() => {
+      this.track(this.end(id, 'CALL_DURATION_LIMIT'));
+    }, limits.remainingWallClockMs);
+    session.deadlineTimer.unref?.();
+  }
+
+  private journalFailed(session: Session): void {
+    session.journalUnconfirmed = true;
+    this.journalFault = true;
+    try {
+      this.beginEndIntent(session.view.id, 'BUDGET_NOT_READY');
+    } catch {
+      // An event subscriber cannot prevent cleanup of known provider SIDs.
+    }
+    this.track(this.end(session.view.id));
+  }
+
+  private journalWrite(session: Session, write: () => void): void {
+    try {
+      write();
+    } catch {
+      this.journalFailed(session);
+      throw new SessionError('BUDGET_NOT_READY', 503);
+    }
+  }
+
+  private admitAudio(
+    session: Session,
+    event: ContinuousBridgeAudioAdmission,
+  ): boolean {
+    if (!this.liveAdmission(session)) return false;
+    try {
+      this.callJournal!.assertCallCurrent(session.view.id);
+      if (
+        !['local', 'remote'].includes(event.role) ||
+        ![
+          'native_translation',
+          'outgoing_captions',
+          'remote_captions',
+          'return_original',
+        ].includes(event.path) ||
+        !['connect', 'input', 'output'].includes(event.stage) ||
+        !Number.isSafeInteger(event.bytes) ||
+        event.bytes < 0 ||
+        !Number.isFinite(event.audioMs) ||
+        event.audioMs < 0 ||
+        (event.stage === 'connect' &&
+          (event.bytes !== 0 || event.audioMs !== 0))
+      )
+        throw new SessionError('BUDGET_NOT_READY', 503);
+      if (event.bytes > 0)
+        this.callJournal!.consumeMedia(
+          session.view.id,
+          event.stage === 'output' ? 'output' : 'input',
+          event.bytes,
+        );
+      return true;
+    } catch {
+      this.track(this.end(session.view.id, 'BUDGET_LIMIT_REACHED'));
+      return false;
+    }
   }
 
   isCleanupConfirmed(id: string): boolean {
@@ -281,7 +444,8 @@ export class SessionManager extends EventEmitter {
     return !!(
       session.pendingCleanup.size ||
       session.uncertainRoles.size ||
-      session.dialing.size
+      session.dialing.size ||
+      session.journalUnconfirmed
     );
   }
 
@@ -308,6 +472,12 @@ export class SessionManager extends EventEmitter {
     admission?: OutboundCallAdmission,
   ): Session {
     if (this.closing) throw new SessionError('SHUTTING_DOWN', 503);
+    if (this.journalFault) throw new SessionError('BUDGET_NOT_READY', 503);
+    if (this.callJournal) {
+      if (direction !== 'outbound' || admission?.deferBrowserJoin !== true)
+        throw new SessionError('CONTROLLED_CALL_REQUIRED', 403);
+      this.callJournal.assertTarget(to);
+    }
     if (this.activeId) throw new SessionError('BUSY', 409);
     if (this.cleanupUnconfirmed)
       throw new SessionError('CALL_CLEANUP_UNCONFIRMED', 409);
@@ -365,6 +535,8 @@ export class SessionManager extends EventEmitter {
       uncertainRoles: new Set(),
       cleanupTasks: new Map(),
       ended: false,
+      journalUnconfirmed: false,
+      localLimitReady: !this.callJournal,
       provider: this.providerFactory(config),
     };
     this.sessions.set(id, session);
@@ -469,6 +641,8 @@ export class SessionManager extends EventEmitter {
     if (!replayJoin) this.bindCall(session, 'local', fields.CallSid);
     if (cleanupJoin || !this.admissionCurrent(session))
       this.beginEndIntent(session.view.id, 'CALL_AUTHORIZATION_REVOKED');
+    else if (this.callJournal && !session.ended)
+      this.enforceCallDeadline(session.view.id);
     if (session.ended)
       this.track(
         this.end(session.view.id).then(() =>
@@ -476,6 +650,40 @@ export class SessionManager extends EventEmitter {
         ),
       );
     return this.streamTwiml(session, 'local');
+  }
+
+  /** A controlled cloud callback must finish the provider cap before publishing
+   * stream TwiML. Binding a SID still preserves independent cleanup if it fails.
+   */
+  async connectBrowserControlled(
+    fields: Record<string, string>,
+  ): Promise<string> {
+    const twiml = this.connectBrowser(fields);
+    if (!this.callJournal) return twiml;
+    const session = this.getAuthorized(fields.sessionId, 'local', fields.nonce);
+    if (session.ended) return this.rejectTwiml(false);
+    try {
+      if (
+        !this.admissionCurrent(session) ||
+        typeof session.provider.limit !== 'function'
+      )
+        throw new SessionError('BUDGET_NOT_READY', 503);
+      const limits = this.callJournal.callLimits(session.view.id);
+      const seconds = Math.max(
+        1,
+        Math.floor(limits.remainingWallClockMs / 1000),
+      );
+      if (!Number.isSafeInteger(seconds) || seconds > 300)
+        throw new SessionError('BUDGET_NOT_READY', 503);
+      await session.provider.limit(fields.CallSid, seconds);
+      if (session.ended || !this.admissionCurrent(session))
+        throw new SessionError('CALL_AUTHORIZATION_REVOKED', 403);
+      session.localLimitReady = true;
+      return this.streamTwiml(session, 'local');
+    } catch {
+      await this.end(session.view.id, 'CALL_PROVIDER_LIMIT_FAILED');
+      return this.rejectTwiml(false);
+    }
   }
 
   connectLeg(id: string, role: Role, nonce: string, sid: string): string {
@@ -515,12 +723,16 @@ export class SessionManager extends EventEmitter {
     session.callSids[role] = sid;
     if (session.ended && !session.confirmedTerminal.has(sid))
       session.pendingCleanup.add(sid);
+    if (this.callJournal)
+      this.journalWrite(session, () =>
+        this.callJournal!.recordCreated(session.view.id, role, sid),
+      );
   }
 
   private admissionCurrent(session: Session): boolean {
-    if (!session.admission) return true;
     try {
-      session.admission.authorizeCurrent();
+      session.admission?.authorizeCurrent();
+      this.callJournal?.assertCallCurrent(session.view.id);
       return true;
     } catch {
       return false;
@@ -729,7 +941,8 @@ export class SessionManager extends EventEmitter {
         !session.callSids[role] ||
         start.callSid !== session.callSids[role] ||
         !/^MZ[0-9a-f]{32}$/i.test(start.streamSid || '') ||
-        session.sockets[role]
+        session.sockets[role] ||
+        !session.localLimitReady
       )
         throw new SessionError('INVALID_MEDIA_STREAM', 403);
       if (
@@ -768,6 +981,12 @@ export class SessionManager extends EventEmitter {
           transcriptionModel: session.config.OPENAI_TRANSCRIPTION_MODEL,
           proxyUrl: session.config.OPENAI_PROXY_URL,
           translationEngine: session.view.translationEngine,
+          ...(this.callJournal
+            ? {
+                admitAudio: (event: ContinuousBridgeAudioAdmission) =>
+                  this.admitAudio(session, event),
+              }
+            : {}),
           onTranscript: (transcript) => {
             if (this.liveAdmission(session)) {
               this.emit('event', {
@@ -848,6 +1067,24 @@ export class SessionManager extends EventEmitter {
             this.emit('event', {
               event: 'caption-status',
               data: { state: caption.state, sessionId: session.view.id },
+            });
+          },
+          onOutgoingCaptionState: (caption) => {
+            if (
+              !this.liveAdmission(session) ||
+              session.view.translationEngine !== 'continuous-captions'
+            )
+              return;
+            session.view.outgoingCaptionState = caption.state;
+            this.publish(session);
+            this.emit('event', {
+              event: 'caption-status',
+              data: {
+                role: 'local',
+                state: caption.state,
+                translationSource: 'independent_text',
+                sessionId: session.view.id,
+              },
             });
           },
           onAudioDiagnostic: (audio) => {
@@ -944,6 +1181,30 @@ export class SessionManager extends EventEmitter {
       await this.end(session.view.id, 'CALL_AUTHORIZATION_REVOKED');
       return;
     }
+    let timeLimit: number | undefined;
+    if (this.callJournal) {
+      try {
+        const limits = this.callJournal.callLimits(session.view.id);
+        timeLimit = Math.max(1, Math.floor(limits.remainingWallClockMs / 1000));
+        this.callJournal.beginCreate(
+          session.view.id,
+          role,
+          role === 'remote' ? session.view.to : undefined,
+        );
+      } catch {
+        session.dialing.delete(role);
+        this.journalFailed(session);
+        await this.end(session.view.id);
+        return;
+      }
+      // A durable port may fail or revoke synchronously. Never use its successful
+      // write as authority to submit a request after controller revocation.
+      if (session.ended || !this.admissionCurrent(session)) {
+        session.dialing.delete(role);
+        await this.end(session.view.id, 'CALL_AUTHORIZATION_REVOKED');
+        return;
+      }
+    }
     session.attempted.add(role);
     try {
       const created = await session.provider.create({
@@ -958,6 +1219,7 @@ export class SessionManager extends EventEmitter {
         statusCallbackMethod: 'POST',
         statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
         timeout: 40,
+        ...(timeLimit !== undefined ? { timeLimit } : {}),
       });
       this.bindCall(session, role, created.sid);
       session.uncertainRoles.delete(role);
@@ -992,11 +1254,28 @@ export class SessionManager extends EventEmitter {
       // A definitive 4xx rejects creation. Transport failures/5xx may have
       // accepted it: keep the callback nonce alive and refuse a safe shutdown
       // until a signed callback reveals and terminates that call.
-      if (
-        !session.callSids[role] &&
-        !(status >= 400 && status < 500 && status !== 408)
-      )
-        session.uncertainRoles.add(role);
+      if (!session.callSids[role]) {
+        const definitive = this.callJournal
+          ? error instanceof ProviderRestException &&
+            Number.isInteger(status) &&
+            status >= 400 &&
+            status < 500 &&
+            status !== 408 &&
+            status !== 429
+          : status >= 400 && status < 500 && status !== 408;
+        if (!definitive) session.uncertainRoles.add(role);
+        if (this.callJournal) {
+          try {
+            this.journalWrite(session, () => {
+              if (definitive)
+                this.callJournal!.confirmAbsent(session.view.id, role);
+              else this.callJournal!.markUnknown(session.view.id, role);
+            });
+          } catch {
+            // Keep draining known legs even when durable recording failed.
+          }
+        }
+      }
       await this.end(session.view.id, 'TWILIO_CALL_FAILED');
     } finally {
       session.dialing.delete(role);
@@ -1021,6 +1300,10 @@ export class SessionManager extends EventEmitter {
     if (!stream && terminal.has(fields.CallStatus)) {
       session.confirmedTerminal.add(fields.CallSid);
       session.pendingCleanup.delete(fields.CallSid);
+      if (this.callJournal)
+        this.journalWrite(session, () =>
+          this.callJournal!.confirmTerminal(id, role, fields.CallSid),
+        );
     }
     if (!this.admissionCurrent(session))
       this.beginEndIntent(session.view.id, 'CALL_AUTHORIZATION_REVOKED');
@@ -1078,6 +1361,18 @@ export class SessionManager extends EventEmitter {
         await session.provider.hangup(sid);
         session.pendingCleanup.delete(sid);
         session.confirmedTerminal.add(sid);
+        const role = (Object.keys(session.callSids) as Role[]).find(
+          (candidate) => session.callSids[candidate] === sid,
+        );
+        if (this.callJournal && role) {
+          try {
+            this.journalWrite(session, () =>
+              this.callJournal!.confirmTerminal(session.view.id, role, sid),
+            );
+          } catch {
+            // Provider termination succeeded; its durable confirmation did not.
+          }
+        }
         this.settleEnded(session);
       } catch {
         this.cleanupFailed(session);
@@ -1098,6 +1393,7 @@ export class SessionManager extends EventEmitter {
     session.view.translationReady = false;
     session.readyRoles.clear();
     clearTimeout(session.timer);
+    clearTimeout(session.deadlineTimer);
     session.view.status = 'ending';
     if (error) session.view.error = error;
     for (const sid of Object.values(session.callSids)) {

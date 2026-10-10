@@ -333,6 +333,7 @@ test('native same-origin fetch bootstrap returns only current CSRF and safe info
     busy: false,
     translationEngines: ['pocket-prefix', 'pocket-captions'],
     defaultTranslationEngine: 'pocket-prefix',
+    outgoingPairedCaptions: true,
   });
   assert.equal(response.headers['cache-control'], 'private, no-store');
   assert.match(response.headers.vary || '', /Cookie/);

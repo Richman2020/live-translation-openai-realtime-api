@@ -16,6 +16,7 @@ import { CloudControllerLeases } from '../src/solo/controller-lease';
 import { CloudVoiceJoin } from '../src/solo/cloud-voice-join';
 import type { SoloConfig } from '../src/solo/config';
 import { SessionManager } from '../src/solo/session-manager';
+import type { TranslationEngine } from '../src/solo/translation-engine';
 
 // Synthetic credentials and provider behavior are TEST ONLY. No network clients.
 const origin = 'https://phone.example.com';
@@ -48,6 +49,9 @@ function fixture(
     leaseTtlMs?: number;
     noVoice?: boolean;
     voiceRelease?: () => Promise<void>;
+    allowedTranslationEngines?: readonly TranslationEngine[];
+    defaultTranslationEngine?: TranslationEngine;
+    outgoingPairedCaptions?: boolean;
   } = {},
 ) {
   let now = 10000;
@@ -77,6 +81,7 @@ function fixture(
   let hangups = 0;
   let publicChecks = 0;
   let translationChecks = 0;
+  const checkedEngines: TranslationEngine[] = [];
   const admissions: any[] = [];
   const manager = new SessionManager({
     now: () => now,
@@ -126,6 +131,9 @@ function fixture(
     controllerLeases,
     voiceJoin: options.noVoice ? undefined : voiceJoin,
     maxCalls: options.maxCalls,
+    allowedTranslationEngines: options.allowedTranslationEngines,
+    defaultTranslationEngine: options.defaultTranslationEngine,
+    outgoingPairedCaptions: options.outgoingPairedCaptions,
     revalidationIntervalMs: 10,
     publicReadinessChecker: async () => {
       publicChecks += 1;
@@ -133,8 +141,9 @@ function fixture(
         ? options.publicChecker()
         : { status: 'ready', code: 'PUBLIC_CALLBACK_READY' };
     },
-    translationReadinessChecker: async () => {
+    translationReadinessChecker: async (_config, engine) => {
       translationChecks += 1;
+      checkedEngines.push(engine);
       return { name: 'offline', status: 'passed', code: 'OFFLINE_PASSED' };
     },
   });
@@ -183,6 +192,7 @@ function fixture(
     read,
     create,
     admissions,
+    checkedEngines,
     advance: (value: number) => {
       now = value;
     },
@@ -226,6 +236,13 @@ test('service requires the complete explicit dependency bundle and matching fixe
     { controllerLeases: undefined },
     { revalidationIntervalMs: 1001 },
     { maxCalls: 101 },
+    { allowedTranslationEngines: [] },
+    { allowedTranslationEngines: ['legacy'] },
+    { allowedTranslationEngines: ['continuous'] },
+    { allowedTranslationEngines: ['pocket-prefix', 'pocket-prefix'] },
+    { allowedTranslationEngines: ['continuous-captions'] },
+    { defaultTranslationEngine: 'continuous-captions' },
+    { outgoingPairedCaptions: 'true' },
   ])
     denied(
       () =>
@@ -694,6 +711,44 @@ test('controlled reservations require a lease and use Pocket without global brow
     () => f.access.acquireController(f.post(), 'other-tab'),
     (error: any) => error.code === 'CONTROLLER_BUSY',
   );
+});
+
+test('explicit continuous configuration publishes and enforces its own default without Pocket readiness', async (t) => {
+  const engines: TranslationEngine[] = ['continuous-captions'];
+  const f = fixture(t, {
+    allowedTranslationEngines: engines,
+    defaultTranslationEngine: 'continuous-captions',
+  });
+  engines.push('pocket-prefix');
+  const bootstrap = f.access.browserSession(f.read());
+  assert.deepEqual(bootstrap.translationEngines, ['continuous-captions']);
+  assert.equal(bootstrap.defaultTranslationEngine, 'continuous-captions');
+  assert.equal(bootstrap.outgoingPairedCaptions, false);
+  assert.equal(f.access.configuredDefaultTranslationEngine, 'continuous-captions');
+  assert.equal(Object.isFrozen(bootstrap.translationEngines), true);
+  await assert.rejects(
+    f.access.prepareCreate(f.post(), config, '+14155550123', 'pocket-prefix', f.proof),
+    (error: any) => error.code === 'INVALID_TRANSLATION_ENGINE',
+  );
+  assert.equal(f.counts().translationChecks, 0);
+  const prepared = await f.access.prepareCreate(f.post(), config, '+14155550123', undefined, f.proof);
+  assert.equal(prepared.translationEngine, 'continuous-captions');
+  assert.equal(f.access.createPrepared(prepared).translationEngine, 'continuous-captions');
+  assert.deepEqual(f.checkedEngines, ['continuous-captions']);
+});
+
+test('explicit outgoing caption metadata cannot authorize an engine outside the configured allowlist', async (t) => {
+  const f = fixture(t, {
+    allowedTranslationEngines: ['continuous-captions'],
+    defaultTranslationEngine: 'continuous-captions',
+    outgoingPairedCaptions: true,
+  });
+  assert.equal(f.access.browserSession(f.read()).outgoingPairedCaptions, true);
+  await assert.rejects(
+    f.access.prepareCreate(f.post(), config, '+14155550123', 'pocket-prefix', f.proof),
+    (error: any) => error.code === 'INVALID_TRANSLATION_ENGINE',
+  );
+  assert.equal(f.counts().publicChecks, 0);
 });
 
 test('revoking the controller during readiness refuses creation with the login still valid', async (t) => {

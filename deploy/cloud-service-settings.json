@@ -1,0 +1,31 @@
+{
+  "purpose": "Reviewable settings only; not an automatically applied Railway config",
+  "publicOrigin": "https://ai-phone-test-staging.up.railway.app",
+  "publicAddressStatus": "Assigned by the parent task; no deployment or health verified",
+  "googleRedirectUri": "https://ai-phone-test-staging.up.railway.app/auth/google/callback",
+  "twimlAppVoiceRequest": {
+    "url": "https://ai-phone-test-staging.up.railway.app/voice/client",
+    "method": "POST",
+    "requiresTwilioSignature": true
+  },
+  "builder": "DOCKERFILE",
+  "dockerfilePath": "Dockerfile.cloud",
+  "startCommand": "node --import=extensionless/register dist/solo/cloud-index.js",
+  "region": "us-east4-eqdc4a",
+  "replicas": 1,
+  "serverless": false,
+  "healthcheckPath": "/api/health",
+  "healthcheckTimeoutSeconds": 30,
+  "restartPolicy": "NEVER",
+  "deploymentOverlapSeconds": 0,
+  "drainingSeconds": 40,
+  "journal": {
+    "requiresExplicitPersistentVolume": true,
+    "mountPath": "/data",
+    "privateDirectory": "/data/phone-journal",
+    "ownerMode": "0700",
+    "automaticCrashLockRemoval": false
+  },
+  "supplierCallsDuringStartup": 0,
+  "deploymentPerformed": false
+}
