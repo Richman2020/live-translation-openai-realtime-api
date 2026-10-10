@@ -5,6 +5,7 @@ import { checkConfig, type SoloConfig } from './config';
 import { GoogleOidcClient } from './google-oidc';
 import { GOOGLE_LOGIN_PATHS } from './google-login';
 import type { CloudTrialBudgetPolicy } from './cloud-budget-journal';
+import { selectCloudServiceMode } from './cloud-web-verification-config';
 
 type Environment = Readonly<Record<string, string | undefined>>;
 export type CloudServiceConfig = Readonly<{
@@ -81,6 +82,8 @@ export function parseCloudServiceConfig(
   env: Environment,
   now = Date.now(),
 ): CloudServiceConfig {
+  if (selectCloudServiceMode(env) !== 'phone')
+    throw new Error('CLOUD_PHONE_MODE_REQUIRED');
   if (!Number.isSafeInteger(now) || now < 0)
     throw new Error('CLOUD_CLOCK_INVALID');
   if (env.AI_PHONE_RUNTIME_MODE !== 'cloud')

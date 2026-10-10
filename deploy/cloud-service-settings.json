@@ -32,5 +32,58 @@
     "automaticCrashLockRemoval": false
   },
   "supplierCallsDuringStartup": 0,
-  "deploymentPerformed": false
+  "deploymentPerformed": false,
+  "serviceModeReview": {
+    "default": "phone",
+    "environmentVariable": "CLOUD_SERVICE_MODE",
+    "phone": {
+      "retainsOriginalReviewedSettings": true,
+      "requiresFullProviderAuthorizationAndDurableBudget": true
+    },
+    "webVerification": {
+      "explicitValue": "web-verification",
+      "callsEnabled": false,
+      "requiresGoogleIdentityAndAbsoluteDeadline": true,
+      "nonGmailRequiresExpectedHostedDomainOrPinnedSubject": true,
+      "requiresProviderSecretsOrTarget": false,
+      "requiresPaidCapabilityConfirmationsOrRates": false,
+      "createsProviderJournalOrVoiceComponents": false,
+      "requiresPersistentVolume": false,
+      "publicLoginShell": "/controlled",
+      "authenticatedFixedStatus": "/api/status",
+      "disabledSurfaces": [
+        "call-control",
+        "voice",
+        "media",
+        "WebSocket upgrades"
+      ],
+      "documentation": "docs/CLOUD_WEB_VERIFICATION.md"
+    }
+  },
+  "phaseNotes": {
+    "source": {
+      "stagedCommit": "004f7ee62c2960db296880bfa987bdac9d57b0aa",
+      "newWebVerificationCodeAppliedToRailway": false,
+      "deploymentPerformed": false
+    },
+    "resourceWindow": {
+      "railwayServices": 2,
+      "combinedAuthorizedUsd": 0.5,
+      "maximumMinutes": 60,
+      "sharedStartAndStopCoordinatedByParentTask": true,
+      "applicationDeadlineIsNotPlatformBillingCap": true
+    },
+    "persistentVolume": {
+      "state": "STAGED",
+      "provisioned": false,
+      "capacityGb": 5,
+      "retentionUntilAcceptanceApproved": true,
+      "usdPerActualUsedGbMonth": 0.15,
+      "billingIncludesFilesystemMetadata": true,
+      "parentTaskOwnsProvisioningAndRetention": true,
+      "webVerificationRequiresVolume": false
+    },
+    "actualGoogleLoginVerified": false,
+    "actualPhoneCallVerified": false
+  }
 }

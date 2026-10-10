@@ -29,7 +29,28 @@ export const CLOUD_CONTROLLED_PUBLIC_PATHS = Object.freeze([
   '/assets/speaker-test.wav',
 ]);
 
+export const CLOUD_WEB_VERIFICATION_PUBLIC_PATHS = Object.freeze([
+  '/controlled',
+  '/web-verification.js',
+  '/styles.css',
+  '/favicon.svg',
+]);
+
 const publicPaths = new Set<string>(CLOUD_CONTROLLED_PUBLIC_PATHS);
+const webPublicPaths = new Set<string>(CLOUD_WEB_VERIFICATION_PUBLIC_PATHS);
+const webGetPaths = new Set([
+  '/api/health',
+  '/api/status',
+  '/api/browser-session',
+  '/auth/status',
+  '/auth/google/callback',
+]);
+const webPostPaths = new Set([
+  '/auth/google/start',
+  '/auth/google/cancel',
+  '/auth/logout',
+  '/auth/session/renew',
+]);
 const getPaths = new Set([
   '/api/health',
   '/api/status',
@@ -79,7 +100,11 @@ const MAX_UPGRADE_HEAD_BYTES = 64 * 1024;
 const WEB_SOCKET_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 const RAILWAY_HEALTH_AUTHORITY = 'healthcheck.railway.app';
 
-function validTarget(req: IncomingMessage, upgrade: boolean): boolean {
+function validTarget(
+  req: IncomingMessage,
+  upgrade: boolean,
+  mode: 'phone' | 'web-verification',
+): boolean {
   const target = req.url || '';
   if (
     !target.startsWith('/') ||
@@ -95,14 +120,25 @@ function validTarget(req: IncomingMessage, upgrade: boolean): boolean {
   const question = target.indexOf('?');
   const path = question === -1 ? target : target.slice(0, question);
   if (path.includes('%')) return false;
-  if (upgrade) return req.method === 'GET' && target === '/voice/media';
-  if (question !== -1 && !queryPaths.has(path)) return false;
-  if (req.method === 'GET') return getPaths.has(path) || publicPaths.has(path);
-  if (req.method === 'HEAD') return publicPaths.has(path);
+  if (upgrade)
+    return (
+      mode === 'phone' && req.method === 'GET' && target === '/voice/media'
+    );
+  const web = mode === 'web-verification';
+  if (
+    question !== -1 &&
+    (web ? path !== '/auth/google/callback' : !queryPaths.has(path))
+  )
+    return false;
+  const assets = web ? webPublicPaths : publicPaths;
+  if (req.method === 'GET')
+    return (web ? webGetPaths : getPaths).has(path) || assets.has(path);
+  if (req.method === 'HEAD') return assets.has(path);
   if (req.method === 'POST')
     return (
-      postPaths.has(path) ||
-      /^\/api\/calls\/[A-Za-z0-9_-]{1,128}\/(?:hangup|voice)$/.test(path)
+      (web ? webPostPaths : postPaths).has(path) ||
+      (!web &&
+        /^\/api\/calls\/[A-Za-z0-9_-]{1,128}\/(?:hangup|voice)$/.test(path))
     );
   return false;
 }
@@ -213,11 +249,17 @@ function rejectHttp(reply: ServerResponse, status: number, code: string): void {
   reply.end(body);
 }
 
-function rejectUpgrade(socket: Socket, status: number, code: string): void {
+function rejectUpgrade(
+  socket: Socket,
+  status: number,
+  code: string,
+  destroyAfterWrite = false,
+): void {
   if (socket.destroyed) return;
   const body = JSON.stringify({ error: code });
   socket.end(
     `HTTP/1.1 ${status} Rejected\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n${body}`,
+    destroyAfterWrite ? () => socket.destroy() : undefined,
   );
 }
 
@@ -227,6 +269,7 @@ export function createCloudIngress(options: {
   runtime: CloudPhoneRuntime;
   upstreamPort: number;
   upstreamTimeoutMs?: number;
+  mode?: 'phone' | 'web-verification';
 }) {
   const runtime = options?.runtime;
   let pinned: CloudPhoneRuntime;
@@ -241,7 +284,9 @@ export function createCloudIngress(options: {
     throw new Error('INVALID_CLOUD_INGRESS');
   }
   const timeoutMs = options.upstreamTimeoutMs ?? 30000;
+  const mode = options.mode ?? 'phone';
   if (
+    !['phone', 'web-verification'].includes(mode) ||
     runtime.mode !== 'cloud' ||
     runtime.host !== pinned.host ||
     runtime.publicOrigin !== pinned.publicOrigin ||
@@ -273,7 +318,7 @@ export function createCloudIngress(options: {
       rejectHttp(reply, 503, 'CLOUD_INGRESS_UNAVAILABLE');
       return;
     }
-    if (!validTarget(req, false)) {
+    if (!validTarget(req, false, mode)) {
       rejectHttp(reply, 404, 'NOT_FOUND');
       return;
     }
@@ -294,7 +339,10 @@ export function createCloudIngress(options: {
       return;
     }
     if (healthProbe) {
-      const body = JSON.stringify({ appId: 'ai-phone-solo' });
+      const body = JSON.stringify({
+        appId: 'ai-phone-solo',
+        ...(mode === 'web-verification' ? { mode, callsEnabled: false } : {}),
+      });
       reply.writeHead(200, {
         'content-type': 'application/json',
         'content-length': Buffer.byteLength(body),
@@ -383,6 +431,10 @@ export function createCloudIngress(options: {
   });
   server.on('upgrade', (req, external, head) => {
     const socket = external as Socket;
+    if (mode === 'web-verification') {
+      rejectUpgrade(socket, 403, 'CALLS_DISABLED', true);
+      return;
+    }
     if (
       closing ||
       responses.size + requests.size + upstreamSockets.size >= 64
@@ -390,7 +442,7 @@ export function createCloudIngress(options: {
       rejectUpgrade(socket, 503, 'CLOUD_INGRESS_UNAVAILABLE');
       return;
     }
-    if (!validTarget(req, true)) {
+    if (!validTarget(req, true, mode)) {
       rejectUpgrade(socket, 404, 'NOT_FOUND');
       return;
     }

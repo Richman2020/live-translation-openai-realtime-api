@@ -4,7 +4,18 @@
 
 需求见 [PROJECT_BRIEF.md](PROJECT_BRIEF.md)，工作规则见 [AGENTS.md](AGENTS.md)，运行步骤见 [LOCAL_SETUP.md](LOCAL_SETUP.md)，后续执行入口见 [LOCAL_CODEX_HANDOFF.md](LOCAL_CODEX_HANDOFF.md)。
 
-## 最新实施：限时 Virginia 连续翻译云候选（2026-10-10）
+## 最新实施：独立网页验收与电话入口隔离（2026-10-10）
+
+- 从真实远端 `004f7ee62c2960db296880bfa987bdac9d57b0aa`、干净工作区继续，沿用 `codex/cloud-phone-conversation-20261009` / [草稿 PR #3](https://github.com/Richman2020/live-translation-openai-realtime-api/pull/3)。用户今晚离线期间先做网页/健康/严格 Google 登录验收，不拨号。代码任务不部署或修改生产，既有 staging 暂存源码仍固定旧提交，升级与两服务统一资源窗口由主线程安排。
+- 显式 `CLOUD_SERVICE_MODE=web-verification` 新增独立配置、服务与工作台登录壳；仅固定 HTTPS 来源、PORT、single warm 实例、严格 Google 身份配置和最多一小时截止即可检查。网页模式不读取电话/模型凭据、四个确认开关、号码、费率、预算或卷参数，不装配 provider/manager/bridge/signer/journal。`--check` 只输出固定模式与电话关闭状态，不能称 Google/供应商已连通。
+- 缺省仍为完整 `phone`；空或非法模式拒绝而不静默回退，两种 parser 互斥，运行配置快照不可升级权限。网页 ingress 独立精确白名单，电话创建、controller、Voice、媒体 WebSocket 及其它电话 API 均硬拒绝；匿名仅登录壳/公共资产/健康，私有状态和 session bootstrap 仍鉴权。沿用原严格 OIDC、精确邮箱/预期 hd 或已核实 sub、Origin/CSRF、cookie、过期/退出/最终响应复核与 loopback 上游。
+- 用户已授权配置齐后离线启动两个测试服务，合计资源最多 0.50 美元、最多一小时；持久 5 GB 卷及验收结束前实际用量费用也已授权。AI 卷、非秘密配置、构建路径及旧 SHA 源码仅暂存，尚无部署或 provision，不在本代码任务应用。当前预期 Workspace 域配置不是已经观测到 signed token hd，浏览器现有 Google 工作会话也不是本应用 OAuth 回调通过。
+- 云端 Linux、Node24.19.0/npm11.9.0，锁文件不变；最终完整回归 1122 项：1117 通过、5 个既有 Windows 专属跳过、0 失败（33.82 秒）。完整 source/test typecheck、生产 build、修改源码 ESLint、全部 public JS 语法、YAML/shell/JSON、原电话配置一致性及 diff 通过。全仓 lint 仍有未修改的旧 `src/services/AudioInterceptor.ts` 三项既有错误（134/135/340 行）；没有扩大本任务改动范围。
+- 新网页浏览器 48/48，既有字幕 16/16、Pocket 54/54、连续配对 60/60、连续不配对 57/57、Google 24/24，共 259 项通过；Chrome151.0.7922.173，外部请求、真实供应商调用、异常均 0。Google 交换仅本地拦截 RSA 假提供方；最终登录前/登录后/过期截图已实际查看，位于忽略的 `.runtime/web-verification-browser/`，电话始终禁用、对话空态。
+- 配置新增 17/17、网页服务新增 12/12 已含于完整回归；独立审查确认 OIDC/退出/期限最终响应保护、半开升级、未完成请求体及关闭期间新 TCP/升级请求均有界清理。只用 synthetic 配置的生产编译入口实际启动、health、匿名状态拒绝、电话路径拒绝及 SIGTERM 退出也通过，无 Google/供应商网络。CI 新增 48 项网页浏览器、实际镜像内网页文件及无网络编译配置检查；最终推送 SHA 与精确 CI 回读记录在同一草稿 PR，不将本地构建说成部署。
+- 配置见 [网页验收模式](docs/CLOUD_WEB_VERIFICATION.md)：主线程显式选择 `web-verification`，复用实际 Google/固定来源配置并生成共用最多一小时 `CLOUD_TEST_DEADLINE`；不填写付费确认、费率或号码来开启网页登录。真实应用 OAuth、真实麦克风/手机、模型使用资格、数字否定、积压、自然度及耳听延迟仍待分别验收，本代码任务保持未部署、未改回调、未访问付费 API。
+
+## 此前实施：限时 Virginia 连续翻译云候选（2026-10-10）
 
 - 从真实远端干净头 `3182eeaba9e0df058eaa75aca8fa0fb699b41c48` 继续，沿用 `codex/cloud-phone-conversation-20261009` / [草稿 PR #3](https://github.com/Richman2020/live-translation-openai-realtime-api/pull/3)，base 仍为 PR #2 功能分支 `df3c447`。没有切旧 main、覆盖用户改动或连接用户电脑。运行环境仍为云端 Linux、Node24.19.0/npm11.9.0，package-lock 未变、未升级依赖或下载 Pocket 模型。
 - 新独立 `start:cloud` 将公开 PORT ingress、内部 loopback Fastify、Google 唯一身份、controller/owner/每通 Voice、真实 SDK 本地签名和文件预算 journal 装配到同一进程。固定 HTTPS/WSS 和路径/代理头检查，旧本机入口拒绝 cloud 的保护保留；仅受控页面/API 与已验签语音路径可转发。官方 Railway health Host 只获得精确健康路径。
@@ -33,7 +44,7 @@
 
 代码提交 `3f862353831bc598b84a051dbcc60f5ca1778656` 的 [真实 CI run 38040204802](https://github.com/Richman2020/live-translation-openai-realtime-api/actions/runs/38040204802) 已完整成功，job `114178754127`。checkout merge `5ac36510723e32a883b0d8fdfd47a750c16329bf` 明确将该头合测到功能 base `df3c447`。锁定安装、SDK 准备/构建、类型、1093 项回归、真实云 Docker build、镜像 SDK 哈希/无私密 env、无网络容器编译入口缺配置拒绝、全部五组浏览器及 diff 均通过；本地 Docker 未完成的限制保留历史，远端镜像可构建已有实际证据。最终文档补充头及精确 CI 以 PR 回读为准。
 
-补充当前停止点：主线程明确一小时试验结束后持续卷费用尚未授权，停止进程不停止存储计费。应用账本读取上限 64 KiB，含替换副本/锁/标记预留约 1 MiB 即有余量；Railway Hobby 官方默认 5 GB、不可缩小，不能把应用容量当平台最小卷或声称空卷免费。没有已验收的无常驻收费持久适配器，Neon 尚未接线；不能临时替换或删账本重置预算。须先协调持久归档、残余 SID/usage 责任与卷删除/费用生命周期，本任务不创建卷。细节见限时云候选说明。
+补充当时停止点（后续卷保留授权见本页最新实施）：主线程当时明确一小时试验结束后持续卷费用尚未授权，停止进程不停止存储计费。应用账本读取上限 64 KiB，含替换副本/锁/标记预留约 1 MiB 即有余量；Railway Hobby 官方默认 5 GB、不可缩小，不能把应用容量当平台最小卷或声称空卷免费。没有已验收的无常驻收费持久适配器，Neon 尚未接线；不能临时替换或删账本重置预算。须先协调持久归档、残余 SID/usage 责任与卷删除/费用生命周期，本任务不创建卷。细节见限时云候选说明。
 
 ## 此前：Google单账号登录与Pocket官方材料审计（2026-10-09）
 

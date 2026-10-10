@@ -1,8 +1,7 @@
-import { parseCloudServiceConfig } from './cloud-service-config';
 import {
-  createCloudService,
-  registerCloudServiceSignals,
-} from './cloud-service';
+  parseCloudWebVerificationConfig,
+  selectCloudServiceMode,
+} from './cloud-web-verification-config';
 
 /** Distinct from the protected local entry. No dotenv write, generated local
  * access token, fake identity, startup model session, or automatic phone call.
@@ -11,6 +10,49 @@ async function main(): Promise<void> {
   const args = process.argv.slice(2);
   if (args.length > 1 || (args.length === 1 && args[0] !== '--check'))
     throw new Error('CLOUD_START_ARGUMENTS_INVALID');
+  const mode = selectCloudServiceMode(process.env);
+  if (mode === 'web-verification') {
+    const config = parseCloudWebVerificationConfig(process.env);
+    if (args[0] === '--check') {
+      // eslint-disable-next-line no-console -- Fixed metadata, no identity or credentials.
+      console.log(
+        JSON.stringify({
+          ok: true,
+          mode: 'cloud',
+          serviceMode: 'web-verification',
+          configOnly: true,
+          externalProvidersContacted: false,
+          callsEnabled: false,
+          supplierCallsEnabled: false,
+          phoneJournalRequired: false,
+          singleInstance: true,
+        }),
+      );
+      return;
+    }
+    const { createCloudWebVerificationService } = await import(
+      './cloud-web-verification-service'
+    );
+    const service = await createCloudWebVerificationService(config);
+    const stop = () => {
+      service
+        .close()
+        .then(() => {
+          process.removeListener('SIGINT', stop);
+          process.removeListener('SIGTERM', stop);
+        })
+        .catch(() => {
+          // eslint-disable-next-line no-console -- No transport or provider error text.
+          console.error('CLOUD_WEB_STOP_FAILED');
+        });
+    };
+    process.on('SIGINT', stop);
+    process.on('SIGTERM', stop);
+    // eslint-disable-next-line no-console -- Fixed mode status, no supplier readiness claim.
+    console.log('CLOUD_WEB_VERIFICATION_STARTED_CALLS_DISABLED');
+    return;
+  }
+  const { parseCloudServiceConfig } = await import('./cloud-service-config');
   const config = parseCloudServiceConfig(process.env);
   if (args[0] === '--check') {
     // eslint-disable-next-line no-console -- Fixed metadata only, never env values.
@@ -37,6 +79,9 @@ async function main(): Promise<void> {
     );
     return;
   }
+  const { createCloudService, registerCloudServiceSignals } = await import(
+    './cloud-service'
+  );
   const service = await createCloudService(config, {
     onCleanupFailure: () => {
       // eslint-disable-next-line no-console -- Fixed safety status, no provider errors.

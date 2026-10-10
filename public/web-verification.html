@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#152c49">
+  <meta name="referrer" content="no-referrer">
+  <title>AI 电话 · 网页登录验收</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="stylesheet" href="/styles.css">
+  <script type="module" src="/web-verification.js"></script>
+</head>
+<body>
+  <svg class="icon-library" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
+    <symbol id="i-phone" viewBox="0 0 24 24"><path d="M8 3H4a1 1 0 0 0-1 1c0 9.4 7.6 17 17 17a1 1 0 0 0 1-1v-4l-5-2-2 2a14 14 0 0 1-6-6l2-2-2-5Z"/></symbol>
+    <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></symbol>
+    <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6m0-10v1"/></symbol>
+    <symbol id="i-swap" viewBox="0 0 24 24"><path d="M4 7h16l-4-4M20 17H4l4 4"/></symbol>
+  </svg>
+  <aside class="sidebar">
+    <a class="brand" href="/controlled" aria-label="AI 电话网页登录验收"><span class="brand-icon"><svg class="icon"><use href="#i-phone"/></svg></span><span>AI 电话<small>VOICE, WITHOUT BORDERS</small></span></a>
+    <div class="sidebar-label">我的工作空间</div>
+    <nav aria-label="主导航"><span class="nav-item active" aria-current="page"><svg class="icon"><use href="#i-grid"/></svg>网页登录验收<span class="nav-mark"></span></span></nav>
+    <div class="sidebar-bottom"><div class="local-status"><span class="status-dot"></span><span>网页验收模式</span></div><p>先确认登录，<br>电话功能保持关闭。</p><div class="profile"><span class="avatar">我</span><div>个人工作空间<small>Google · 单账号</small></div></div></div>
+  </aside>
+  <main>
+    <header class="topbar"><div class="breadcrumb">工作空间 <span>/</span> <strong>网页登录验收</strong></div><div class="top-actions"><span class="preview-pill">WEB <span>电话关闭</span></span></div></header>
+    <div class="error-banner global-error" id="app-error" role="alert" hidden></div>
+    <section class="view">
+      <div class="page-heading"><div><div class="eyebrow">YOUR WORKSPACE, VERIFIED.</div><h1>先确认网页登录。</h1><p>本页仅验证 Google 登录与网页状态。</p></div><button class="secondary-button" id="calls-disabled" disabled>电话功能关闭</button></div>
+      <div class="preview-notice" id="calls-disabled-notice" role="status"><span class="notice-icon"><svg class="icon"><use href="#i-info"/></svg></span><p><strong>电话功能关闭</strong><span>本页不会拨号、使用麦克风或连接语音服务。</span></p></div>
+      <div class="workspace-grid">
+        <section class="dial-card card" aria-labelledby="login-heading">
+          <div class="card-title"><h2 id="login-heading">Google 登录</h2><span class="small-badge">单账号</span></div>
+          <p class="form-intro">仅接受服务端指定并验证通过的工作账号。登录后可确认本页状态。</p>
+          <div class="service-row"><div><h3 id="auth-state" role="status">正在检查登录</h3><p id="auth-copy">请稍候，正在读取会话状态。</p></div></div>
+          <button class="primary-button" id="google-login" disabled>使用 Google 登录</button>
+          <button class="secondary-button full-width" id="google-login-cancel" hidden>取消登录</button>
+          <button class="secondary-button full-width" id="google-logout" hidden>退出登录</button>
+          <div class="service-row"><div><h3>会话有效期</h3><p id="session-expiry">尚未确认登录会话。</p></div></div>
+          <button class="secondary-button full-width" id="renew-session" hidden>延长本次登录会话</button>
+          <div class="service-row"><div><h3>网页状态</h3><p id="verification-status" role="status">正在检查网页验收服务。</p></div></div>
+          <button class="secondary-button full-width" id="refresh-status">刷新状态</button>
+          <p class="privacy-note">刷新状态只读取会话；不会自动延长登录。会话失效后请重新登录。</p>
+        </section>
+        <div class="conversation-column">
+          <section class="connection-card" aria-label="电话功能状态"><div class="connection-top"><span class="overline">电话功能</span><span class="connection-status"><span class="status-dot"></span><span>已关闭</span></span></div><div class="language-bridge"><div class="person"><div class="person-badge mine">我<span></span></div><strong>你</strong><span>普通话</span></div><div class="bridge-middle"><span class="bridge-symbol"><svg class="icon"><use href="#i-swap"/></svg></span><small>尚未建立通话</small></div><div class="person"><div class="person-badge theirs">对<span></span></div><strong>对方</strong><span>English</span></div></div><div class="connection-bottom"><span>网页登录不代表电话就绪</span></div></section>
+          <section class="transcript-card card" aria-labelledby="transcript-heading"><div class="transcript-header"><div><h2 id="transcript-heading">逐句对话</h2><p>这里只显示实际通话收到的原文与译文；本页没有建立通话。</p></div></div><div class="transcript-scroll"><div class="empty-conversation" id="empty-conversation"><div class="empty-chat-icon" aria-hidden="true"><svg class="icon"><use href="#i-swap"/></svg></div><h3>尚无对话记录</h3><p>电话功能关闭，当前没有字幕或播放记录。</p></div><div id="transcript"></div></div></section>
+        </div>
+      </div>
+      <footer class="workspace-footer"><span id="verification-message" role="status">电话功能保持关闭。</span><span>Google 登录 · 网页验收</span></footer>
+    </section>
+  </main>
+</body>
+</html>
