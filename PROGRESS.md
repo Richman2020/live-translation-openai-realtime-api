@@ -4,6 +4,13 @@
 
 需求见 [PROJECT_BRIEF.md](PROJECT_BRIEF.md)，工作规则见 [AGENTS.md](AGENTS.md)，运行步骤见 [LOCAL_SETUP.md](LOCAL_SETUP.md)，后续执行入口见 [LOCAL_CODEX_HANDOFF.md](LOCAL_CODEX_HANDOFF.md)。
 
+## 最新恢复复核：原 patch 保留，发布待旧任务停止确认（2026-10-11）
+
+- 用保存云配置恢复执行环境，获取原开发分支精确源码 `7b598f1337a0edbd24c9dc20f09268ad1b2c238d`；未重建项目或连接离线电脑。当前分支和main均无 `.agents/skills`，已读仓库规则及已安装Railway技能。
+- 原patch `32101bad-cdc7-440e-832f-550130fbcf10` 仍STAGED，created/updated均04:02:06.421 UTC；完整内容仅AI源码 `4bab94e → 7b598f1`。原源码 [Actions 38110048650](https://github.com/Richman2020/live-translation-openai-realtime-api/actions/runs/38110048650) completed/success，最新job114383553328全部步骤成功，不把旧commit-status pending/空statuses当失败。运行仍原215d94ea…、SUCCESS/1副本Online，启动日志明确calls-disabled，Portal、原卷和资源配置保持。
+- 本恢复环境build/typecheck通过；登录、页面租约、预算和journal定向回归 **182/182**；实际离线Chrome daily **82/82**，外部请求/真实供应商/异常均0。无生产代码修改。公网访问被出口代理CONNECT403阻断，不是应用返回403；线上新版health/静态/真实Google仍未验收。
+- 按本次交接要求，未收到原任务实际停止确认，不擅自应用或重建patch；未部署、改云配置、拨号或调用付费模型。`CLOUD_TEST_TARGET_NUMBER`已存在，只核变量名；隐藏AppSID、原journal责任/锁、模型实际能力及完整5美元上界仍未核实，当前七个电话确认/费率/预留字段缺失。完整证据和最短继续步骤见 [恢复验收交接](docs/CLOUD_RECOVERY_ACCEPTANCE_2026-10-11.md)。本节文档提交不改变原发布源码pin。
+
 ## 最新实现：页面开着保持登录（2026-10-11）
 
 - 用户明确撤销日常工作台按15分钟闲置/8小时强制退出的策略；改为页面每60秒自动续约，后台或无用户输入不暂停。单页面ID只在内存，多个页面分别续约；最后关闭尽力通知并留30秒刷新交接宽限，丢失通知/网络中断/浏览器冻结连续30分钟由有限租约兜底，不能保证unload瞬时登出。服务重启仍需Google登录。

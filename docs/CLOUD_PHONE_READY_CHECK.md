@@ -11,7 +11,7 @@
 
 ## 尚缺的电话配置与证据
 
-本环境只读服务配置的变量名称显示以下八个字段尚缺；只列名称，不补造实际值。当前连接的变量读取返回 valuesRedacted=true、只给名称，且目标字段不存在；不能由本工具证明配置的App SID与外部核对资源一致。
+2026-10-11恢复任务重新读取Railway变量名：`CLOUD_TEST_TARGET_NUMBER`已存在，修正此前“目标字段不存在”的旧结果；当前仍有以下七个确认/金额/费率字段缺少。连接返回 valuesRedacted=true、只给名称，不能由本工具证明目标值或配置App SID与外部核对资源一致。完整恢复证据见 [恢复验收交接](CLOUD_RECOVERY_ACCEPTANCE_2026-10-11.md)。
 
 | 字段 | 完成条件 |
 | --- | --- |
@@ -19,12 +19,12 @@
 | `CLOUD_PUBLIC_CALLBACK_CONFIRMED` | 外部App出呼迁移与刷新回读已完成；仍须核对部署实际SID、固定HTTPS/WSS可达性及原签名/归属保护 |
 | `CLOUD_TRIAL_RATE_BOUND_CONFIRMED` | 有覆盖所有会话、两腿与迟到责任的保守成本证据；估计不等于硬上限 |
 | `CLOUD_JOURNAL_VOLUME_CONFIRMED` | 核验原私有持久卷、journal锁/恢复/清理与责任保留，不新建空预算冒充恢复 |
-| `CLOUD_TEST_TARGET_NUMBER` | 父线程已核验原用户提供的唯一本人目标；待私有配置注入/回读，不取现有Twilio号码代替 |
+| `CLOUD_TEST_TARGET_NUMBER`（已存在） | 父线程已核验原用户提供的唯一本人目标；本轮只独立确认变量名存在，不读出清值，不取现有Twilio号码代替 |
 | `CLOUD_CALL_RESERVATION_USD_MICROS` | 配置须为整数microUSD，严格大于2000000且不超过5000000；仍须有已核价完整责任证据 |
 | `CLOUD_RATE_CHECKED_AT` | 真实费率证据的规范UTC核对时间 |
 | `CLOUD_RATE_VALID_UNTIL` | 覆盖电话试验截止、满足原时效校验的规范UTC时间 |
 
-原 `CLOUD_TEST_DEADLINE` 已过期，另须在已批准的统一试验窗口内更新，不计入上述八个缺字段；不能靠反复重启延长授权。费用目前有估计，尚不足以宣称供应商硬封顶，不能先设确认标记再测试证明。实际能力、完整成本及目标未核实前，保持电话模式启动拒绝。 当前已增加两文字分支共享的整通60请求、450000输入代理单位、72000预留输出tokens及每次1200输出上限，各PCM输入流14.4MB；实际send前计入补零、drain、重复上下文，失败/取消不退款。总应用预留不超过配置金额，包含固定2美元非文字工程预留。字节代理与工程预留不证明自动ASR/VAD、特殊tokens、税费、目的地和供应商终止拖延费用；`CLOUD_TRIAL_RATE_BOUND_CONFIRMED` 仍不能由离线cap代填。见 [整通限额与官方费率缺口](CLOUD_CALL_USAGE_LIMITS.md)。
+原 `CLOUD_TEST_DEADLINE` 已过期是交接记录，本连接无法独立读其值；另须在已批准的统一试验窗口内核验和更新，不计入上述七个缺字段，不能靠反复重启延长授权。费用目前有估计，尚不足以宣称供应商硬封顶，不能先设确认标记再测试证明。实际能力、完整成本及目标未核实前，保持电话模式启动拒绝。 当前已增加两文字分支共享的整通60请求、450000输入代理单位、72000预留输出tokens及每次1200输出上限，各PCM输入流14.4MB；实际send前计入补零、drain、重复上下文，失败/取消不退款。总应用预留不超过配置金额，包含固定2美元非文字工程预留。字节代理与工程预留不证明自动ASR/VAD、特殊tokens、税费、目的地和供应商终止拖延费用；`CLOUD_TRIAL_RATE_BOUND_CONFIRMED` 仍不能由离线cap代填。见 [整通限额与官方费率缺口](CLOUD_CALL_USAGE_LIMITS.md)。
 
 ## 模型、字幕与验收
 
