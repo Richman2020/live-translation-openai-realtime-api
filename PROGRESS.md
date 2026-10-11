@@ -4,13 +4,14 @@
 
 需求见 [PROJECT_BRIEF.md](PROJECT_BRIEF.md)，工作规则见 [AGENTS.md](AGENTS.md)，运行步骤见 [LOCAL_SETUP.md](LOCAL_SETUP.md)，后续执行入口见 [LOCAL_CODEX_HANDOFF.md](LOCAL_CODEX_HANDOFF.md)。
 
-## 本轮交付中：真实工作台布局与前台活动续期（2026-10-11）
+## 最新部署：真实工作台布局与前台活动续期（2026-10-11 03:15 UTC）
 
 - 用户已批准本轮 UI-only AI 服务部署和日常使用中自动续期，电话仍关闭。独立 `web-workbench` 适配器复用实际号码/键盘、设备选择/本地检测、空的逐句对话界面；没有接电话 SDK、controller、Voice、付费模型、上传、SSE 或 WS，没有制造通话/字幕。指定新静态资产只在 daily 模式开放精确 GET/HEAD，JS/WAV MIME 正确，旧验证白名单及默认 phone 边界保持。
 - 真实前台且可信的操作触发有限节流续期，读状态、合成事件、空闲计时、后台/重新显示不自行续期；约15分钟闲置、8小时绝对上限、内存会话及原 Google 单身份/CSRF 不变。自动请求仍在认证闭包，UI observer 只读状态、不接认证证明；退出、过期、取消、离线、隐藏与迟到结果不能复活旧权限。麦克风仅点击检测后启用，最多30秒；取消、会话失效或离页立即释放，迟到权限也释放，音频留在浏览器。
 - 已完成一轮云端 Linux 全量离线回归 **1169项：1164通过、5个既有Windows专属跳过、0失败**，源码/测试 typecheck 与生产 build 通过；独立服务端资源/认证/期限回归69/69、活动模块19/19及三个前端 JS 语法检查通过。主线程最终真实 Chromium 离线复跑：新版 daily **70项通过**、原 `web-verification` **48项通过**，两组外部请求/真实供应商/异常均0；浏览器脚本按现有Bundler模式独立 typecheck 通过。安全状态通知已改为多observer，测试观察不再挤掉实际UI订阅。
-- 新版浏览器证明真实 trusted 输入触发自动续期；服务端/浏览器共同推进14分钟后续期，再推进2分钟，受保护 API仍200，已超过初始15分钟期限。显式点击的本地原生合成麦克风、取消、拒绝及迟到权限释放通过；这是云端headless合成设备证据，不是用户真实耳麦或手机。后续精确远端 CI、commit 与 UI 部署仍由主线程补齐。
-- 当前平台仍运行已验收登录的 `e94d2cf0d0f1844374dc2329ceb1c5acc51f7d90` / `516c94de-d42c-4fc8-aa3d-1668bf5858e7`，共享远端 head 仍为 `c6006cc0d16cc87bb89ac4c1728398aa11edde8b`。本轮新代码/文档尚在工作区，不能称已推送或已部署；本行状态供本次交接，主线程后续更新。原实际 Google 登录及 iss 修复证据完整保留在下文。
+- 新版浏览器证明真实 trusted 输入触发自动续期；服务端/浏览器共同推进14分钟后续期，再推进2分钟，受保护 API仍200，已超过初始15分钟期限。显式点击的本地原生合成麦克风、取消、拒绝及迟到权限释放通过；这是云端headless合成设备证据，不是用户真实耳麦或手机。精确远端CI结果另见下项，实际公网新版页面由父线程可用浏览器复核。
+- 新源码 `4bab94e009bb56b692ed09750f605f73556a51fb` 已提交推送且ls-remote核对一致，仅更新既有AI固定来源。部署 `215d94ea-bd07-4ed9-82e0-d134550aa7f1` 创建03:14:43.703 UTC、calls-disabled启动03:15:08.305431842 UTC、**03:15:10.077 UTC SUCCESS**；health1/1通过、AI1/1 Online、无pending/故障。Portal保持 `78923ac3-8a35-4d89-8aef-e7911a6a3dfb`，原资源限额、单Virginia副本、卷、凭据/权限、journal和Twilio回调保持；电话/全部WS仍关闭。重启清空内存会话，父线程新版实际网页验收须重新登录。原实际Google登录及iss修复历史完整保留在下文。
+- 精确源码 [CI run38107740839](https://github.com/Richman2020/live-translation-openai-realtime-api/actions/runs/38107740839) / job114376723005 已completed/success：1169总/1164pass/5skip/0fail，build/typecheck/Docker/format及七浏览器16/54/60/57/24/48/70全部通过，各组externalRequests0。实读checkout `c315224da312fda29a2720faf6e5f9db430eca5a`，Git-data核对父提交按序为featurebase `df3c4474013e0612e0d5b20a21d673c0af6489e1` 与精确源码 `4bab94e009bb56b692ed09750f605f73556a51fb`。本次后续文档提交仅记录结果，不再重新部署；平台源码pin保持4bab。
 - 父线程外部 Twilio 只读报告余额12.95293 USD、Pay-as-you-go；现有号码与共享 App 仍指向旧 tunnel，不能据此声明云电话已就绪。八项准备字段缺失，旧电话试验 deadline 已过期，目标号码清值本工作区未获。拟出呼 App 回调迁移不含来电，仍需父线程明确共享影响范围；不进行实际更新、拨号或付费模型请求。详见 [准备核对](docs/CLOUD_PHONE_READY_CHECK.md)。
 - 真实电话仍限一通、最多300秒、Twilio/OpenAI合计5美元，准备完成后父线程先通知用户 ready；不以 UI/模拟麦克风/模型传输计数冒充真实手机、数字否定、播放积压、自然度或耳听延迟验收。Railway两服务合计资源4美元、3美元提醒，现有Hobby保持，不升级；预算分别管理，余额与价格估计均不是硬账单封顶。
 
