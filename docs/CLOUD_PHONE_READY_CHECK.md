@@ -1,13 +1,13 @@
 # 云电话准备核对
 
-2026-10-11 最新进展：整通应用用量闸门与超限提前清理已接入生产路径，本轮只交付代码与离线验证，不部署。运行仍固定 `4bab94e` 的 `web-workbench` UI，电话、controller、Voice、付费模型与全部 WS 仍关闭。父线程已实际看到新版UI；Google重登、号码编辑无拨号及电话验收分别记录。本表未标为 ready，不设置确认标记、修改回调或发起电话。
+2026-10-11 最新进展：整通应用用量闸门与超限提前清理已接入生产路径，本轮只交付代码与离线验证，不部署。运行仍固定 `4bab94e` 的 `web-workbench` UI，电话、controller、Voice、付费模型与全部 WS 仍关闭。父线程报告新版应用登录与使用中自动保持已实际验证；号码编辑无拨号和真实电话仍分别记录。本表未标为 ready，不设置确认标记、修改回调或发起电话。
 
 ## 授权与只读证据
 
-- 真实测试仅一通、最多300秒，Twilio与OpenAI合计最多5美元，不自动充值；父线程完成准备并先通知用户 ready，用户可接听后才进入测试。Railway两服务合计资源最多4美元、3美元提醒，保留现有Hobby、不升级；资源和通话预算分别管理。
+- 最新真实测试仅一通，Twilio与OpenAI合计最多5美元，不自动充值；用户已取消五分钟要求，有限防失联时长须从完整预算上界推导，当前未证明，旧300秒代码保护暂不放大；父线程完成准备并先通知用户 ready，用户可接听后才进入测试。Railway两服务合计资源最多4美元、3美元提醒，保留现有Hobby、不升级；资源和通话预算分别管理。
 - 父线程本轮外部 Twilio 只读报告余额 **12.95293 USD / Pay-as-you-go**。这是账户余额证据，不证明每个模型、Voice资源或成本上界已验证，不是5美元账单硬限。
 - 现有 Twilio 号码仅以尾号5995识别：Voice POST仍为旧 tunnel 的 incoming 回调，Status为空，没有 App 绑定。它是已核对的现有号码，**不能推定为本次被叫**；目标号码清值本工作区尚未获，不猜号码、不写真实号码入仓库。
-- `AI Phone local desktop` 共享 App（仅留前缀 `APa6bb…`）仍用旧 tunnel 的 client Voice POST，Status/Fallback为空。拟出呼仅将该 App Voice URL 指向 `https://ai-phone-test-staging.up.railway.app/voice/client`、POST；来电号码配置保持。共享 App 切换可能影响旧桌面出呼，父线程须先明确范围，再核对变更与回退，不能沿用旧本机改绑脚本。
+- **外部App回调已完成**：父线程已将 `AI Phone local desktop`（仅留SID前缀 `APa6bb…`）的Voice URL改为 `https://ai-phone-test-staging.up.railway.app/voice/client`、POST并刷新读回；Fallback/Status仍为空，未拨号。用户已批准旧桌面出呼受影响，号码来电配置未改，父线程继续浏览器复核。外部App更新不能证明部署隐藏的 `TWILIO_TWIML_APP_SID` 与该App一致；仍须安全核验实际SID，不能按相同名字或变量存在推断。
 
 ## 尚缺的电话配置与证据
 
@@ -16,7 +16,7 @@
 | 字段 | 完成条件 |
 | --- | --- |
 | `CLOUD_TRANSLATION_CAPABILITY_CONFIRMED` | 核验所选模式全部固定模型、端点与账户能力，不能由离线测试代填 |
-| `CLOUD_PUBLIC_CALLBACK_CONFIRMED` | 确认共享 App 变更范围，核对固定 HTTPS/WSS 回调、方法及原签名/归属保护 |
+| `CLOUD_PUBLIC_CALLBACK_CONFIRMED` | 外部App出呼迁移与刷新回读已完成；仍须核对部署实际SID、固定HTTPS/WSS可达性及原签名/归属保护 |
 | `CLOUD_TRIAL_RATE_BOUND_CONFIRMED` | 有覆盖所有会话、两腿与迟到责任的保守成本证据；估计不等于硬上限 |
 | `CLOUD_JOURNAL_VOLUME_CONFIRMED` | 核验原私有持久卷、journal锁/恢复/清理与责任保留，不新建空预算冒充恢复 |
 | `CLOUD_TEST_TARGET_NUMBER` | 父线程安全提供并核对本次唯一本人美国目标；不能取现有Twilio号码代替 |
