@@ -4,7 +4,14 @@
 
 需求见 [PROJECT_BRIEF.md](PROJECT_BRIEF.md)，工作规则见 [AGENTS.md](AGENTS.md)，运行步骤见 [LOCAL_SETUP.md](LOCAL_SETUP.md)，后续执行入口见 [LOCAL_CODEX_HANDOFF.md](LOCAL_CODEX_HANDOFF.md)。
 
-## 最新：真实 Google 登录失败的安全诊断（2026-10-11）
+## 最新验收：真实 Google 登录已通过（2026-10-11 02:42 UTC）
+
+- 主线程可用浏览器于02:41:34 UTC重新发起Google登录，正常选择已允许账号并返回 `/controlled`；02:42:18页面明确显示已登录、服务端已验证本次Google登录及网页登录/会话状态已确认，无新增consent或设备确认。这是实际应用OIDC完整登录证据，不是仅已有Google浏览器会话；不记录账号、身份、授权URL或秘密。
+- 对应固定部署 `516c94de-d42c-4fc8-aa3d-1668bf5858e7` 的平台HTTP只读核验：登录前02:41:41.223 UTC受保护 `/api/status` 为401；02:41:42.237 UTC `POST /auth/google/start` 200，02:42:07.233 UTC `GET /auth/google/callback` 200，02:42:07.354 UTC `/controlled` 200，02:42:07.708 UTC及02:42:34.210 UTC `/api/status` 200。同一时间窗没有固定 `GOOGLE_LOGIN_FAILURE`；日志检查仅公开时间、固定路径/事件及状态，不输出query/身份/秘密。
+- 运行源码继续固定 `e94d2cf0d0f1844374dc2329ceb1c5acc51f7d90`，02:38:19.452 UTC SUCCESS/health通过/AI1副本Online；精确源码CI38105750983 attempt1完整成功（1143通过、5既有跳过、0失败，七浏览器共313项）。此次只补交接文档和草稿PR，不再部署，Portal、容量/卷、凭据/权限、电话/全部WS与回调保持原状态；两服务合计资源4美元、3美元提醒和Hobby不升级继续由主线程监控。
+- 登录刷新复核由主线程继续；本次尚未取得实际手动续期、退出及到期的浏览器证据，原离线保护回归已通过。真实麦克风/普通手机、付费模型、数字否定、持续播放积压、自然度及耳听延迟仍未验收。用户可亲自登录网页测试；网页登录成功不代表电话可用。
+
+## 此前：真实 Google 登录失败的安全诊断（2026-10-11）
 
 - 第二诊断实际重现：02:31:31.551 UTC start200、02:32:09.448 UTC callback401，新部署日志02:32:15.265 UTC固定 `CALLBACK_PARAMS_UNKNOWN_ISS`。已证明Google响应包含iss且旧白名单在兑换token前拒绝，不把浏览器chrome-error当应用根因。主线程授权最小兼容修复/回归/仅AI部署，无新凭据或身份权限：仅允许 `iss` 并在出现时===固定 `GOOGLE_OIDC.issuer`，wrong/repeated仍在token兑换前拒绝，其他unknown仍拒绝；原缺iss响应兼容和全部nonce/PKCE/JWT/身份/session/CSRF保护不动。
 - 最小iss修复云端回归 **1148项：1143通过、5个既有Windows专属跳过、0失败**（29.46秒）；登录31/31涵盖正确/缺省、12种错误issuer、3重复、state/cookie前置与实际RSA篡改/nonce/身份/JWTissuer拒绝；两个web模式canonicaliss成功鉴权/wrongiss0exchange回归通过。两浏览器假Google回调现在均携正确固定iss，实际native跨站Lax绑定/Strict会话、PKCE/RSA及badnonce/identity仍通过：Google24/24、daily54/54，外部请求/实际供应商/异常0。生产build、源码/测试typecheck、修改源码ESLint、两browser独立typecheck/格式、diff及独立安全审计通过。仅7行认证源码兼容变更，没有改Oidc/client、身份约束、权限/secret、phone/ingress或依赖。
