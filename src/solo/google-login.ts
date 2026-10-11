@@ -33,6 +33,12 @@ const failureReasons = Object.freeze([
   'FLOW_MISSING',
   'FLOW_INVALID_OR_EXPIRED',
   'CALLBACK_PARAMS_REJECTED',
+  'CALLBACK_PARAMS_UNKNOWN_ISS',
+  'CALLBACK_PARAMS_UNKNOWN_SESSION_STATE',
+  'CALLBACK_PARAMS_UNKNOWN_OTHER',
+  'CALLBACK_PARAMS_DUPLICATE',
+  'CALLBACK_PARAMS_GOOGLE_ERROR',
+  'CALLBACK_PARAMS_CODE_FORMAT',
   'GOOGLE_PROVIDER_UNAVAILABLE',
   'GOOGLE_AUTH_BUSY',
   'GOOGLE_TOKEN_INVALID',
@@ -45,6 +51,12 @@ export type GoogleLoginFailureObserver = (
   reason: GoogleLoginFailureReason,
 ) => unknown;
 const allowedFailureReasons = new Set<string>(failureReasons);
+// These are diagnostic labels, not an authorization-response allowlist.
+// Arbitrary query names always map to OTHER; no input is sent to the observer.
+const unknownParameterReasons = new Map<string, GoogleLoginFailureReason>([
+  ['iss', 'CALLBACK_PARAMS_UNKNOWN_ISS'],
+  ['session_state', 'CALLBACK_PARAMS_UNKNOWN_SESSION_STATE'],
+]);
 
 class GoogleLoginError extends Error {
   constructor(
@@ -477,18 +489,21 @@ export class GoogleBrowserLogin {
       'error_uri',
     ];
     const code = params.get('code');
-    if (
-      [...params.keys()].some(
-        (name) =>
-          !validParams.includes(name) || params.getAll(name).length !== 1,
-      ) ||
-      params.has('error') ||
-      !code ||
-      code.length > 2048 ||
-      /[\r\n\0]/.test(code)
-    ) {
+    const names = [...params.keys()];
+    const unknown = names.find((name) => !validParams.includes(name));
+    let parameterFailure: GoogleLoginFailureReason | undefined;
+    if (unknown !== undefined)
+      parameterFailure =
+        unknownParameterReasons.get(unknown) || 'CALLBACK_PARAMS_UNKNOWN_OTHER';
+    else if (names.some((name) => params.getAll(name).length !== 1))
+      parameterFailure = 'CALLBACK_PARAMS_DUPLICATE';
+    else if (params.has('error'))
+      parameterFailure = 'CALLBACK_PARAMS_GOOGLE_ERROR';
+    else if (!code || code.length > 2048 || /[\r\n\0]/.test(code))
+      parameterFailure = 'CALLBACK_PARAMS_CODE_FORMAT';
+    if (parameterFailure) {
       this.flows.delete(stateKey);
-      this.reportFailure('CALLBACK_PARAMS_REJECTED');
+      this.reportFailure(parameterFailure);
       throw new GoogleLoginError('LOGIN_FAILED', 401);
     }
     try {

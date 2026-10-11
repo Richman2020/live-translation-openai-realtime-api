@@ -624,17 +624,25 @@ test('failure diagnostics distinguish callback input, missing binding, missing f
   }
 });
 
-test('unknown iss or session_state and duplicate callback parameters still fail before any exchange', async (t) => {
+test('callback parameter diagnostics classify unknown, duplicate and Google-error rejection without changing responses', async (t) => {
   const canary = 'synthetic-private-query-canary';
-  for (const extra of [
-    `&iss=${canary}`,
-    `&session_state=${canary}`,
-    `&code=${canary}`,
-    `&scope=openid&scope=${canary}`,
-    `&authuser=0&authuser=${canary}`,
-    `&error=${canary}`,
-    `&unexpected_${canary}=anything`,
-  ]) {
+  const cases: [string, GoogleLoginFailureReason][] = [
+    [`&iss=${canary}`, 'CALLBACK_PARAMS_UNKNOWN_ISS'],
+    [`&session_state=${canary}`, 'CALLBACK_PARAMS_UNKNOWN_SESSION_STATE'],
+    [`&code=${canary}`, 'CALLBACK_PARAMS_DUPLICATE'],
+    [`&scope=openid&scope=${canary}`, 'CALLBACK_PARAMS_DUPLICATE'],
+    [`&authuser=0&authuser=${canary}`, 'CALLBACK_PARAMS_DUPLICATE'],
+    [`&error=${canary}`, 'CALLBACK_PARAMS_GOOGLE_ERROR'],
+    [`&unexpected_${canary}=anything`, 'CALLBACK_PARAMS_UNKNOWN_OTHER'],
+    [
+      `&${encodeURIComponent('sensitive.owner.canary@example.test')}=${canary}`,
+      'CALLBACK_PARAMS_UNKNOWN_OTHER',
+    ],
+    [`&__proto__=${canary}`, 'CALLBACK_PARAMS_UNKNOWN_OTHER'],
+    [`&iss_${canary}=anything`, 'CALLBACK_PARAMS_UNKNOWN_OTHER'],
+    [`&CALLBACK_PARAMS_UNKNOWN_ISS=${canary}`, 'CALLBACK_PARAMS_UNKNOWN_OTHER'],
+  ];
+  for (const [extra, reason] of cases) {
     const f = await fixture(t);
     const flow = await f.start();
     const result = await f.callback(flow, flow.cookie, extra);
@@ -642,7 +650,7 @@ test('unknown iss or session_state and duplicate callback parameters still fail 
     assert.deepEqual(result.json(), { error: 'LOGIN_FAILED' });
     assert.equal(result.headers['set-cookie'], undefined);
     assert.equal(f.tokenRequests, 0);
-    assert.deepEqual(f.failures, ['CALLBACK_PARAMS_REJECTED']);
+    assert.deepEqual(f.failures, [reason]);
     for (const sensitive of [
       canary,
       flow.code,
@@ -650,8 +658,83 @@ test('unknown iss or session_state and duplicate callback parameters still fail 
       flow.nonce,
       flow.cookie,
       origin,
+      'sensitive.owner.canary@example.test',
+      '__proto__',
     ])
       assert.equal(JSON.stringify(f.failures).includes(sensitive), false);
+    assert.equal(
+      (await f.callback(flow)).statusCode,
+      401,
+      'Rejected flow cannot be replayed',
+    );
+    assert.equal(f.tokenRequests, 0);
+    assert.deepEqual(f.failures, [reason, 'FLOW_MISSING']);
+  }
+});
+
+test('missing, empty, oversized and control-containing code values report only format failure before exchange', async (t) => {
+  for (const code of [
+    undefined,
+    '',
+    'x'.repeat(2049),
+    'sensitive-code\ncanary',
+    'sensitive-code\rcanary',
+    'sensitive-code\0canary',
+  ]) {
+    const f = await fixture(t);
+    const flow = await f.start();
+    const result = await f.app.inject({
+      method: 'GET',
+      url: `/auth/google/callback?state=${flow.state}${code === undefined ? '' : `&code=${encodeURIComponent(code)}`}`,
+      headers: callbackHeaders(flow.cookie),
+      remoteAddress: '127.0.0.1',
+    });
+    assert.equal(result.statusCode, 401);
+    assert.deepEqual(result.json(), { error: 'LOGIN_FAILED' });
+    assert.equal(result.headers['set-cookie'], undefined);
+    assert.equal(f.tokenRequests, 0);
+    assert.deepEqual(f.failures, ['CALLBACK_PARAMS_CODE_FORMAT']);
+    assert.equal((await f.callback(flow)).statusCode, 401);
+    assert.deepEqual(f.failures, [
+      'CALLBACK_PARAMS_CODE_FORMAT',
+      'FLOW_MISSING',
+    ]);
+    assert.equal(f.tokenRequests, 0);
+  }
+});
+
+test('diagnostic category priority changes no callback rejection or exchange admission', async (t) => {
+  const cases: [string, string, GoogleLoginFailureReason][] = [
+    [
+      'valid-code-canary',
+      '&scope=openid&scope=duplicate&iss=private-canary',
+      'CALLBACK_PARAMS_UNKNOWN_ISS',
+    ],
+    [
+      '',
+      '&error=private-canary&session_state=private-canary',
+      'CALLBACK_PARAMS_UNKNOWN_SESSION_STATE',
+    ],
+    [
+      '',
+      '&scope=openid&scope=duplicate&error=private-canary',
+      'CALLBACK_PARAMS_DUPLICATE',
+    ],
+    ['', '&error=private-canary', 'CALLBACK_PARAMS_GOOGLE_ERROR'],
+  ];
+  for (const [code, extra, reason] of cases) {
+    const f = await fixture(t);
+    const flow = await f.start();
+    const result = await f.callback({ ...flow, code }, flow.cookie, extra);
+    assert.equal(result.statusCode, 401);
+    assert.deepEqual(result.json(), { error: 'LOGIN_FAILED' });
+    assert.equal(result.headers['set-cookie'], undefined);
+    assert.equal(f.tokenRequests, 0);
+    assert.deepEqual(f.failures, [reason]);
+    assert.doesNotMatch(
+      JSON.stringify(f.failures),
+      /private-canary|valid-code-canary/,
+    );
   }
 });
 
@@ -766,4 +849,10 @@ test('runtime-invalid diagnostic reasons cannot pass arbitrary strings or object
   assert.deepEqual(f.failures, []);
   f.login.reportFailure('GOOGLE_TOKEN_INVALID');
   assert.deepEqual(f.failures, ['GOOGLE_TOKEN_INVALID']);
+  f.login.reportFailure('CALLBACK_PARAMS_REJECTED');
+  assert.deepEqual(
+    f.failures,
+    ['GOOGLE_TOKEN_INVALID', 'CALLBACK_PARAMS_REJECTED'],
+    'Legacy reason remains a valid server-side observer API value',
+  );
 });

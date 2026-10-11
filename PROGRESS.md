@@ -6,12 +6,18 @@
 
 ## 最新：真实 Google 登录失败的安全诊断（2026-10-11）
 
+- 主线程实际认证标签已到浏览器错误协议，无法取得原回调参数，明确授权第二版细分诊断代码、回归并仅AI部署，以固定类别取得证据后继续修复。原参数拒绝逻辑拆为 unknown / duplicate / google_error / code_format；未知参数仅固定安全Map识别 `iss` / `session_state`，其他所有用户输入统一 OTHER，不输出任意名称或值。旧粗分类保留为历史/观察器兼容，实际拒绝HTTP/消费清理/Google身份保护完全保持，尚未放宽unknown或其他校验。
+- 第二版云端全量 **1142项：1137通过、5个既有Windows专属跳过、0失败**（32.26秒），登录26/26及原服务/OIDC合同含在全量；build/typecheck/修改源码ESLint/diff通过。实际离线Chrome Google24/24+daily54/54通过，外部请求/真实供应商/异常0；六参数分类由单元测试逐类覆盖，不宣称现有浏览器fixture覆盖每一新分类。独立最终diff审计确认17枚举/固定Map/运行时Set、任意敏感key或原型key归OTHER、observer故障隔离、拒绝前后集合等价；原OIDC、ingress、配置、phone/脚本/依赖均未修改。本次不是身份规则放宽或实际Google成功验收。
 - 从真实远端 `1215a0ecb5f489c283223928661500c0a719d684` 与干净工作区继续，原分支/草稿PR保持；主线程明确授权固定失败枚举代码、回归及仅部署AI服务，实际浏览器重现后继续最小修复，不停在建议。两服务资源4美元/3美元提醒、Hobby不升级继续由主线程监控，不触发电话/模型或更新Portal。
 - 旧AI部署 `af306eb3-dce9-4861-acc5-09449168052f` 持续1/1Online、无重启/暂存；02:06:24.633 UTC start200，02:06:33.891 UTC callback401/5ms。平台HTTP日志没有查询参数，应用原始异常被合并，无足够证据证明具体失败；当前daily模式不受旧deadline影响，不能猜账号hd或cookie根因。
 - 新增server-only observer和11项运行时白名单，web服务仅输出固定event/reason JSON，保持请求日志关闭，绝不输出URL、认证参数、code/token/cookie、身份或异常文本。日志同步throw/异步reject不改变授权结果，原HTTP body/status、state/nonce/PKCE/identity/JWT及最后cookiecommit完全保持；[诊断分类与限制](docs/CLOUD_WEB_WORKBENCH.md)。
 - Google官方未知响应参数兼容规则已核对，但本次尚无真实query证据，原严格拒绝保持。新增回归涵盖所有11enum、日志故障隔离、runtime非法reason阻断、unknowniss/session_state/重复known参数401且token交换0、成功无诊断，两个web模式实际接线及身份拒绝。
 - 云端实际Chrome离线Google 24/24、日常webworkbench54/54通过，外部请求/真实供应商调用/异常均0；固定日志已在浏览器假提供方失败场景实见，未含秘密。产物仍在忽略的 `.runtime/google-login-browser/`、`.runtime/web-workbench-browser/`。真实本应用Google登录、麦克风/手机/听感均尚未通过，后续实际登录由主线程协调。
 - 完整回归 **1140项：1135通过、5个既有Windows专属跳过、0失败**（31.60秒）；Google登录24/24、web服务20/20及OIDC24/24含在全量。源码/全部测试typecheck、生产build、两修改源码ESLint、diff检查通过，锁文件/原OIDC/入口/配置/UI均未修改。独立只读diff审计确认日志privacy与原鉴权行为无阻塞。固定源码提交推送后仅更新AI服务，部署结果与真实重现另记录；本行不是已修复实际Google登录的声明。
+- 诊断源码 `5df779c7388046468c89da54f15f3583d764b6b0` 已提交、推送并核对远端。仅服务级更新AI固定来源，不执行环境accept/secret/权限/资源修改。部署 `d0a87550-1b0e-4fd5-86e8-6c69ac353554` 创建 **02:17:07.812 UTC**、容器启动 **02:17:32.805 UTC**、calls-disabled启动标记 **02:17:33.119 UTC**、**02:17:35.025 UTC SUCCESS**，平台health1/1通过；AI1/1Online，Portal仍原 `78923ac3-8a35-4d89-8aef-e7911a6a3dfb`，两服务无pending work/故障，原限额/单Virginia副本/卷保持。新进程旧flow/session失效，重现必须重新开始登录，等待主线程实际浏览器结果；此状态不能称为登录已修复。
+- 精确代码[CI run38104642302](https://github.com/Richman2020/live-translation-openai-realtime-api/actions/runs/38104642302) 首次 job114367426825 completed/failure：build/typecheck/1140回归（1135pass、5skip、0fail）、Docker及conversation16/Pocket54/continuous paired60通过；无出程配对字幕浏览器组在导航后enable-device等待线路清理超时，后续Google/webverification/daily/format均skipped，不能称为全部CI通过。实读checkout merge `40e5a1608e5d6c31221a69d24b36b49c274058c0`，Git-data核对parents `df3c447…` / `5df779c…`。本次没有改该脚本或phone实现，正在匹配本地重现并仅请求一次原job重跑，不重复部署或中断真实登录流程。
+- 同一SHA/checkout的CI **attempt2 completed/success，02:25:08 UTC**，job `114368341546`：全部step通过，1140回归同上，Docker及七浏览器组16/54/60/57/24/48/54全部通过，externalRequests/realSupplierCalls/exceptions均0。匹配原失败组本地57/57通过；首轮失败保留，当前未证明其时序根因，不改变电话脚本或生产实现。成功CI仍不能代替实际应用Google登录。
+- 实际重现日志于 **02:21:26.068 UTC** 记录固定 `GOOGLE_LOGIN_FAILURE / CALLBACK_PARAMS_REJECTED`，同窗口唯一callback在平台HTTP返回401；该分支已通过state/浏览器绑定/flow检查，在token兑换前拒绝，不是OIDC身份校验错误。当前分类仍合并unknown/duplicate query、provider error与code检查，尚不能猜具体参数。平台将JSON日志解析为event/reason attributes且值再次JSON编码，首次只解析message的读取遗漏；已按固定白名单归一化字段纠正，未输出原字段值或秘密。等待主线程仅提取回调参数名称或进一步固定分类，保持现有部署与全部校验，不将浏览器工具不支持当前URL称为应用根因。
 
 ## 最新运行：恢复日常网页工作台（2026-10-11 01:58 UTC）
 

@@ -49,6 +49,12 @@ GOOGLE_ALLOWED_EMAIL=
 
 仅部署此AI服务，由主线程可访问的浏览器重新开启一次登录，取得固定分类后做最小修复。最终需实际Google授权成功、鉴权状态读取、手动续期及退出；模拟提供方和平台health不替代真实登录。
 
+固定诊断版本 `5df779c7388046468c89da54f15f3583d764b6b0` 已实际部署，`d0a87550-1b0e-4fd5-86e8-6c69ac353554` 于 **02:17:35.025 UTC SUCCESS**，health通过、AI单副本Online；Portal部署没有变更，原资源/卷/凭据/权限保持。进程替换使旧flow/session失效，浏览器重现须重新从页面开始，不能刷新先前OAuth回调来定位新登录。实际完整Google登录仍待主线程验收，费用仍两服务合计资源4美元、3美元提醒。
+
+实际重现于02:21:26 UTC记录 `CALLBACK_PARAMS_REJECTED`，已定位在token兑换前参数分支；不能猜具体字段或归咎设备确认/浏览器工具。主线程无法从错误协议标签取得参数名，授权第二版固定细分：`CALLBACK_PARAMS_UNKNOWN_ISS`、`CALLBACK_PARAMS_UNKNOWN_SESSION_STATE`、`CALLBACK_PARAMS_UNKNOWN_OTHER`、`CALLBACK_PARAMS_DUPLICATE`、`CALLBACK_PARAMS_GOOGLE_ERROR`、`CALLBACK_PARAMS_CODE_FORMAT`。只有前两个来自写死的名称Map，其余未知名统归OTHER；不打印任意query名称，更不打印值/URL。原粗reason仍保留观察器兼容，实际参数分支改记录对应细分类；缺/非canonical/重复state仍在原前置INPUT拒绝。允许参数、duplicate/error/code原边界及Google OIDC全部校验不变，重现拿到明确类别后才做最小修复。
+
+当前实际允许名称仍是 `state/code/scope/authuser/prompt/hd/error/error_description/error_uri`。[Google示例](https://developers.google.com/identity/openid-connect/openid-connect#3.-confirm-anti-forgery-state-token)包含code/state/scope且明确未知响应项规则；`iss`来自[RFC9207授权响应issuer扩展](https://www.rfc-editor.org/rfc/rfc9207.html#section-2.4)，若支持须精确比较预期issuer；`session_state`来自[OIDC Session Management扩展](https://openid.net/specs/openid-connect-session-1_0.html#CreatingUpdatingSessions)。这些规范不能证明Google本次实际返回它们，固定名称分类不是授权白名单，不扩大真实允许项。
+
 本轮仅实现代码并在云端 Linux 用虚拟时钟、离线假 Google 提供方和实际 Chromium 验证；不更新 Railway 源码来源、部署、变量、容量或卷，不访问付费 API 或拨号。上一轮主线程的限时部署已于 2026-10-10 23:55–23:57 UTC 停止，两服务 Offline，5 GB 卷保留；平台源码仍固定此前 `5159ce3`。持续托管的预算与启动由主线程另行决定，本模式取消应用试验截止不构成平台账单硬封顶。
 
 上述为代码交付时状态。2026-10-11 01:58 UTC 新授权已恢复 AI，部署 `af306eb3-dce9-4861-acc5-09449168052f` 固定已验收 `5b6047f31b4f5470b2e7cfa99c9f639ce5b44cc5`，SUCCESS、1/1 Online、平台 `/api/health` 通过；启动日志固定 calls disabled，资源和原卷保持，旧 deadline 未改。最新费用是两测试服务合计资源最多4美元、3美元提醒，不升级Hobby，30美元/月范围撤回，主线程负责持续监控。真实公网页面单次访问仍被本环境proxy tunnel阻断，未取得页面或实际应用登录证据，留给主线程可用浏览器/用户手动验收；无真实电话或模型调用。
