@@ -4,7 +4,16 @@
 
 需求见 [PROJECT_BRIEF.md](PROJECT_BRIEF.md)，工作规则见 [AGENTS.md](AGENTS.md)，运行步骤见 [LOCAL_SETUP.md](LOCAL_SETUP.md)，后续执行入口见 [LOCAL_CODEX_HANDOFF.md](LOCAL_CODEX_HANDOFF.md)。
 
-## 最新实施：可持续服务的日常网页工作台（2026-10-11）
+## 最新运行：恢复日常网页工作台（2026-10-11 01:58 UTC）
+
+- 用户批准恢复两个工作台，随后撤回 30 美元/月范围，最新为这两个测试服务合计资源最多 **4 美元、3 美元提醒**，维持现有 Hobby，不升级扩容；持续费用监控由主线程协调，本代码/部署任务不创建自动化或账户全局停机规则。主线程独立浏览器在 01:58 UTC 实读本测试项目 Current Cost 0.0005 美元、workspace 0.02 美元；这是主线程报告的基线，不是本环境直接读取账单或将资源指标当成账单。
+- 仅在既有 AI 服务写入 `CLOUD_SERVICE_MODE=web-workbench`、明确 skipDeploys，然后服务级连接已验收固定源码 `5b6047f31b4f5470b2e7cfa99c9f639ce5b44cc5`。项目仅一个 staging 环境、没有暂存改动，因此未使用环境级 accept-deploy，没有提交 Portal 的配置或触发 Portal 部署。源码 pin 保留，后续 Git 推送不自动部署。
+- AI 部署 `af306eb3-dce9-4861-acc5-09449168052f` 创建于 **01:57:47.621 UTC**，容器启动记录 **01:58:24.566 UTC**，日常模式启动记录 **01:58:24.851 UTC**，**01:58:27.170 UTC SUCCESS**。固定来源为上述完整 SHA；`/api/health` 平台 1/1 healthcheck succeeded，状态回读 AI 1/1 Online、0 failures、无 pending work。实际运行日志明确 `CLOUD_WEB_WORKBENCH_STARTED_CALLS_DISABLED`。
+- 维持 AI 的 1 CPU、500000000 bytes 内存、Virginia 单副本和原 5000 MB `/data` 卷；原凭据、权限、账本、回调、电话确认及旧 `CLOUD_TEST_DEADLINE` 均未修改。已知原试验截止已过期，本模式正常启动并持续 Online，不再按试验 deadline 退出；电话和全部 WebSocket 仍由已验收源码拒绝。本轮没有真实电话、付费模型或 Google 授权交换。
+- 按本轮实读[官方容器费率](https://docs.railway.com/pricing/plans)，两服务均 1 CPU/0.5 GB 的计算上界为 0.06942 美元/小时，按原卷全部 5 GB 占用保守计存储 0.00104167 美元/小时，合计约 **0.07046 美元/小时**；出网另外 **0.05 美元/GB**，构建免费。因此若一小时合计出网不超过 1 GB，新增资源约不超过 0.121 美元；没有带宽硬上限，不能把这一条件估算称为账单封顶或剩余额度。既有 Hobby 不升级，订阅费用与本测试资源范围分开。
+- 唯一一次真实公网 Chromium GET `/controlled` 于 **01:58:59.153 UTC** 被本云环境代理隧道阻断：`net::ERR_TUNNEL_CONNECTION_FAILED`，没有 HTTP 响应、HTML 或截图。保留代理与 TLS，立即停止，无重试、替代路线、POST、OAuth、供应商或 WebSocket。证据在忽略的 `.runtime/web-workbench-public-acceptance-20261011/acceptance.json`。平台部署/健康通过与真实公网页面/应用登录未验收分别记录；下一步由主线程可用浏览器或用户手动打开固定 `/controlled` 验收，不能将现有 Google 会话说成本应用已登录。
+
+## 此前实施：可持续服务的日常网页工作台代码（2026-10-11）
 
 - 从真实远端、干净工作区 `5159ce3564768a6943855fd3f0786364a3226554` 继续，仍为 `codex/cloud-phone-conversation-20261009` / [草稿 PR #3](https://github.com/Richman2020/live-translation-openai-realtime-api/pull/3)，base 保持 `codex/local-phone-workbench` / `df3c447`。用户最新批准日常登录工作台，原一小时演示不能代表日常使用。
 - 新显式 `CLOUD_SERVICE_MODE=web-workbench` 复用 calls-disabled 网页与严格 Google 单身份服务，没有临时服务 deadline，不读取继承的过期 `CLOUD_TEST_DEADLINE` 或任何电话付费字段。固定 `/controlled` 返回个人工作台，HTML 模式与真实服务状态精确核验；电话、controller、Voice、回调、模型、账本及所有 WebSocket 均关闭。缺省 `phone` 与 `web-verification` 仍要求原截止及保护，严格 parser/factory 互斥，没有请求升级模式。
