@@ -6,7 +6,7 @@
 
 ## 最新用户修订：不固定五分钟，仍仅单次且总额5美元（2026-10-11）
 
-- 用户撤销“五分钟”产品/测试要求，保留单次测试和Twilio/OpenAI合计最多5美元，不允许无限通话或新增预算。已批准旧桌面App出呼Voice回调迁至Railway，旧桌面出呼受影响、号码来电不改；父线程已完成外部App Voice URL更新并刷新回读：固定Railway /voice/client POST，Fallback/Status仍空、未拨号；来电配置未改，浏览器复核由父线程继续。本人目标号码仍缺，部署隐藏App SID不能按名称推定。
+- 用户撤销“五分钟”产品/测试要求，保留单次测试和Twilio/OpenAI合计最多5美元，不允许无限通话或新增预算。已批准旧桌面App出呼Voice回调迁至Railway，旧桌面出呼受影响、号码来电不改；父线程已完成外部App Voice URL更新并刷新回读：固定Railway /voice/client POST，Fallback/Status仍空、未拨号；来电配置未改，浏览器复核由父线程继续。本人目标已由父线程从原用户消息核验，不再要求重复提供；清值只用于已授权测试的私有配置，本代码任务未写目标到云配置或仓库。部署隐藏App SID不能按名称推定。
 - 父线程报告新版应用登录与使用中自动保持已实际验证。真实麦克风、手机、数字否定、积压、听感和延迟仍独立待验。
 - 不能由目前公开分钟价格证明更长通话在5美元内，原300秒同样不是费用保证。主要缺口是4o自动ASR/VAD、文字特殊tokens、音频计量、实际目标费率/税费及在途清理责任。最短后续是获得完整上界后，从预算生成同一有限D，同时约束两腿timeLimit、应用截止和各流字节；旧300秒/14.4MB保护保留为尚未替换的代码值，不升级为用户限制，不通过重启/空账本恢复预算。详见[预算驱动时长](docs/CLOUD_CALL_USAGE_LIMITS.md#预算驱动时长最新用户修订)。
 - 已推送源码 `6dde0f065a9f7d7352c66896a44a43863f473349` 至原开发分支，远端核对一致；本次修订只更新需求/边界文档，不改变运行pin `4bab94e`，不部署或开放phone。源码[精确CI run38109056754](https://github.com/Richman2020/live-translation-openai-realtime-api/actions/runs/38109056754)/job114380607509全部成功：1185总/1180pass/5skip/0fail，七浏览器16/54/60/57/24/48/70且各externalRequests0，build/typecheck/JSsyntax/Docker/format全部通过；实际checkout e0924555184628d659eaa648ba3ce7dce73a8316，Git-data父提交按序df3c447/6dde0f0。本轮后续仅文档修订，最终文档head对应CI记录见[PR #3](https://github.com/Richman2020/live-translation-openai-realtime-api/pull/3)。

@@ -6,7 +6,7 @@
 
 - 最新真实测试仅一通，Twilio与OpenAI合计最多5美元，不自动充值；用户已取消五分钟要求，有限防失联时长须从完整预算上界推导，当前未证明，旧300秒代码保护暂不放大；父线程完成准备并先通知用户 ready，用户可接听后才进入测试。Railway两服务合计资源最多4美元、3美元提醒，保留现有Hobby、不升级；资源和通话预算分别管理。
 - 父线程本轮外部 Twilio 只读报告余额 **12.95293 USD / Pay-as-you-go**。这是账户余额证据，不证明每个模型、Voice资源或成本上界已验证，不是5美元账单硬限。
-- 现有 Twilio 号码仅以尾号5995识别：Voice POST仍为旧 tunnel 的 incoming 回调，Status为空，没有 App 绑定。它是已核对的现有号码，**不能推定为本次被叫**；目标号码清值本工作区尚未获，不猜号码、不写真实号码入仓库。
+- 现有 Twilio 号码仅以尾号5995识别：Voice POST仍为旧 tunnel 的 incoming 回调，Status为空，没有 App 绑定。它是已核对的现有号码，**不能推定为本次被叫**；最新唯一本人目标已由父线程从原用户消息核验，不再重复索取；清值只用于本次已授权测试的私有配置，不写入仓库或日志，本代码任务尚未写云变量。
 - **外部App回调已完成**：父线程已将 `AI Phone local desktop`（仅留SID前缀 `APa6bb…`）的Voice URL改为 `https://ai-phone-test-staging.up.railway.app/voice/client`、POST并刷新读回；Fallback/Status仍为空，未拨号。用户已批准旧桌面出呼受影响，号码来电配置未改，父线程继续浏览器复核。外部App更新不能证明部署隐藏的 `TWILIO_TWIML_APP_SID` 与该App一致；仍须安全核验实际SID，不能按相同名字或变量存在推断。
 
 ## 尚缺的电话配置与证据
@@ -19,7 +19,7 @@
 | `CLOUD_PUBLIC_CALLBACK_CONFIRMED` | 外部App出呼迁移与刷新回读已完成；仍须核对部署实际SID、固定HTTPS/WSS可达性及原签名/归属保护 |
 | `CLOUD_TRIAL_RATE_BOUND_CONFIRMED` | 有覆盖所有会话、两腿与迟到责任的保守成本证据；估计不等于硬上限 |
 | `CLOUD_JOURNAL_VOLUME_CONFIRMED` | 核验原私有持久卷、journal锁/恢复/清理与责任保留，不新建空预算冒充恢复 |
-| `CLOUD_TEST_TARGET_NUMBER` | 父线程安全提供并核对本次唯一本人美国目标；不能取现有Twilio号码代替 |
+| `CLOUD_TEST_TARGET_NUMBER` | 父线程已核验原用户提供的唯一本人目标；待私有配置注入/回读，不取现有Twilio号码代替 |
 | `CLOUD_CALL_RESERVATION_USD_MICROS` | 配置须为整数microUSD，严格大于2000000且不超过5000000；仍须有已核价完整责任证据 |
 | `CLOUD_RATE_CHECKED_AT` | 真实费率证据的规范UTC核对时间 |
 | `CLOUD_RATE_VALID_UNTIL` | 覆盖电话试验截止、满足原时效校验的规范UTC时间 |
