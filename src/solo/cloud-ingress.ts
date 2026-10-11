@@ -36,8 +36,21 @@ export const CLOUD_WEB_VERIFICATION_PUBLIC_PATHS = Object.freeze([
   '/favicon.svg',
 ]);
 
+/** Browser-only daily workbench modules. No controller or telephone SDK. */
+export const CLOUD_WEB_WORKBENCH_PUBLIC_PATHS = Object.freeze([
+  ...CLOUD_WEB_VERIFICATION_PUBLIC_PATHS,
+  '/web-workbench.js',
+  '/session-activity.js',
+  '/microphone-input.js',
+  '/audio-output.js',
+  '/conversation-model.js',
+  '/conversation-view.js',
+  '/assets/speaker-test.wav',
+]);
+
 const publicPaths = new Set<string>(CLOUD_CONTROLLED_PUBLIC_PATHS);
 const webPublicPaths = new Set<string>(CLOUD_WEB_VERIFICATION_PUBLIC_PATHS);
+const workbenchPublicPaths = new Set<string>(CLOUD_WEB_WORKBENCH_PUBLIC_PATHS);
 const webGetPaths = new Set([
   '/api/health',
   '/api/status',
@@ -130,7 +143,8 @@ function validTarget(
     (web ? path !== '/auth/google/callback' : !queryPaths.has(path))
   )
     return false;
-  const assets = web ? webPublicPaths : publicPaths;
+  let assets = web ? webPublicPaths : publicPaths;
+  if (mode === 'web-workbench') assets = workbenchPublicPaths;
   if (req.method === 'GET')
     return (web ? webGetPaths : getPaths).has(path) || assets.has(path);
   if (req.method === 'HEAD') return assets.has(path);

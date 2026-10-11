@@ -8,47 +8,75 @@
   <title>AI 电话 · 个人工作台</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="stylesheet" href="/styles.css">
-  <script type="module" src="/web-verification.js"></script>
+  <script type="module" src="/web-workbench.js"></script>
 </head>
-<body>
+<body class="web-workbench">
   <svg class="icon-library" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
     <symbol id="i-phone" viewBox="0 0 24 24"><path d="M8 3H4a1 1 0 0 0-1 1c0 9.4 7.6 17 17 17a1 1 0 0 0 1-1v-4l-5-2-2 2a14 14 0 0 1-6-6l2-2-2-5Z"/></symbol>
     <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></symbol>
     <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6m0-10v1"/></symbol>
     <symbol id="i-swap" viewBox="0 0 24 24"><path d="M4 7h16l-4-4M20 17H4l4 4"/></symbol>
+    <symbol id="i-mic" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 11v1a7 7 0 0 0 14 0v-1M12 19v3m-4 0h8"/></symbol>
+    <symbol id="i-backspace" viewBox="0 0 24 24"><path d="M9 5h12v14H9l-7-7 7-7Z"/><path d="m12 9 6 6m-6 0 6-6"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5"/></symbol>
   </svg>
   <aside class="sidebar">
     <a class="brand" href="/controlled" aria-label="AI 电话个人工作台"><span class="brand-icon"><svg class="icon"><use href="#i-phone"/></svg></span><span>AI 电话<small>VOICE, WITHOUT BORDERS</small></span></a>
     <div class="sidebar-label">我的工作空间</div>
-    <nav aria-label="主导航"><span class="nav-item active" aria-current="page"><svg class="icon"><use href="#i-grid"/></svg>个人工作台<span class="nav-mark"></span></span></nav>
-    <div class="sidebar-bottom"><div class="local-status"><span class="status-dot"></span><span>个人工作台</span></div><p>你的个人工作空间，<br>电话功能保持关闭。</p><div class="profile"><span class="avatar">我</span><div>个人工作空间<small>Google · 单账号</small></div></div></div>
+    <nav aria-label="主导航"><span class="nav-item active" aria-current="page"><svg class="icon"><use href="#i-grid"/></svg>通话工作台<span class="nav-mark"></span></span></nav>
+    <div class="sidebar-bottom"><div class="local-status"><span class="status-dot"></span><span>个人工作台</span></div><p>中文说出你的想法，<br>用英语传递给对方。</p><div class="profile"><span class="avatar">我</span><div>个人工作空间<small>Google · 单账号</small></div></div></div>
   </aside>
   <main>
-    <header class="topbar"><div class="breadcrumb">工作空间 <span>/</span> <strong>个人工作台</strong></div><div class="top-actions"><span class="preview-pill">WEB <span>电话关闭</span></span></div></header>
+    <header class="topbar">
+      <div class="breadcrumb">工作空间 <span>/</span> <strong>通话工作台</strong></div>
+      <div class="top-actions">
+        <span class="preview-pill">WEB <span>电话关闭</span></span>
+        <details class="workbench-account" id="account-menu" open>
+          <summary><span class="account-avatar" aria-hidden="true">我</span><span id="account-summary">账号 · 正在检查</span><span aria-hidden="true">⌄</span></summary>
+          <section class="account-panel" aria-label="Google 账号与登录会话">
+            <h2 id="auth-state" role="status">正在检查登录</h2><p id="auth-copy">请稍候，正在读取会话状态。</p>
+            <button class="primary-button" id="google-login" disabled>使用 Google 登录</button>
+            <button class="secondary-button full-width" id="google-login-cancel" hidden>取消登录</button>
+            <p id="session-expiry">尚未确认登录会话。</p>
+            <button class="secondary-button full-width" id="renew-session" hidden>继续本次登录</button>
+            <p class="account-policy">使用中自动保持登录；停止操作约 15 分钟后失效，本次最长 8 小时。服务重启后需要重新登录。</p>
+            <p id="verification-status" role="status">正在检查工作台服务。</p>
+            <div class="account-actions"><button class="secondary-button" id="refresh-status">刷新状态</button><button class="secondary-button" id="google-logout" hidden>退出登录</button></div>
+          </section>
+        </details>
+      </div>
+    </header>
     <div class="error-banner global-error" id="app-error" role="alert" hidden></div>
-    <section class="view">
-      <div class="page-heading"><div><div class="eyebrow">YOUR PERSONAL WORKSPACE.</div><h1>欢迎回到工作台。</h1><p>使用 Google 登录，查看你的工作台状态。电话功能当前关闭。</p></div><button class="secondary-button" id="calls-disabled" disabled>电话功能关闭</button></div>
-      <div class="preview-notice" id="calls-disabled-notice" role="status"><span class="notice-icon"><svg class="icon"><use href="#i-info"/></svg></span><p><strong>电话功能关闭</strong><span>本页不会拨号、使用麦克风或连接语音服务。</span></p></div>
+    <section class="view" id="workspace-view">
+      <div class="page-heading"><div><div class="eyebrow">YOUR CONVERSATION, TRANSLATED.</div><h1>说你的语言，聊你想聊的。</h1><p>号码输入、设备检测与逐句对话，都在这里。</p></div><button class="secondary-button" id="calls-disabled" disabled>电话功能关闭</button></div>
+      <div class="preview-notice" id="calls-disabled-notice" role="status"><span class="notice-icon"><svg class="icon"><use href="#i-info"/></svg></span><p><strong>电话功能关闭</strong><span>号码输入不会拨号。麦克风检测仅在你点击后开始，音频留在浏览器，不上传。</span></p></div>
       <div class="workspace-grid">
-        <section class="dial-card card" aria-labelledby="login-heading">
-          <div class="card-title"><h2 id="login-heading">Google 登录</h2><span class="small-badge">单账号</span></div>
-          <p class="form-intro">仅接受服务端指定并验证通过的工作账号。登录后可查看工作台状态。</p>
-          <div class="service-row"><div><h3 id="auth-state" role="status">正在检查登录</h3><p id="auth-copy">请稍候，正在读取会话状态。</p></div></div>
-          <button class="primary-button" id="google-login" disabled>使用 Google 登录</button>
-          <button class="secondary-button full-width" id="google-login-cancel" hidden>取消登录</button>
-          <button class="secondary-button full-width" id="google-logout" hidden>退出登录</button>
-          <div class="service-row"><div><h3>会话有效期</h3><p id="session-expiry">尚未确认登录会话。</p></div></div>
-          <button class="secondary-button full-width" id="renew-session" hidden>延长本次登录会话</button>
-          <div class="service-row"><div><h3>网页状态</h3><p id="verification-status" role="status">正在检查工作台服务。</p></div></div>
-          <button class="secondary-button full-width" id="refresh-status">刷新状态</button>
-          <p class="privacy-note">登录会话空闲 15 分钟后失效，最长 8 小时；服务重启后需重新用 Google 登录。刷新状态不会续期，延长会话需手动操作。</p>
+        <section class="dial-card card" aria-labelledby="dial-heading">
+          <div class="card-title"><h2 id="dial-heading">开始一通对话</h2><svg class="icon muted"><use href="#i-phone"/></svg></div>
+          <div class="number-field"><label for="phone-number">对方号码 <span>包含国家区号</span></label><div class="phone-entry"><span class="country-icon">TEL</span><input id="phone-number" type="tel" autocomplete="off" inputmode="tel" placeholder="+1…" maxlength="24" aria-describedby="phone-error"><button class="icon-button" id="erase-number" type="button" aria-label="删除号码"><svg class="icon"><use href="#i-backspace"/></svg></button></div><span class="field-error" id="phone-error" role="alert"></span></div>
+          <div class="keypad" aria-label="拨号键盘"></div>
+          <div class="language-settings fixed-languages"><div class="language-field"><span>我的语言</span><strong>普通话</strong></div><span class="swap-button" aria-hidden="true"><svg class="icon"><use href="#i-swap"/></svg></span><div class="language-field"><span>对方语言</span><strong>English</strong></div></div>
+          <button class="primary-button" id="start-call" type="button" disabled><svg class="icon"><use href="#i-phone"/></svg><span>拨打电话 · 暂未启用</span></button>
+          <p class="dial-footnote">号码仅留在当前页面，不会连接电话或发送按键音。</p>
+          <div class="microphone-input-panel"><label for="microphone-input">电脑麦克风输入</label><div class="audio-output-controls"><select id="microphone-input" aria-describedby="microphone-input-status"><option value="">系统默认麦克风</option></select><button class="secondary-button" id="refresh-microphones" type="button">刷新设备</button></div><p id="microphone-input-status" role="status">选择和刷新不会启用麦克风。</p>
+            <div class="local-test-actions"><button class="secondary-button" id="test-microphone" type="button" disabled>检测麦克风</button><button class="secondary-button" id="stop-microphone-test" type="button" disabled>停止检测</button></div>
+            <div class="microphone-meter"><label for="microphone-level">本地输入音量</label><meter id="microphone-level" min="0" max="100" value="0" aria-label="本地麦克风音量"></meter><span id="microphone-level-value" aria-hidden="true">0%</span></div>
+            <p id="microphone-test-status" role="status">登录后可点击检测；默认不请求麦克风权限。</p><p id="microphone-actual">麦克风未启用。</p>
+          </div>
+          <div class="audio-output-panel"><label for="audio-output">电脑声音输出</label><div class="audio-output-controls"><select id="audio-output" disabled><option value="default">系统默认输出</option></select><button class="secondary-button" id="test-audio-output" type="button" disabled>试听输出</button></div><button class="text-button" id="stop-audio-output" type="button" hidden>停止试听</button><p id="audio-output-status" role="status">登录后可试听系统默认输出；要换耳机，请在系统声音设置中选择。</p></div>
+          <div class="microphone-note"><svg class="icon"><use href="#i-mic"/></svg><p>检测最长 30 秒，只显示音量，不录音或回放。离开页面、退出登录或会话失效时会停止。</p></div>
         </section>
         <div class="conversation-column">
-          <section class="connection-card" aria-label="电话功能状态"><div class="connection-top"><span class="overline">电话功能</span><span class="connection-status"><span class="status-dot"></span><span>已关闭</span></span></div><div class="language-bridge"><div class="person"><div class="person-badge mine">我<span></span></div><strong>你</strong><span>普通话</span></div><div class="bridge-middle"><span class="bridge-symbol"><svg class="icon"><use href="#i-swap"/></svg></span><small>尚未建立通话</small></div><div class="person"><div class="person-badge theirs">对<span></span></div><strong>对方</strong><span>English</span></div></div><div class="connection-bottom"><span>网页登录不代表电话就绪</span></div></section>
-          <section class="transcript-card card" aria-labelledby="transcript-heading"><div class="transcript-header"><div><h2 id="transcript-heading">逐句对话</h2><p>电话功能当前关闭，本页没有通话或字幕。</p></div></div><div class="transcript-scroll"><div class="empty-conversation" id="empty-conversation"><div class="empty-chat-icon" aria-hidden="true"><svg class="icon"><use href="#i-swap"/></svg></div><h3>尚无对话记录</h3><p>电话功能关闭，当前没有字幕或播放记录。</p></div><div id="transcript"></div></div></section>
+          <section class="connection-card" aria-label="双向翻译连接"><div class="connection-top"><span class="overline">双向语音翻译</span><span class="connection-status"><span class="status-dot"></span><span id="connection-text">电话关闭</span></span></div><div class="language-bridge"><div class="person"><div class="person-badge mine">我<span></span></div><strong>你</strong><span>普通话</span></div><div class="bridge-middle"><span class="bridge-symbol"><svg class="icon"><use href="#i-swap"/></svg></span><small>尚未建立通话</small></div><div class="person"><div class="person-badge theirs">对<span></span></div><strong>对方</strong><span>English</span></div></div><div class="connection-bottom"><span>中文 → 英语译音</span><span>English 原声 + 中文字幕</span></div></section>
+          <section class="transcript-card card" aria-labelledby="transcript-heading">
+            <div class="transcript-header"><div><h2 id="transcript-heading">逐句对话 <span class="small-badge">原文与译文</span></h2><p>双方按时间交替，每句原文与译文配对。</p><p id="caption-status">电话关闭，尚未收到字幕或译音播放记录。</p></div><div class="transcript-tools"><span class="timer" id="call-timer">00:00</span><button class="icon-button" id="export-current" type="button" aria-label="导出本次对话" disabled><svg class="icon"><use href="#i-download"/></svg></button></div></div>
+            <div class="conversation-follow-bar"><span id="conversation-history-status" hidden></span><button class="secondary-button conversation-latest" id="conversation-latest" type="button" hidden>回到最新</button></div>
+            <div class="transcript-scroll" id="transcript-scroll" tabindex="0" aria-label="可滚动的对话记录"><div class="empty-conversation" id="empty-conversation"><div class="empty-symbol" aria-hidden="true"><span>你</span><svg class="icon"><use href="#i-swap"/></svg><span>对</span></div><h3>尚无对话记录</h3><p>通话后，这里逐句显示中文与英文。<br>当前电话功能关闭，没有实际字幕。</p><span class="sample-label">此处只显示实际收到的字幕</span></div><div id="transcript" role="log" aria-live="polite" aria-relevant="additions text" aria-label="双方按时间排列的原文和译文"></div></div>
+            <div class="call-controls"><div class="control-buttons"><button class="control-button" id="mute-button" type="button" disabled aria-pressed="false"><svg class="icon"><use href="#i-mic"/></svg><span>静音</span></button><span class="control-hint">尚未建立通话</span></div><button class="end-button" id="end-call" type="button" disabled><svg class="icon"><use href="#i-phone"/></svg><span>结束通话</span></button></div>
+          </section>
         </div>
       </div>
-      <footer class="workspace-footer"><span id="verification-message" role="status">电话功能保持关闭。</span><span>Google 登录 · 个人工作台</span></footer>
+      <footer class="workspace-footer"><span id="verification-message" role="status">电话功能保持关闭。</span><span>设备检测在浏览器内完成 · 不上传音频</span></footer>
     </section>
   </main>
 </body>

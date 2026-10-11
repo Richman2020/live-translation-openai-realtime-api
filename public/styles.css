@@ -42,3 +42,38 @@ dialog{border:1px solid #e3e9f1;border-radius:16px;width:430px;max-width:calc(10
 /* Paired originals stay visible even when the legacy per-line preference is off. */
 .hide-original .conversation-utterance .original-text{display:block}
 @media(max-width:760px){.conversation-demo main{padding:14px}.conversation-demo .page-heading h1{font-size:25px}.conversation-demo .transcript-scroll{height:420px;padding:16px}.conversation-demo .transcript-text{font-size:14px}.conversation-demo .transcript-header{padding:16px}.conversation-demo .transcript-header p{font-size:11px}.conversation-follow-bar span{font-size:10px}.demo-controls{gap:7px}.demo-controls button{font-size:11px}.conversation-part-heading{flex-wrap:wrap;gap:5px}.utterance-meta{flex-wrap:wrap}.utterance-meta time{margin-left:auto}}
+
+/* Only the calls-disabled browser workbench uses these controls. */
+.web-workbench .workspace-grid{grid-template-columns:340px minmax(0,1fr)}
+.web-workbench .workbench-account{position:relative;font-size:12px;color:#47618c}
+.web-workbench .workbench-account summary{list-style:none;display:flex;align-items:center;gap:9px;cursor:pointer;padding:6px 9px;border:1px solid #dbe4ef;border-radius:7px;background:#fff}
+.web-workbench .workbench-account summary::-webkit-details-marker{display:none}
+.web-workbench .workbench-account summary:focus-visible{outline:3px solid #95b7ff;outline-offset:3px}
+.web-workbench .account-avatar{width:25px;height:25px;display:grid;place-items:center;border-radius:50%;background:#eaf0fb;color:#42669f;font-size:11px}
+.web-workbench .account-panel{position:absolute;right:0;top:calc(100% + 10px);width:330px;max-width:calc(100vw - 30px);padding:20px;background:#fff;border:1px solid #dbe4ef;border-radius:12px;box-shadow:0 12px 36px #193f7222;z-index:40}
+.web-workbench .account-panel h2{font-size:15px;margin-bottom:6px}
+.web-workbench .account-panel p{font-size:11px;line-height:1.8;color:#6b7e97;margin:8px 0;overflow-wrap:anywhere}
+.web-workbench .account-panel .primary-button,.web-workbench .account-panel .full-width{margin-top:12px}
+.web-workbench .account-panel .account-policy{border-top:1px solid #edf1f5;padding-top:12px;margin-top:14px}
+.web-workbench .account-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+.web-workbench .account-actions button{font-size:11px;padding:8px 12px}
+.web-workbench .dial-key{height:43px}
+.web-workbench .dial-footnote{line-height:1.8;font-size:10px;color:#6e819b}
+.web-workbench .local-test-actions{display:flex;gap:8px;margin-top:12px}
+.web-workbench .local-test-actions button{padding:8px 12px;font-size:12px}
+.web-workbench .microphone-meter{display:grid;grid-template-columns:1fr 33px;gap:4px 8px;align-items:center;margin-top:12px}
+.web-workbench .microphone-meter label{grid-column:1/-1;font-size:11px;font-weight:400}
+.web-workbench .microphone-meter meter{width:100%;height:12px;accent-color:#15988d}
+.web-workbench .microphone-meter span{font:11px var(--number);color:#6b7e97;text-align:right}
+.web-workbench #microphone-test-status[data-status=running]{color:#247f6e}
+.web-workbench #microphone-test-status[data-status=requesting]{color:#906b27}
+.web-workbench .audio-output-panel .text-button{font-size:11px;margin-top:5px}
+.web-workbench .transcript-scroll{height:425px;overflow-anchor:none;scroll-behavior:auto}
+.web-workbench .transcript-header{align-items:flex-start;gap:12px}
+.web-workbench .transcript-header p{line-height:1.8}
+.web-workbench .transcript-tools{flex-shrink:0}
+.web-workbench .transcript-card .small-badge{white-space:nowrap}
+.web-workbench .empty-conversation{min-height:100%}
+.web-workbench .empty-conversation p{line-height:1.9}
+@media(max-width:1100px){.web-workbench .workspace-grid{grid-template-columns:310px minmax(0,1fr)}.web-workbench .dial-card{padding:20px}.web-workbench .transcript-header h2{font-size:15px}.web-workbench .transcript-header .small-badge{display:inline-block;margin-top:4px}}
+@media(max-width:850px){.web-workbench .workspace-grid{grid-template-columns:1fr}.web-workbench .conversation-column{grid-row:2}.web-workbench .dial-card .keypad{max-width:320px;margin-left:auto;margin-right:auto}.web-workbench .top-actions{gap:8px}.web-workbench .breadcrumb{display:none}.web-workbench .topbar{justify-content:flex-end}.web-workbench .page-heading h1{font-size:25px}.web-workbench .transcript-scroll{height:360px}.web-workbench .preview-notice p{gap:5px}.web-workbench .workspace-footer{gap:10px;flex-wrap:wrap}}

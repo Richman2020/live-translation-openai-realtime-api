@@ -500,6 +500,10 @@ test('old private APIs, ordinary incoming calls, encoded paths and unknown surfa
   for (const [path, method] of [
     ['/', 'GET'],
     ['/index.html', 'GET'],
+    ['/web-workbench.js', 'GET'],
+    ['/web-workbench.js', 'HEAD'],
+    ['/session-activity.js', 'GET'],
+    ['/session-activity.js', 'HEAD'],
     ['/health', 'GET'],
     ['/api/token', 'GET'],
     ['/api/settings', 'POST'],

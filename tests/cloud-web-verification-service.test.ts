@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, sign } from 'node:crypto';
-import { createServer, request as httpRequest } from 'node:http';
+import { readFileSync } from 'node:fs';
+import {
+  createServer,
+  request as httpRequest,
+  type IncomingHttpHeaders,
+} from 'node:http';
 import { createConnection, type AddressInfo } from 'node:net';
+import { resolve } from 'node:path';
 import { test, type TestContext } from 'node:test';
 
 import { CLOUD_SESSION_COOKIE } from '../src/solo/cloud-access';
@@ -170,7 +176,7 @@ async function fixture(
   const inject = (
     url: string,
     headers: Record<string, string> = readHeaders(),
-    method: 'GET' | 'POST' = 'GET',
+    method: 'GET' | 'POST' | 'HEAD' = 'GET',
   ) =>
     service.app.inject({
       method,
@@ -243,7 +249,12 @@ function send(
   method = 'GET',
   headers: Record<string, string> = {},
 ) {
-  return new Promise<{ status: number; body: string }>((resolve, reject) => {
+  return new Promise<{
+    status: number;
+    body: string;
+    bytes: Buffer;
+    headers: IncomingHttpHeaders;
+  }>((resolve, reject) => {
     const request = httpRequest(
       {
         host: '127.0.0.1',
@@ -260,6 +271,8 @@ function send(
           resolve({
             status: response.statusCode!,
             body: Buffer.concat(chunks).toString(),
+            bytes: Buffer.concat(chunks),
+            headers: response.headers,
           }),
         );
         response.once('error', reject);
@@ -298,6 +311,158 @@ test('continuous workbench stays available beyond one hour and reports its actua
   );
   assert.equal(f.service.ingress.server.listening, true);
   assert.equal(f.service.app.server.listening, true);
+});
+
+test('daily workbench serves its actual dial, local devices and conversation surface with exact GET and HEAD assets', async (t) => {
+  const f = await fixture(t, undefined, 'web-workbench');
+  const page = await send(f.settings.runtime.port, '/controlled');
+  assert.equal(page.status, 200);
+  assert.match(page.body, /data-service-mode="web-workbench"/);
+  assert.match(page.body, /src="\/web-workbench\.js"/);
+  for (const id of [
+    'phone-number',
+    'start-call',
+    'test-microphone',
+    'test-audio-output',
+    'transcript-scroll',
+    'transcript',
+  ])
+    assert.match(page.body, new RegExp(`id="${id}"`));
+  assert.match(page.body, /电话功能关闭/);
+  assert.doesNotMatch(
+    page.body,
+    /src="\/(?:app|controller-client|controlled-workbench)\.js"|twilio\.min\.js/,
+  );
+
+  for (const [path, filename, mime] of [
+    ['/controlled', 'web-workbench.html', 'text/html'],
+    ['/web-verification.js', 'web-verification.js', 'text/javascript'],
+    ['/web-workbench.js', 'web-workbench.js', 'text/javascript'],
+    ['/session-activity.js', 'session-activity.js', 'text/javascript'],
+    ['/microphone-input.js', 'microphone-input.js', 'text/javascript'],
+    ['/audio-output.js', 'audio-output.js', 'text/javascript'],
+    ['/conversation-model.js', 'conversation-model.js', 'text/javascript'],
+    ['/conversation-view.js', 'conversation-view.js', 'text/javascript'],
+    ['/assets/speaker-test.wav', 'assets/speaker-test.wav', 'audio/wav'],
+    ['/styles.css', 'styles.css', 'text/css'],
+    ['/favicon.svg', 'favicon.svg', 'image/svg+xml'],
+  ]) {
+    const bytes = readFileSync(resolve('public', filename));
+    for (const method of ['GET', 'HEAD'] as const) {
+      const privateResponse = await f.inject(path, readHeaders(), method);
+      const publicResponse = await send(f.settings.runtime.port, path, method);
+      assert.equal(
+        privateResponse.statusCode,
+        200,
+        `${method} private ${path}`,
+      );
+      assert.equal(publicResponse.status, 200, `${method} public ${path}`);
+      for (const headers of [privateResponse.headers, publicResponse.headers]) {
+        assert.equal(String(headers['content-type']).split(';')[0], mime, path);
+        assert.equal(Number(headers['content-length']), bytes.length, path);
+        assert.match(String(headers['cache-control']), /no-store/);
+        assert.equal(headers['x-content-type-options'], 'nosniff');
+        assert.match(
+          String(headers['content-security-policy']),
+          /default-src 'self'/,
+        );
+      }
+      assert.deepEqual(
+        privateResponse.rawPayload,
+        method === 'GET' ? bytes : Buffer.alloc(0),
+        path,
+      );
+      assert.deepEqual(
+        publicResponse.bytes,
+        method === 'GET' ? bytes : Buffer.alloc(0),
+        path,
+      );
+    }
+  }
+  assert.equal(
+    f.fetches(),
+    0,
+    'Public UI assets never create a Google or telephone request',
+  );
+  assert.equal((await f.inject('/api/status')).statusCode, 401);
+});
+
+test('workbench-only assets stay closed in verification and reject alternate paths, queries and writes', async (t) => {
+  const trial = await fixture(t);
+  const daily = await fixture(t, undefined, 'web-workbench');
+  const trialPage = await trial.inject('/controlled');
+  assert.match(trialPage.body, /data-service-mode="web-verification"/);
+  assert.match(trialPage.body, /src="\/web-verification\.js"/);
+  assert.doesNotMatch(trialPage.body, /src="\/web-workbench\.js"/);
+  for (const path of [
+    '/web-workbench.js',
+    '/session-activity.js',
+    '/microphone-input.js',
+    '/audio-output.js',
+    '/conversation-model.js',
+    '/conversation-view.js',
+    '/assets/speaker-test.wav',
+  ]) {
+    for (const method of ['GET', 'HEAD'] as const) {
+      assert.equal(
+        (await trial.inject(path, readHeaders(), method)).statusCode,
+        403,
+        `${method} private ${path}`,
+      );
+      assert.equal(
+        (await send(trial.settings.runtime.port, path, method)).status,
+        404,
+        `${method} public ${path}`,
+      );
+    }
+    assert.equal(
+      (await daily.inject(path, writeHeaders(), 'POST')).statusCode,
+      403,
+      path,
+    );
+    assert.equal(
+      (await send(daily.settings.runtime.port, path, 'POST')).status,
+      404,
+      path,
+    );
+    assert.equal(
+      (await daily.inject(`${path}?mode=phone`)).statusCode,
+      403,
+      path,
+    );
+    assert.equal(
+      (await send(daily.settings.runtime.port, `${path}?mode=phone`)).status,
+      404,
+      path,
+    );
+  }
+  for (const path of [
+    '/app.js',
+    '/controller-client.js',
+    '/controlled-workbench.js',
+    '/vendor/twilio.min.js',
+    '/call-lifecycle.js',
+    '/rtc-diagnostics.js',
+    '/translation-engine.js',
+    '/assets/other.wav',
+    '/assets/%73peaker-test.wav',
+    '/assets/../speaker-test.wav',
+  ]) {
+    for (const mode of [trial, daily])
+      for (const method of ['GET', 'HEAD'] as const) {
+        assert.equal(
+          (await mode.inject(path, readHeaders(), method)).statusCode,
+          403,
+          `${method} private ${path}`,
+        );
+        assert.equal(
+          (await send(mode.settings.runtime.port, path, method)).status,
+          404,
+          `${method} public ${path}`,
+        );
+      }
+  }
+  assert.equal(trial.fetches() + daily.fetches(), 0);
 });
 
 test('workbench preserves idle and absolute session expiry without passive renewal', async (t) => {

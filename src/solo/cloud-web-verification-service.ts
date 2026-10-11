@@ -7,6 +7,7 @@ import { CloudAccessError } from './cloud-access';
 import { createCloudAccessTransport } from './cloud-access-transport';
 import {
   CLOUD_WEB_VERIFICATION_PUBLIC_PATHS,
+  CLOUD_WEB_WORKBENCH_PUBLIC_PATHS,
   createCloudIngress,
 } from './cloud-ingress';
 import { parsePhoneRuntime, type CloudPhoneRuntime } from './cloud-runtime';
@@ -35,8 +36,6 @@ const writePaths = new Set<string>([
   GOOGLE_LOGIN_PATHS.logout,
   GOOGLE_LOGIN_PATHS.renew,
 ]);
-const publicPaths = new Set<string>(CLOUD_WEB_VERIFICATION_PUBLIC_PATHS);
-
 /** Identity and page verification only. There is no telephone resource,
  * journal, voice signer, controller, translation engine or provider instance.
  */
@@ -60,6 +59,11 @@ async function createCallsDisabledWebService(
     mode === 'web-verification'
       ? 'CLOUD_TEST_EXPIRED'
       : 'CLOUD_WEB_UNAVAILABLE';
+  const publicFiles =
+    mode === 'web-workbench'
+      ? CLOUD_WEB_WORKBENCH_PUBLIC_PATHS
+      : CLOUD_WEB_VERIFICATION_PUBLIC_PATHS;
+  const publicPaths = new Set<string>(publicFiles);
   const clock = options.now || Date.now;
   const initialTime = clock();
   let runtime: CloudPhoneRuntime;
@@ -288,19 +292,21 @@ async function createCallsDisabledWebService(
         })),
     );
     const publicDir = resolve(options.publicDir || 'public');
-    for (const path of CLOUD_WEB_VERIFICATION_PUBLIC_PATHS) {
+    for (const path of publicFiles) {
       const filename = path === '/controlled' ? `${mode}.html` : path.slice(1);
       app.get(path, (_request, reply) => {
         reply.header(
           'content-security-policy',
           "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
         );
-        const type = {
-          '/controlled': 'text/html; charset=utf-8',
-          '/web-verification.js': 'text/javascript; charset=utf-8',
-          '/styles.css': 'text/css; charset=utf-8',
-          '/favicon.svg': 'image/svg+xml',
-        }[path];
+        const type = path.endsWith('.js')
+          ? 'text/javascript; charset=utf-8'
+          : {
+              '/controlled': 'text/html; charset=utf-8',
+              '/styles.css': 'text/css; charset=utf-8',
+              '/favicon.svg': 'image/svg+xml',
+              '/assets/speaker-test.wav': 'audio/wav',
+            }[path];
         return reply
           .type(type)
           .send(readFileSync(resolve(publicDir, filename)));

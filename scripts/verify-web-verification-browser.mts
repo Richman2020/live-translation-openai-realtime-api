@@ -304,7 +304,23 @@ class CdpPage {
       source: `
       window.__webVerificationProbe={microphones:0,devices:0,webSockets:0};
       const probe=window.__webVerificationProbe;
-      if(navigator.mediaDevices)navigator.mediaDevices.getUserMedia=()=>{probe.microphones++;return Promise.reject(new Error('Verification cannot open a microphone'));};
+      window.__fixtureClockOffset=0;
+      if(${JSON.stringify(browserMode)}==='web-workbench'){const nativeNow=Date.now.bind(Date);Date.now=()=>nativeNow()+window.__fixtureClockOffset;}
+      window.__workbenchMediaProbe={streams:[],rejectNext:false,deferNext:false,pendingReady:false,releasePending:null};
+      if(navigator.mediaDevices){
+        const nativeGetUserMedia=navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+        navigator.mediaDevices.getUserMedia=async constraints=>{
+          probe.microphones++;
+          if(${JSON.stringify(browserMode)}!=='web-workbench')throw new Error('Verification cannot open a microphone');
+          if(window.__workbenchMediaProbe.rejectNext){window.__workbenchMediaProbe.rejectNext=false;throw new DOMException('Explicit fixture permission denial','NotAllowedError');}
+          const defer=window.__workbenchMediaProbe.deferNext;
+          window.__workbenchMediaProbe.deferNext=false;
+          const stream=await nativeGetUserMedia(constraints);
+          window.__workbenchMediaProbe.streams.push(stream);
+          if(defer)await new Promise(resolve=>{window.__workbenchMediaProbe.pendingReady=true;window.__workbenchMediaProbe.releasePending=()=>{window.__workbenchMediaProbe.pendingReady=false;resolve();};});
+          return stream;
+        };
+      }
       window.Twilio={Device:class{constructor(){probe.devices++;throw new Error('Verification cannot instantiate Voice');}}};
       const OriginalWebSocket=window.WebSocket;
       window.WebSocket=class extends OriginalWebSocket {constructor(...args){probe.webSockets++;super(...args);}};
@@ -421,6 +437,26 @@ class CdpPage {
     await this.evaluate(
       `document.getElementById(${JSON.stringify(id)}).click()`,
     );
+  }
+  async trustedClick(id: string) {
+    await this.send('Page.bringToFront');
+    const position = await eventually(async () => {
+      return this.evaluate(
+        `(()=>{const el=document.getElementById(${JSON.stringify(id)});if(!el||el.disabled||el.hidden)return null;el.scrollIntoView({block:'center'});const r=el.getBoundingClientRect();return r.width&&r.height?{x:r.x+r.width/2,y:r.y+r.height/2}:null;})()`,
+      );
+    }, `Visible enabled ${id}`);
+    await this.send('Input.dispatchMouseEvent', {
+      type: 'mousePressed',
+      button: 'left',
+      clickCount: 1,
+      ...position,
+    });
+    await this.send('Input.dispatchMouseEvent', {
+      type: 'mouseReleased',
+      button: 'left',
+      clickCount: 1,
+      ...position,
+    });
   }
   async state() {
     return this.evaluate(
@@ -639,6 +675,12 @@ try {
       '--no-default-browser-check',
       '--no-proxy-server',
       '--ignore-certificate-errors',
+      ...(browserMode === 'web-workbench'
+        ? [
+            '--use-fake-device-for-media-stream',
+            '--use-fake-ui-for-media-stream',
+          ]
+        : []),
       '--host-resolver-rules=MAP phone.example.test 127.0.0.1',
       '--remote-debugging-port=0',
       `--user-data-dir=${profile}`,
@@ -721,8 +763,8 @@ try {
     await page.evaluate(
       `document.getElementById('start-call')===null && document.getElementById('phone-number')===null`,
     ),
-    true,
-    'verification page exposes no dialing controls',
+    browserMode === 'web-verification',
+    'only the daily workbench presents dialing controls',
   );
   check(
     await page.evaluate(
@@ -862,6 +904,199 @@ try {
     })
   ).data;
   if (browserMode === 'web-workbench') {
+    await eventually(
+      () =>
+        page.evaluate(
+          `document.documentElement.dataset.workbenchReady==='true'`,
+        ),
+      'Independent phone-disabled workbench ready',
+    );
+    check(
+      await page.evaluate(
+        `document.getElementById('start-call').disabled && document.getElementById('end-call').disabled && document.getElementById('mute-button').disabled`,
+      ),
+      true,
+      'all paid call controls remain disabled after confirmed login',
+    );
+    check(
+      await page.evaluate(
+        `!document.getElementById('account-menu').open && document.getElementById('account-summary').textContent.includes('已登录')`,
+      ),
+      true,
+      'confirmed login is compact in the page header',
+    );
+    check(
+      await page.evaluate(
+        `document.querySelectorAll('.keypad button[data-digit]').length`,
+      ),
+      12,
+      'actual local dialpad includes all twelve keys',
+    );
+    await page.evaluate(`document.getElementById('phone-number').focus()`);
+    const activityRenewalsBefore = authWrites.filter(
+      (item) => item.path === '/auth/session/renew',
+    ).length;
+    await page.send('Input.insertText', { text: '+12025550123' });
+    await eventually(
+      () =>
+        authWrites.filter((item) => item.path === '/auth/session/renew')
+          .length > activityRenewalsBefore,
+      'Actual user input renews the current idle session',
+    );
+    const initialIdleExpiry = await page.evaluate(
+      `fetch('/api/browser-session').then(r=>r.json()).then(v=>v.expiresAt)`,
+    );
+    const activeRenewalsBefore = authWrites.filter(
+      (item) => item.path === '/auth/session/renew',
+    ).length;
+    clockOffset += 14 * 60 * 1000;
+    await page.evaluate(`window.__fixtureClockOffset=${clockOffset}`);
+    await page.trustedClick('refresh-microphones');
+    await eventually(
+      () =>
+        authWrites.filter((item) => item.path === '/auth/session/renew')
+          .length > activeRenewalsBefore,
+      'Later foreground action sends an automatic authenticated renewal',
+    );
+    await eventually(
+      () =>
+        page.evaluate(
+          `import('/web-verification.js').then(m=>{let value;const off=m.observeWebVerificationState(v=>value=v);off();return value?.expiresAt>${initialIdleExpiry};})`,
+        ),
+      'Only confirmed server renewal publishes a later idle deadline',
+    );
+    clockOffset += 2 * 60 * 1000;
+    await page.evaluate(`window.__fixtureClockOffset=${clockOffset}`);
+    check(
+      await page.evaluate(`fetch('/api/status').then(r=>r.status)`),
+      200,
+      'Actual user activity preserves authenticated access past the initial fifteen-minute deadline',
+    );
+    check(
+      await page.evaluate(`document.getElementById('phone-number').value`),
+      '+12025550123',
+      'real native input edits the local number without dialing',
+    );
+    await page.evaluate(
+      `document.querySelector('.keypad button[data-digit="8"]').click()`,
+    );
+    check(
+      await page.evaluate(`document.getElementById('phone-number').value`),
+      '+120255501238',
+      'dial key edits the number locally',
+    );
+    await page.trustedClick('erase-number');
+    check(
+      await page.evaluate(`document.getElementById('phone-number').value`),
+      '+12025550123',
+      'erase control deletes exactly one digit',
+    );
+    check(
+      await page.evaluate(
+        `document.getElementById('transcript').children.length===0 && !document.getElementById('empty-conversation').hidden`,
+      ),
+      true,
+      'full chronological conversation surface contains no fabricated captions',
+    );
+    await page.trustedClick('refresh-microphones');
+    check(
+      await page.evaluate(`window.__webVerificationProbe.microphones`),
+      0,
+      'device refresh never requests microphone permission',
+    );
+    check(
+      await page.evaluate(
+        `document.getElementById('microphone-input').options.length>=1`,
+      ),
+      true,
+      'device selector is actually populated',
+    );
+    await page.trustedClick('test-audio-output');
+    await eventually(
+      () => requestedPaths.includes('/assets/speaker-test.wav'),
+      'Default speaker test fetches only the local WAV',
+    );
+    await page.trustedClick('stop-audio-output');
+    check(
+      await page.evaluate(`window.__webVerificationProbe.devices`),
+      0,
+      'local speaker playback never constructs a Voice device',
+    );
+    await page.trustedClick('test-microphone');
+    await eventually(
+      () =>
+        page.evaluate(
+          `window.__workbenchMediaProbe.streams.length===1 && window.__workbenchMediaProbe.streams[0].getAudioTracks().some(track=>track.readyState==='live')`,
+        ),
+      'Explicit detection receives a native synthetic microphone',
+    );
+    check(
+      await page.evaluate(`window.__webVerificationProbe.microphones`),
+      1,
+      'one explicit detection makes one media permission request',
+    );
+    await page.trustedClick('stop-microphone-test');
+    await eventually(
+      () =>
+        page.evaluate(
+          `window.__workbenchMediaProbe.streams.every(stream=>stream.getTracks().every(track=>track.readyState==='ended'))`,
+        ),
+      'Detection cancellation stops every native track',
+    );
+    check(
+      await page.evaluate(`document.getElementById('microphone-level').value`),
+      0,
+      'stopping detection clears the local level',
+    );
+    await page.evaluate(`window.__workbenchMediaProbe.rejectNext=true`);
+    await page.trustedClick('test-microphone');
+    await eventually(
+      () =>
+        page.evaluate(
+          `document.getElementById('microphone-test-status').textContent.includes('权限') || document.getElementById('microphone-test-status').textContent.includes('允许')`,
+        ),
+      'Permission denial is explained by the device control',
+    );
+    check(
+      await page.evaluate(`window.__workbenchMediaProbe.streams.length`),
+      1,
+      'permission denial fabricates no microphone stream',
+    );
+    await page.evaluate(`window.__workbenchMediaProbe.deferNext=true`);
+    await page.trustedClick('test-microphone');
+    await eventually(
+      () => page.evaluate(`window.__workbenchMediaProbe.pendingReady`),
+      'Native permission result is held for the cancellation race',
+    );
+    await page.trustedClick('stop-microphone-test');
+    await page.evaluate(`window.__workbenchMediaProbe.releasePending()`);
+    await eventually(
+      () =>
+        page.evaluate(
+          `window.__workbenchMediaProbe.streams.length===2 && window.__workbenchMediaProbe.streams.every(stream=>stream.getTracks().every(track=>track.readyState==='ended'))`,
+        ),
+      'A late native stream after cancellation is immediately retired',
+    );
+    check(
+      await page.evaluate(
+        `window.__webVerificationProbe.devices===0 && window.__webVerificationProbe.webSockets===0`,
+      ),
+      true,
+      'device checks create neither Voice nor a media WebSocket',
+    );
+    check(
+      requestedPaths.filter((path) =>
+        [
+          '/api/calls',
+          '/api/controller/acquire',
+          '/voice/client',
+          '/api/events',
+        ].includes(path),
+      ),
+      [],
+      'local dial and audio controls make no telephone or event-stream request',
+    );
+    await page.evaluate(`document.getElementById('account-menu').open=true`);
     const target = await (
       await fetch(`http://127.0.0.1:${port}/json/new?about:blank`, {
         method: 'PUT',
