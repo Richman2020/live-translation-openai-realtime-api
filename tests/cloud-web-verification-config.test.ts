@@ -1,3 +1,4 @@
+import { syntheticCostEvidence } from './fixtures/cloud-cost-evidence';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { test } from 'node:test';
@@ -33,6 +34,7 @@ const paidFields = [
   'CLOUD_JOURNAL_DIRECTORY',
   'CLOUD_TEST_TARGET_NUMBER',
   'CLOUD_CALL_RESERVATION_USD_MICROS',
+  'CLOUD_CALL_COST_BOUND_JSON',
   'CLOUD_RATE_CHECKED_AT',
   'CLOUD_RATE_VALID_UNTIL',
   'CLOUD_OUTGOING_PAIRED_CAPTIONS_ENABLED',
@@ -78,6 +80,7 @@ function phoneFixture(): Environment {
     CLOUD_JOURNAL_DIRECTORY: '/data/ai-phone',
     CLOUD_JOURNAL_VOLUME_CONFIRMED: 'true',
     CLOUD_CALL_RESERVATION_USD_MICROS: '5000000',
+    CLOUD_CALL_COST_BOUND_JSON: JSON.stringify(syntheticCostEvidence()),
     CLOUD_RATE_CHECKED_AT: new Date(now - 1000).toISOString(),
     CLOUD_RATE_VALID_UNTIL: new Date(now + 3_600_000).toISOString(),
     CLOUD_TRIAL_RATE_BOUND_CONFIRMED: 'true',
@@ -283,7 +286,7 @@ test('default phone mode retains all existing required gates and four confirmati
   delete env.CLOUD_SERVICE_MODE;
   const config = parseCloudServiceConfig(env, now);
   assert.equal(config.budget.maxCalls, 1);
-  assert.equal(config.budget.maxWallClockMs, 300_000);
+  assert.equal(config.budget.maxWallClockMs, 600_000);
   assert.equal(config.budget.budgetUsdMicros, 5_000_000);
   for (const field of CLOUD_SERVICE_REQUIRED_ENV) {
     const missing = { ...env };

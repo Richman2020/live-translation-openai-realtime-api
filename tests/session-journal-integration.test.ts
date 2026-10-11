@@ -148,7 +148,7 @@ function fixture(
       settings = args;
       return { attach: () => {}, close: () => {} };
     },
-    maxCallMs: 300000,
+    maxCallMs: options.durationMs ?? 300000,
   });
   t.after(async () => {
     await manager.close().catch(() => undefined);
@@ -533,11 +533,11 @@ test('media limit failure stops upload/output and independently terminates known
 
 test('reservation deadline expires before any media or answer and cannot be restarted by rechecking', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 100000 });
-  const f = fixture(t, { durationMs: 80 });
+  const f = fixture(t, { durationMs: 8000 });
   await f.connectControlled();
-  t.mock.timers.tick(30);
+  t.mock.timers.tick(3000);
   f.manager.enforceCallDeadline(f.call.id);
-  t.mock.timers.tick(50);
+  t.mock.timers.tick(5000);
   await tick();
   assert.equal(f.manager.activeSession, null);
   assert.deepEqual(f.hungup, [localSid]);

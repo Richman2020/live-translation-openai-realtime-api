@@ -1,3 +1,5 @@
+import { syntheticCostBound } from './fixtures/cloud-cost-evidence';
+import type { CloudCallCostBound } from '../src/solo/cloud-call-cost-bound';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
@@ -71,10 +73,17 @@ class OfflineSocket extends EventEmitter {
 
 async function fixture(
   t: TestContext,
-  options: { lateCreate?: boolean; reservationUsdMicros?: number } = {},
+  options: {
+    lateCreate?: boolean;
+    reservationUsdMicros?: number;
+    costBound?: CloudCallCostBound;
+    failHangup?: boolean;
+  } = {},
 ) {
   const directory = mkdtempSync(join(tmpdir(), 'cloud-provider-usage-'));
-  const now = 100000;
+  let now = 100000;
+  let failHangup = options.failHangup ?? false;
+  const maxCallMs = (options.costBound?.maxCallSeconds ?? 300) * 1000;
   const journal = CloudBudgetJournal.open({
     directory,
     now: () => now,
@@ -85,9 +94,10 @@ async function fixture(
       budgetUsdMicros: 5000000,
       worstCaseCallUsdMicros: options.reservationUsdMicros ?? 5_000_000,
       maxCalls: 1,
-      maxWallClockMs: 300000,
-      maxInputBytes: 72_000_000,
-      maxOutputBytes: 72_000_000,
+      maxWallClockMs: maxCallMs,
+      maxInputBytes: options.costBound?.aggregateInputBytes ?? 72_000_000,
+      maxOutputBytes: options.costBound?.aggregateOutputBytes ?? 72_000_000,
+      ...(options.costBound ? { costBound: options.costBound } : {}),
       lateCallbackWindowMs: 1000,
       rates: {
         // Synthetic offline evidence, not a claim about current real prices.
@@ -117,11 +127,12 @@ async function fixture(
   });
   const manager = new SessionManager({
     providerUsage: {
+      maxWallClockMs: maxCallMs,
       reservationUsdMicros: options.reservationUsdMicros ?? 5_000_000,
       outgoingPairedCaptions: true,
     },
     callJournal: journal,
-    maxCallMs: 300000,
+    maxCallMs,
     now: () => now,
     providerFactory: () => ({
       create: async (args) => {
@@ -132,6 +143,8 @@ async function fixture(
       },
       hangup: async (sid) => {
         hungup.push(sid);
+        if (failHangup && sid === localSid)
+          throw new Error('OFFLINE_TERMINATION_UNKNOWN');
       },
       limit: async (sid, seconds) => {
         limited.push({ sid, seconds });
@@ -159,6 +172,7 @@ async function fixture(
   t.after(async () => {
     acknowledgeLimit();
     resolveCreate({ sid: remoteSid });
+    failHangup = false;
     await manager.close();
     journal.close();
     rmSync(directory, { recursive: true, force: true });
@@ -212,6 +226,13 @@ async function fixture(
     });
   return {
     manager,
+    advance: (ms: number) => {
+      now += ms;
+    },
+    allowCleanup: () => {
+      failHangup = false;
+    },
+    journal,
     resolveCreate,
     call,
     providers,
@@ -433,4 +454,92 @@ test('faster-than-realtime native media reaches cumulative allowance with wall c
   assertStopped(f, [local, remote]);
   await tick();
   assert.deepEqual(new Set(f.hungup), new Set([localSid, remoteSid]));
+});
+
+test('budget-derived 600s reaches both provider legs, stays active past 300s and cleans both at the original absolute deadline', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = await fixture(t, { costBound: syntheticCostBound() });
+  const { local, remote } = await startAll(f);
+  assert.equal(f.limited[0].seconds, 600);
+  assert.equal(f.created[0].timeLimit, 600);
+  f.advance(301000);
+  t.mock.timers.tick(301000);
+  await tick();
+  assert.equal(f.manager.activeSession?.status, 'active');
+  assert.equal(f.journal.callLimits(f.call.id).remainingWallClockMs, 299000);
+  f.manager.enforceCallDeadline(f.call.id); // Idempotent, never renews.
+  f.advance(299000);
+  t.mock.timers.tick(299000);
+  await tick();
+  await tick();
+  assert.equal(f.manager.activeSession, null);
+  assert.deepEqual(new Set(f.hungup), new Set([localSid, remoteSid]));
+  assert.equal(local.readyState, WebSocket.CLOSED);
+  assert.equal(remote.readyState, WebSocket.CLOSED);
+  assert.equal(f.persisted().chargedUsdMicros, 5_000_000);
+  assert.equal(f.persisted().intents[0].usage, 'pending');
+});
+
+test('600s input send cap includes the second 300s, then rejects before the wire and independently closes both legs', async (t) => {
+  const f = await fixture(t, { costBound: syntheticCostBound() });
+  const { local, remote, native } = await startAll(f);
+  const raw = JSON.stringify({
+    type: 'session.input_audio_buffer.append',
+    audio: Buffer.alloc(48000).toString('base64'),
+  });
+  for (let i = 0; i < 600; i++) native.send(raw);
+  assert.equal(
+    native.sent.filter((x) => x.type.endsWith('.append')).length,
+    600,
+  );
+  native.send(raw);
+  assert.equal(
+    native.sent.filter((x) => x.type.endsWith('.append')).length,
+    600,
+  );
+  assertStopped(f, [local, remote]);
+  await tick();
+  assert.deepEqual(new Set(f.hungup), new Set([localSid, remoteSid]));
+});
+
+test('disconnect after 300s preserves a failed leg responsibility while cleaning the other leg and denying another call', async (t) => {
+  const f = await fixture(t, {
+    costBound: syntheticCostBound(),
+    failHangup: true,
+  });
+  const { local } = await startAll(f);
+  f.advance(301000);
+  local.close();
+  await tick();
+  await tick();
+  assert.deepEqual(new Set(f.hungup), new Set([localSid, remoteSid]));
+  assert.equal(f.manager.isCleanupConfirmed(f.call.id), false);
+  assert.equal(f.manager.controlAdmissionBlocked, true);
+  assert.equal(f.persisted().chargedUsdMicros, 5_000_000);
+  await assert.rejects(f.manager.close(), /CALL_CLEANUP_UNCONFIRMED/);
+  f.allowCleanup();
+  await f.manager.end(f.call.id);
+  assert.equal(f.manager.isCleanupConfirmed(f.call.id), true);
+  assert.equal(f.persisted().chargedUsdMicros, 5_000_000);
+});
+
+test('600s absolute expiry keeps a late-created SID liable and cleans it without granting fresh time or budget', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = await fixture(t, {
+    costBound: syntheticCostBound(),
+    lateCreate: true,
+  });
+  await startNative(f);
+  f.advance(600000);
+  t.mock.timers.tick(600000);
+  await tick();
+  assert.equal(f.manager.isCleanupConfirmed(f.call.id), false);
+  assert.deepEqual(f.hungup, [localSid]);
+  f.resolveCreate({ sid: remoteSid });
+  await tick();
+  await tick();
+  assert.deepEqual(new Set(f.hungup), new Set([localSid, remoteSid]));
+  assert.equal(f.manager.isCleanupConfirmed(f.call.id), true);
+  assert.equal(f.persisted().intents[0].remote.phase, 'terminal');
+  assert.equal(f.persisted().chargedUsdMicros, 5_000_000);
 });

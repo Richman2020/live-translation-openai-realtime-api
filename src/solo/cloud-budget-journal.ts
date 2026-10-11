@@ -18,6 +18,11 @@ import {
 } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
 
+import {
+  CLOUD_TRIAL_WINDOW_SECONDS,
+  validCloudCallCostBound,
+  type CloudCallCostBound,
+} from './cloud-call-cost-bound';
 import type {
   CloudVoiceAdmission,
   CloudVoiceGrant,
@@ -74,6 +79,8 @@ export type CloudTrialBudgetPolicy = Readonly<{
   worstCaseCallUsdMicros: number;
   maxCalls: number;
   maxWallClockMs: number;
+  /** Absent only for explicit legacy journal recovery; cloud startup requires it. */
+  costBound?: CloudCallCostBound;
   maxInputBytes: number;
   maxOutputBytes: number;
   lateCallbackWindowMs: number;
@@ -118,6 +125,19 @@ function deny(): never {
   throw new CloudBudgetError('BUDGET_NOT_READY');
 }
 function validPolicy(policy: CloudTrialBudgetPolicy, now: number): void {
+  const bound = policy?.costBound;
+  if (
+    bound !== undefined &&
+    (!validCloudCallCostBound(bound) ||
+      policy.maxCalls !== 1 ||
+      policy.maxWallClockMs !== bound.maxCallSeconds * 1000 ||
+      policy.maxInputBytes !== bound.aggregateInputBytes ||
+      policy.maxOutputBytes !== bound.aggregateOutputBytes ||
+      policy.worstCaseCallUsdMicros !== bound.reservationUsdMicros ||
+      bound.admissionDeadline + bound.cleanupSeconds * 1000 >
+        policy.rates?.validUntil)
+  )
+    deny();
   if (
     !policy ||
     !/^\+1[2-9][0-9]{9}$/.test(policy.allowedTarget) ||
@@ -126,9 +146,21 @@ function validPolicy(policy: CloudTrialBudgetPolicy, now: number): void {
     !boundedInteger(policy.budgetUsdMicros, 1, MAX_BUDGET_USD_MICROS) ||
     !boundedInteger(policy.worstCaseCallUsdMicros, 1, policy.budgetUsdMicros) ||
     !boundedInteger(policy.maxCalls, 1, 10) ||
-    !boundedInteger(policy.maxWallClockMs, 1000, 300000) ||
-    !boundedInteger(policy.maxInputBytes, 1, 100_000_000) ||
-    !boundedInteger(policy.maxOutputBytes, 1, 100_000_000) ||
+    !boundedInteger(
+      policy.maxWallClockMs,
+      1000,
+      bound ? CLOUD_TRIAL_WINDOW_SECONDS * 1000 : 300000,
+    ) ||
+    !boundedInteger(
+      policy.maxInputBytes,
+      1,
+      bound ? bound.aggregateInputBytes : 100_000_000,
+    ) ||
+    !boundedInteger(
+      policy.maxOutputBytes,
+      1,
+      bound ? bound.aggregateOutputBytes : 100_000_000,
+    ) ||
     !boundedInteger(policy.lateCallbackWindowMs, 1000, 60000) ||
     !policy.rates ||
     typeof policy.rates.twilioReference !== 'string' ||
@@ -295,6 +327,9 @@ export class CloudBudgetJournal implements CloudVoiceAdmission {
     this.policy = Object.freeze({
       ...policy,
       rates: Object.freeze({ ...policy.rates }),
+      ...(policy.costBound
+        ? { costBound: Object.freeze({ ...policy.costBound }) }
+        : {}),
     });
     this.file = join(directory, 'trial-budget.json');
     this.lockFile = join(directory, 'trial-budget.lock');
@@ -337,6 +372,9 @@ export class CloudBudgetJournal implements CloudVoiceAdmission {
         policy.maxInputBytes,
         policy.maxOutputBytes,
         policy.lateCallbackWindowMs,
+        // Keep the exact legacy digest when absent; a new policy NEVER silently
+        // reuses a legacy sentinel, resets budget, or migrates an existing file.
+        ...(policy.costBound ? [policy.costBound] : []),
       ]);
       const targetDigest = digest(policy.allowedTarget);
       // A separate durable sentinel prevents a deleted/corrupt ledger from
@@ -598,6 +636,12 @@ export class CloudBudgetJournal implements CloudVoiceAdmission {
     )
       throw new CloudBudgetError('BUDGET_EXHAUSTED');
     const now = this.time();
+    const deadline = Math.min(
+      now + this.policy.maxWallClockMs,
+      this.policy.costBound?.admissionDeadline ?? Number.MAX_SAFE_INTEGER,
+    );
+    if (!Number.isSafeInteger(deadline) || deadline - now < 1000)
+      throw new CloudBudgetError('BUDGET_LIMIT_REACHED');
     const reservationId = randomBytes(24).toString('base64url');
     this.commit((next) => {
       next.chargedUsdMicros += this.policy.worstCaseCallUsdMicros;
@@ -608,7 +652,7 @@ export class CloudBudgetJournal implements CloudVoiceAdmission {
         ...hashes,
         phase: 'reserved',
         reservedUsdMicros: this.policy.worstCaseCallUsdMicros,
-        deadline: now + this.policy.maxWallClockMs,
+        deadline,
         liabilityUntil: grant.expiresAt + this.policy.lateCallbackWindowMs,
         local: { phase: 'planned' },
         remote: { phase: 'planned' },

@@ -1,3 +1,4 @@
+import { syntheticCostEvidence } from './fixtures/cloud-cost-evidence';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
@@ -44,6 +45,7 @@ function configuration(
       CLOUD_JOURNAL_DIRECTORY: directory,
       CLOUD_JOURNAL_VOLUME_CONFIRMED: 'true',
       CLOUD_CALL_RESERVATION_USD_MICROS: '5000000',
+      CLOUD_CALL_COST_BOUND_JSON: JSON.stringify(syntheticCostEvidence()),
       CLOUD_RATE_CHECKED_AT: new Date(time - 1000).toISOString(),
       CLOUD_RATE_VALID_UNTIL: new Date(time + 60000).toISOString(),
       CLOUD_TRIAL_RATE_BOUND_CONFIRMED: 'true',
@@ -78,6 +80,20 @@ async function unusedPort(): Promise<number> {
   );
   return address.port;
 }
+
+test('cloud service rejects missing or mismatched cost evidence before touching the journal', async () => {
+  const now = 1780000000000;
+  const config = configuration(now);
+  for (const changed of [
+    { ...config, budget: { ...config.budget, costBound: undefined } },
+    { ...config, outgoingPairedCaptions: true },
+    { ...config, testDeadline: config.testDeadline - 1000 },
+  ]) {
+    await assert.rejects(createCloudService(changed, { now: () => now }), {
+      message: 'CLOUD_CALL_COST_BOUND_REQUIRED',
+    });
+  }
+});
 function httpCall(
   port: number,
   path: string,

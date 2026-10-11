@@ -11,7 +11,11 @@ const make = (
   reservationUsdMicros = 5_000_000,
   outgoingPairedCaptions = true,
 ) =>
-  createCloudCallUsageBudget({ reservationUsdMicros, outgoingPairedCaptions });
+  createCloudCallUsageBudget({
+    reservationUsdMicros,
+    outgoingPairedCaptions,
+    maxWallClockMs: 300000,
+  });
 const send = (b: Budget, connectionId: string, data: unknown) =>
   b.admit({ stage: 'send', connectionId, data: JSON.stringify(data) });
 const connect = (
@@ -411,6 +415,7 @@ test('exact per-request input boundary accepts 32768 units and rejects the next 
 test('configuration and returned snapshots cannot mutate an existing reservation', () => {
   const options = {
     reservationUsdMicros: 2_000_001,
+    maxWallClockMs: 300000,
     outgoingPairedCaptions: false,
   };
   const b = createCloudCallUsageBudget(options);

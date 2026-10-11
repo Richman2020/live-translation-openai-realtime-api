@@ -5,6 +5,7 @@ import { checkConfig, type SoloConfig } from './config';
 import { GoogleOidcClient } from './google-oidc';
 import { GOOGLE_LOGIN_PATHS } from './google-login';
 import type { CloudTrialBudgetPolicy } from './cloud-budget-journal';
+import { deriveCloudCallCostBound } from './cloud-call-cost-bound';
 import { selectCloudServiceMode } from './cloud-web-verification-config';
 
 type Environment = Readonly<Record<string, string | undefined>>;
@@ -41,6 +42,7 @@ export const CLOUD_SERVICE_REQUIRED_ENV = Object.freeze([
   'CLOUD_JOURNAL_DIRECTORY',
   'CLOUD_JOURNAL_VOLUME_CONFIRMED',
   'CLOUD_CALL_RESERVATION_USD_MICROS',
+  'CLOUD_CALL_COST_BOUND_JSON',
   'CLOUD_RATE_CHECKED_AT',
   'CLOUD_RATE_VALID_UNTIL',
   'CLOUD_TRIAL_RATE_BOUND_CONFIRMED',
@@ -151,11 +153,7 @@ export function parseCloudServiceConfig(
     throw new Error('CLOUD_TEST_DEADLINE_INVALID');
   const checkedAt = instant(env, 'CLOUD_RATE_CHECKED_AT');
   const validUntil = instant(env, 'CLOUD_RATE_VALID_UNTIL');
-  if (
-    checkedAt > now ||
-    validUntil < testDeadline ||
-    validUntil - checkedAt > 86400000
-  )
+  if (checkedAt > now || validUntil <= now || validUntil - checkedAt > 86400000)
     throw new Error('CLOUD_RATE_EVIDENCE_EXPIRED');
   const journalDirectory = required(env, 'CLOUD_JOURNAL_DIRECTORY');
   if (
@@ -178,6 +176,24 @@ export function parseCloudServiceConfig(
     worstCaseCallUsdMicros > 5_000_000
   )
     throw new Error('CLOUD_CONFIG_INVALID:CLOUD_CALL_RESERVATION_USD_MICROS');
+  let evidence: unknown;
+  try {
+    evidence = JSON.parse(required(env, 'CLOUD_CALL_COST_BOUND_JSON', 32768));
+  } catch {
+    throw new Error('CLOUD_CALL_COST_BOUND_REQUIRED');
+  }
+  const costBound = deriveCloudCallCostBound({
+    evidence,
+    accountSid: providers.TWILIO_ACCOUNT_SID,
+    applicationSid: providers.TWILIO_TWIML_APP_SID,
+    target: allowedTarget,
+    outgoingPairedCaptions,
+    reservationUsdMicros: worstCaseCallUsdMicros,
+    checkedAt,
+    validUntil,
+    serviceDeadline: testDeadline,
+    now,
+  });
   const budget: CloudTrialBudgetPolicy = Object.freeze({
     allowedTarget,
     accountSid: providers.TWILIO_ACCOUNT_SID,
@@ -185,15 +201,16 @@ export function parseCloudServiceConfig(
     budgetUsdMicros: 5_000_000,
     worstCaseCallUsdMicros,
     maxCalls: 1,
-    maxWallClockMs: 300000,
-    maxInputBytes: 72_000_000,
-    maxOutputBytes: 72_000_000,
+    maxWallClockMs: costBound.maxCallSeconds * 1000,
+    maxInputBytes: costBound.aggregateInputBytes,
+    maxOutputBytes: costBound.aggregateOutputBytes,
+    costBound,
     lateCallbackWindowMs: 60000,
     rates: Object.freeze({
       twilioReference: 'https://www.twilio.com/en-us/voice/pricing/us',
       openaiReference: 'https://openai.com/api/pricing/',
       checkedAt,
-      validUntil: testDeadline,
+      validUntil,
     }),
   });
   return Object.freeze({

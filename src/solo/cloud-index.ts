@@ -85,7 +85,7 @@ async function main(): Promise<void> {
           ...(config.outgoingPairedCaptions ? ['gpt-live-transcribe'] : []),
         ],
         maxCalls: 1,
-        maxCallSeconds: 300,
+        maxCallSeconds: config.budget.maxWallClockMs / 1000,
         singleInstance: true,
       }),
     );

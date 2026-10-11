@@ -1,3 +1,4 @@
+import { syntheticCostEvidence } from './fixtures/cloud-cost-evidence';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { test } from 'node:test';
@@ -32,6 +33,7 @@ function fixture(time = now) {
     CLOUD_JOURNAL_DIRECTORY: '/data/ai-phone',
     CLOUD_JOURNAL_VOLUME_CONFIRMED: 'true',
     CLOUD_CALL_RESERVATION_USD_MICROS: '5000000',
+    CLOUD_CALL_COST_BOUND_JSON: JSON.stringify(syntheticCostEvidence()),
     CLOUD_RATE_CHECKED_AT: new Date(time - 1000).toISOString(),
     CLOUD_RATE_VALID_UNTIL: new Date(time + 3600000).toISOString(),
     CLOUD_TRIAL_RATE_BOUND_CONFIRMED: 'true',
@@ -50,7 +52,7 @@ test('cloud trial config pins one instance, one bounded call and exact callback 
   assert.equal(config.providers.LOCAL_ACCESS_TOKEN, '');
   assert.equal(config.providers.OPENAI_REALTIME_MODEL, 'gpt-realtime-1.5');
   assert.equal(config.budget.maxCalls, 1);
-  assert.equal(config.budget.maxWallClockMs, 300000);
+  assert.equal(config.budget.maxWallClockMs, 600000);
   assert.equal(config.budget.budgetUsdMicros, 5_000_000);
   assert.equal(config.budget.worstCaseCallUsdMicros, 5_000_000);
   assert.equal(config.budget.rates.validUntil, config.testDeadline);
@@ -101,7 +103,7 @@ test('trial rejects expired/extended deadlines, unsupported regions of target, c
     { CLOUD_TEST_DEADLINE: new Date(now + 3600001).toISOString() },
     { CLOUD_TEST_DEADLINE: '2026-05-28T00:00:00Z' },
     { CLOUD_RATE_CHECKED_AT: new Date(now + 1).toISOString() },
-    { CLOUD_RATE_VALID_UNTIL: new Date(now + 3599999).toISOString() },
+    { CLOUD_RATE_VALID_UNTIL: new Date(now).toISOString() },
     { CLOUD_RATE_CHECKED_AT: new Date(now - 86400000).toISOString() },
     { CLOUD_TEST_TARGET_NUMBER: '+442071838750' },
     { CLOUD_TEST_TARGET_NUMBER: '+12021110101' },
@@ -175,7 +177,7 @@ test('config-only executable terminates promptly and never contacts suppliers or
       'gpt-realtime-1.5',
     ],
     maxCalls: 1,
-    maxCallSeconds: 300,
+    maxCallSeconds: 600,
     singleInstance: true,
   });
   assert.equal(result.stderr, '');
@@ -185,6 +187,7 @@ test('paired outgoing captions require an explicit flag and metadata exposes the
   const values = {
     ...fixture(Date.now()),
     CLOUD_OUTGOING_PAIRED_CAPTIONS_ENABLED: 'true',
+    CLOUD_CALL_COST_BOUND_JSON: JSON.stringify(syntheticCostEvidence(true)),
   };
   assert.equal(parseCloudServiceConfig(values).outgoingPairedCaptions, true);
   const result = spawnSync(

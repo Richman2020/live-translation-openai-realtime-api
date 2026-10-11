@@ -1,3 +1,8 @@
+import {
+  cloudCallMediaLimits,
+  CLOUD_USAGE_POLICY,
+} from './cloud-call-cost-bound';
+
 /** Application reservations only, never a supplier invoice cap. Provider special
  * tokens, automatic ASR/VAD output and actual non-text fees are not proven bounded
  * by these byte proxies. The durable journal must reserve the entire call first;
@@ -28,7 +33,6 @@ type Connection = {
   ended: boolean;
 };
 const NON_TEXT_RESERVE = 2_000_000; // Engineering reserve, not verified vendor pricing.
-const PCM_LIMIT = 14_400_000;
 const ERROR = 'CLOUD_CALL_USAGE_REJECTED';
 const record = (v: unknown): v is RecordValue =>
   !!v && typeof v === 'object' && !Array.isArray(v);
@@ -44,16 +48,26 @@ const id = (v: unknown) =>
 export function createCloudCallUsageBudget(options: {
   reservationUsdMicros: number;
   outgoingPairedCaptions: boolean;
+  maxWallClockMs: number;
 }) {
   if (
     !record(options) ||
     !Number.isSafeInteger(options.reservationUsdMicros) ||
     options.reservationUsdMicros <= NON_TEXT_RESERVE ||
     options.reservationUsdMicros > 5_000_000 ||
-    typeof options.outgoingPairedCaptions !== 'boolean'
+    typeof options.outgoingPairedCaptions !== 'boolean' ||
+    !Number.isSafeInteger(options.maxWallClockMs) ||
+    options.maxWallClockMs % 1000 !== 0
   )
     throw new Error(ERROR);
-  const { reservationUsdMicros, outgoingPairedCaptions } = options;
+  const { reservationUsdMicros, outgoingPairedCaptions, maxWallClockMs } =
+    options;
+  let media: ReturnType<typeof cloudCallMediaLimits>;
+  try {
+    media = cloudCallMediaLimits(maxWallClockMs / 1000, outgoingPairedCaptions);
+  } catch {
+    throw new Error(ERROR);
+  }
   const connections = new Map<string, Connection>();
   const slots = new Set<Slot>();
   let closed = false;
@@ -310,7 +324,7 @@ export function createCloudCallUsageBudget(options: {
             pcm.length > 0 &&
               pcm.length % 2 === 0 &&
               pcm.toString('base64') === message.audio &&
-              connection.inputBytes + pcm.length <= PCM_LIMIT,
+              connection.inputBytes + pcm.length <= media.pcmBytes,
           );
           connection.inputBytes += pcm.length;
         } else if (message.type === 'response.cancel') {
@@ -351,13 +365,13 @@ export function createCloudCallUsageBudget(options: {
       if (event.path === 'native_translation') {
         require(
           event.bytes % 2 === 0 &&
-            nativePlaybackBytes + event.bytes <= PCM_LIMIT,
+            nativePlaybackBytes + event.bytes <= media.pcmBytes,
         );
         nativePlaybackBytes += event.bytes;
       } else {
         require(
           event.path === 'return_original' &&
-            returnOriginalPlaybackBytes + event.bytes <= 2_400_000,
+            returnOriginalPlaybackBytes + event.bytes <= media.pcmuBytes,
         );
         returnOriginalPlaybackBytes += event.bytes;
       }
@@ -368,6 +382,8 @@ export function createCloudCallUsageBudget(options: {
     get snapshot() {
       return {
         scope: 'application_reserved' as const,
+        usagePolicy: CLOUD_USAGE_POLICY,
+        maxWallClockMs,
         billed: false as const,
         costBoundVerified: false as const,
         closed,

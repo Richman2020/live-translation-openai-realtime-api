@@ -4,6 +4,15 @@
 
 需求见 [PROJECT_BRIEF.md](PROJECT_BRIEF.md)，工作规则见 [AGENTS.md](AGENTS.md)，运行步骤见 [LOCAL_SETUP.md](LOCAL_SETUP.md)，后续执行入口见 [LOCAL_CODEX_HANDOFF.md](LOCAL_CODEX_HANDOFF.md)。
 
+## 最新开发交付：预算驱动时长与原发布结果（2026-10-11）
+
+- 原唯一patch的一次发布调用最终返回committed/triggered；deployment `27330903-d42c-49e3-aae7-747988ab458a` 于12:19:45.626 UTC SUCCESS，平台health 1/1，启动明确calls-disabled。未重试或新建patch，当前无挂起确认；Portal与资源不变。服务pin7b598f1、部署metadata a3ab2ec不同，两候选104项应用构建输入完全相同；实际checkout仍缺证明。详细证据见 [运行记录](docs/CLOUD_RELEASE_RESULT_2026-10-11.md)，下方恢复时“仍STAGED/待停止确认”已被本节更新。
+- 最新范围仅源码和离线验收。新增完整费用上界配置与纯计算策略，使用BigInt推导有限D；六处统一两腿timeLimit、原绝对截止、实际send媒体额度及journal策略scope。无真实费率、未知在途责任、错模式或过期均拒绝，不能用300秒、字节或2美元工程预留充当账单保证。文字限额不扩张，Pocket本地不变。
+- 原schema/锁/sentinel保留；旧scope仍可按旧policy核对恢复，新scope不匹配拒绝且不改文件；重启不增加通数或预算。合成600秒用例覆盖301秒继续、600秒终止、并发、双腿限时、断线与清理失败、迟到SID、媒体超限、费用不足、重启未知责任与旧账本兼容。代码与运行门槛见 [预算驱动时长](docs/CLOUD_BUDGET_DURATION.md)。
+- Node24.19.0/npm11.9.0最终全套 **1229总/1224pass/5既有Windows skip/0fail**，build/typecheck通过；Chrome151日常网页 **82/82**、continuous工作台 **60/60**，外部请求/真实供应商调用/异常均0。修改源码格式及git diff --check通过；新增策略和其余修改源码lint通过，cloud-call-usage的36条既有lint问题与a3ab2ec逐条一致（基线比较通过），未声称全仓lint通过。
+- 从a3ab2ec交付到独立分支 `codex/cloud-phone-conversation-duration-20261011`，避免推动当前部署关联分支；[审查差异](https://github.com/Richman2020/live-translation-openai-realtime-api/compare/a3ab2ec36921c4fbf1bb0d859ed1ae652473a71b...codex/cloud-phone-conversation-duration-20261011)。本记录纳入同一源码提交，推送后核对远端精确SHA，远端CI单独记录在交接答复，不借用旧7b598f1的绿色结果。
+- 没有访问供应商、变更云变量/权限/容量、再次发布或拨号。完整费用证据、隐藏AppSID/原journal实况、真实连续模型能力仍未通过；仅变量存在不能代表值正确。新配置字段只在源码与空模板出现，未设真实云值。
+
 ## 最新恢复复核：原 patch 保留，发布待旧任务停止确认（2026-10-11）
 
 - 用保存云配置恢复执行环境，获取原开发分支精确源码 `7b598f1337a0edbd24c9dc20f09268ad1b2c238d`；未重建项目或连接离线电脑。当前分支和main均无 `.agents/skills`，已读仓库规则及已安装Railway技能。

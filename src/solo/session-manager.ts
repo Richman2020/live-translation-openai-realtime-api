@@ -314,7 +314,10 @@ export class SessionManager extends EventEmitter {
     )
       throw new SessionError('INVALID_CALL_JOURNAL', 503);
     if (options.providerUsage) {
-      if (!this.callJournal)
+      if (
+        !this.callJournal ||
+        options.providerUsage.maxWallClockMs !== this.maxCallMs
+      )
         throw new SessionError('INVALID_CALL_JOURNAL', 503);
       createCloudCallUsageBudget(options.providerUsage).close();
       this.providerUsageOptions = Object.freeze({ ...options.providerUsage });
@@ -393,6 +396,26 @@ export class SessionManager extends EventEmitter {
       this.track(this.end(id, 'CALL_DURATION_LIMIT'));
     }, limits.remainingWallClockMs);
     session.deadlineTimer.unref?.();
+  }
+
+  private providerCallSeconds(limits: {
+    deadline: number;
+    remainingWallClockMs: number;
+  }): number {
+    const seconds = Math.floor(
+      Math.min(limits.remainingWallClockMs, limits.deadline - this.now()) /
+        1000,
+    );
+    if (
+      !Number.isSafeInteger(limits.deadline) ||
+      !Number.isSafeInteger(limits.remainingWallClockMs) ||
+      limits.remainingWallClockMs > this.maxCallMs ||
+      limits.deadline - this.now() < 1000 ||
+      !Number.isSafeInteger(seconds) ||
+      seconds < 1
+    )
+      throw new SessionError('BUDGET_NOT_READY', 503);
+    return seconds;
   }
 
   private journalFailed(session: Session): void {
@@ -729,12 +752,7 @@ export class SessionManager extends EventEmitter {
       )
         throw new SessionError('BUDGET_NOT_READY', 503);
       const limits = this.callJournal.callLimits(session.view.id);
-      const seconds = Math.max(
-        1,
-        Math.floor(limits.remainingWallClockMs / 1000),
-      );
-      if (!Number.isSafeInteger(seconds) || seconds > 300)
-        throw new SessionError('BUDGET_NOT_READY', 503);
+      const seconds = this.providerCallSeconds(limits);
       await session.provider.limit(fields.CallSid, seconds);
       if (session.ended || !this.admissionCurrent(session))
         throw new SessionError('CALL_AUTHORIZATION_REVOKED', 403);
@@ -1251,7 +1269,7 @@ export class SessionManager extends EventEmitter {
     if (this.callJournal) {
       try {
         const limits = this.callJournal.callLimits(session.view.id);
-        timeLimit = Math.max(1, Math.floor(limits.remainingWallClockMs / 1000));
+        timeLimit = this.providerCallSeconds(limits);
         this.callJournal.beginCreate(
           session.view.id,
           role,

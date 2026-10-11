@@ -3,6 +3,7 @@ import type { FastifyInstance } from 'fastify';
 
 import type { CloudServiceConfig } from './cloud-service-config';
 import { CloudBudgetJournal } from './cloud-budget-journal';
+import { validCloudCallCostBound } from './cloud-call-cost-bound';
 import { ConfigStore, SETTING_NAMES } from './config';
 import { CloudControllerLeases } from './controller-lease';
 import {
@@ -226,6 +227,13 @@ export async function createCloudService(
   } = {},
 ) {
   const now = options.now || Date.now;
+  const bound = config.budget.costBound;
+  if (
+    !validCloudCallCostBound(bound) ||
+    bound.outgoingPairedCaptions !== config.outgoingPairedCaptions ||
+    bound.admissionDeadline + bound.cleanupSeconds * 1000 > config.testDeadline
+  )
+    throw new Error('CLOUD_CALL_COST_BOUND_REQUIRED');
   if (config.testDeadline <= now()) throw new Error('CLOUD_TEST_EXPIRED');
   const journal = CloudBudgetJournal.open({
     directory: config.journalDirectory,
@@ -281,6 +289,7 @@ export async function createCloudService(
       providerUsage: {
         reservationUsdMicros: config.budget.worstCaseCallUsdMicros,
         outgoingPairedCaptions: config.outgoingPairedCaptions,
+        maxWallClockMs: config.budget.maxWallClockMs,
       },
     });
     const leases = new CloudControllerLeases({ policy: login.policy, now });
