@@ -76,6 +76,7 @@ async function fixture(
   const codes = new Map<string, string>();
   let tokenRequests = 0;
   let failure = false;
+  let badSignature = false;
   let tokenBarrier: ReturnType<typeof deferred> | null = null;
   let sendBarrier: ReturnType<typeof deferred> | null = null;
   let enteredToken = deferred();
@@ -128,7 +129,9 @@ async function fixture(
       }),
     ).toString('base64url');
     const data = `${header}.${payload}`;
-    const jwt = `${data}.${sign('RSA-SHA256', Buffer.from(data), pair.privateKey).toString('base64url')}`;
+    const signature = sign('RSA-SHA256', Buffer.from(data), pair.privateKey);
+    if (badSignature) signature[0] ^= 1;
+    const jwt = `${data}.${signature.toString('base64url')}`;
     return new Response(
       JSON.stringify({
         id_token: jwt,
@@ -267,6 +270,9 @@ async function fixture(
     },
     failProvider() {
       failure = true;
+    },
+    tamperSignature() {
+      badSignature = true;
     },
     blockToken() {
       tokenBarrier = deferred();
@@ -627,8 +633,12 @@ test('failure diagnostics distinguish callback input, missing binding, missing f
 test('callback parameter diagnostics classify unknown, duplicate and Google-error rejection without changing responses', async (t) => {
   const canary = 'synthetic-private-query-canary';
   const cases: [string, GoogleLoginFailureReason][] = [
-    [`&iss=${canary}`, 'CALLBACK_PARAMS_UNKNOWN_ISS'],
+    [`&iss=${canary}`, 'CALLBACK_PARAMS_ISS_MISMATCH'],
     [`&session_state=${canary}`, 'CALLBACK_PARAMS_UNKNOWN_SESSION_STATE'],
+    [
+      `&iss=${encodeURIComponent(GOOGLE_OIDC.issuer)}&session_state=${canary}`,
+      'CALLBACK_PARAMS_UNKNOWN_SESSION_STATE',
+    ],
     [`&code=${canary}`, 'CALLBACK_PARAMS_DUPLICATE'],
     [`&scope=openid&scope=${canary}`, 'CALLBACK_PARAMS_DUPLICATE'],
     [`&authuser=0&authuser=${canary}`, 'CALLBACK_PARAMS_DUPLICATE'],
@@ -672,6 +682,180 @@ test('callback parameter diagnostics classify unknown, duplicate and Google-erro
   }
 });
 
+test('fixed callback issuer with Google response fields and absent issuer both preserve successful login', async (t) => {
+  for (const extra of [
+    '',
+    `&iss=${encodeURIComponent(GOOGLE_OIDC.issuer)}&scope=openid%20email&authuser=0&prompt=select_account&hd=${domain}`,
+  ]) {
+    const f = await fixture(t);
+    const flow = await f.start();
+    const result = await f.callback(flow, flow.cookie, extra);
+    assert.equal(result.statusCode, 200, result.body);
+    const values = result.headers['set-cookie'] as string[];
+    const sessionCookie = values.find((value) =>
+      value.startsWith(`${CLOUD_SESSION_COOKIE}=`),
+    )!;
+    assert.match(sessionCookie, /; Secure; HttpOnly; SameSite=Strict/);
+    assert.equal((await f.current(cookiePair(sessionCookie))).statusCode, 200);
+    assert.equal(f.tokenRequests, 1);
+    assert.deepEqual(f.failures, []);
+    assert.equal(
+      createHash('sha256').update(f.requests[0].verifier).digest('base64url'),
+      flow.challenge,
+      'Issuer compatibility preserves the original PKCE exchange',
+    );
+  }
+});
+
+test('callback issuer must exactly match the fixed provider before any token exchange and rejected flow cannot replay', async (t) => {
+  for (const issuer of [
+    'accounts.google.com',
+    'http://accounts.google.com',
+    'https://foreign.example.test',
+    '',
+    ` ${GOOGLE_OIDC.issuer}`,
+    `${GOOGLE_OIDC.issuer} `,
+    `${GOOGLE_OIDC.issuer}/`,
+    'https://accounts.google.com:443',
+    'https://ACCOUNTS.GOOGLE.COM',
+    `${GOOGLE_OIDC.issuer}\0synthetic-private-issuer-canary`,
+    encodeURIComponent(GOOGLE_OIDC.issuer),
+    'https:%2F%2Faccounts.google.com',
+  ]) {
+    const f = await fixture(t);
+    const flow = await f.start();
+    const result = await f.callback(
+      flow,
+      flow.cookie,
+      `&iss=${encodeURIComponent(issuer)}`,
+    );
+    assert.equal(result.statusCode, 401);
+    assert.deepEqual(result.json(), { error: 'LOGIN_FAILED' });
+    assert.equal(result.headers['set-cookie'], undefined);
+    assert.equal(f.tokenRequests, 0);
+    assert.deepEqual(f.failures, ['CALLBACK_PARAMS_ISS_MISMATCH']);
+    assert.doesNotMatch(
+      JSON.stringify(f.failures),
+      /synthetic-private-issuer-canary|accounts\.google\.com|foreign\.example\.test/,
+    );
+    assert.equal(
+      (
+        await f.callback(
+          flow,
+          flow.cookie,
+          `&iss=${encodeURIComponent(GOOGLE_OIDC.issuer)}`,
+        )
+      ).statusCode,
+      401,
+    );
+    assert.equal(f.tokenRequests, 0);
+    assert.deepEqual(f.failures, [
+      'CALLBACK_PARAMS_ISS_MISMATCH',
+      'FLOW_MISSING',
+    ]);
+  }
+});
+
+test('duplicate callback issuers reject before exchange even when one or both values are the fixed provider', async (t) => {
+  for (const duplicate of [
+    GOOGLE_OIDC.issuer,
+    'https://foreign.example.test',
+    '',
+  ]) {
+    const f = await fixture(t);
+    const flow = await f.start();
+    const result = await f.callback(
+      flow,
+      flow.cookie,
+      `&iss=${encodeURIComponent(GOOGLE_OIDC.issuer)}&iss=${encodeURIComponent(duplicate)}`,
+    );
+    assert.equal(result.statusCode, 401);
+    assert.deepEqual(result.json(), { error: 'LOGIN_FAILED' });
+    assert.equal(result.headers['set-cookie'], undefined);
+    assert.equal(f.tokenRequests, 0);
+    assert.deepEqual(f.failures, ['CALLBACK_PARAMS_DUPLICATE']);
+    assert.equal((await f.callback(flow)).statusCode, 401);
+    assert.equal(f.tokenRequests, 0);
+    assert.deepEqual(f.failures, ['CALLBACK_PARAMS_DUPLICATE', 'FLOW_MISSING']);
+  }
+});
+
+test('a correct callback issuer cannot bypass state or browser cookie validation', async (t) => {
+  const extra = `&iss=${encodeURIComponent(GOOGLE_OIDC.issuer)}`;
+  for (const scenario of [
+    'state',
+    'missing-cookie',
+    'malformed-cookie',
+    'wrong-browser',
+  ] as const) {
+    const f = await fixture(t);
+    const flow = await f.start();
+    const cookies =
+      scenario === 'missing-cookie'
+        ? ''
+        : scenario === 'malformed-cookie'
+          ? `${GOOGLE_LOGIN_COOKIE}=bad`
+          : scenario === 'wrong-browser'
+            ? (await f.start()).cookie
+            : flow.cookie;
+    const result = await f.callback(
+      scenario === 'state' ? { ...flow, state: 'invalid-state-canary' } : flow,
+      cookies,
+      extra,
+    );
+    assert.equal(
+      result.statusCode,
+      scenario === 'malformed-cookie' ? 403 : 401,
+    );
+    assert.deepEqual(result.json(), {
+      error: scenario === 'malformed-cookie' ? 'FORBIDDEN' : 'LOGIN_FAILED',
+    });
+    assert.equal(result.headers['set-cookie'], undefined);
+    assert.equal(f.tokenRequests, 0);
+    const expected = {
+      state: ['CALLBACK_INPUT_REJECTED'],
+      'missing-cookie': ['BINDING_MISSING'],
+      'malformed-cookie': [],
+      'wrong-browser': ['FLOW_INVALID_OR_EXPIRED'],
+    }[scenario];
+    assert.deepEqual(f.failures, expected);
+  }
+});
+
+test('a correct callback issuer cannot replace signed token issuer, nonce, signature or permitted identity checks', async (t) => {
+  for (const scenario of [
+    'issuer',
+    'nonce',
+    'signature',
+    'identity',
+  ] as const) {
+    const f = await fixture(t);
+    const flow = await f.start();
+    if (scenario === 'issuer') f.claims.iss = 'https://foreign.example.test';
+    if (scenario === 'nonce')
+      f.claims.nonce = `${flow.nonce[0] === 'A' ? 'B' : 'A'}${flow.nonce.slice(1)}`;
+    if (scenario === 'signature') f.tamperSignature();
+    if (scenario === 'identity') f.claims.hd = 'denied.example.test';
+    const result = await f.callback(
+      flow,
+      flow.cookie,
+      `&iss=${encodeURIComponent(GOOGLE_OIDC.issuer)}`,
+    );
+    assert.equal(result.statusCode, 401);
+    assert.deepEqual(result.json(), { error: 'LOGIN_FAILED' });
+    assert.equal(result.headers['set-cookie'], undefined);
+    assert.equal(f.tokenRequests, 1);
+    const expected =
+      scenario === 'identity'
+        ? 'GOOGLE_IDENTITY_REJECTED'
+        : 'GOOGLE_TOKEN_INVALID';
+    assert.deepEqual(f.failures, [expected]);
+    assert.equal((await f.callback(flow)).statusCode, 401);
+    assert.equal(f.tokenRequests, 1);
+    assert.deepEqual(f.failures, [expected, 'FLOW_MISSING']);
+  }
+});
+
 test('missing, empty, oversized and control-containing code values report only format failure before exchange', async (t) => {
   for (const code of [
     undefined,
@@ -708,7 +892,7 @@ test('diagnostic category priority changes no callback rejection or exchange adm
     [
       'valid-code-canary',
       '&scope=openid&scope=duplicate&iss=private-canary',
-      'CALLBACK_PARAMS_UNKNOWN_ISS',
+      'CALLBACK_PARAMS_DUPLICATE',
     ],
     [
       '',
@@ -850,9 +1034,14 @@ test('runtime-invalid diagnostic reasons cannot pass arbitrary strings or object
   f.login.reportFailure('GOOGLE_TOKEN_INVALID');
   assert.deepEqual(f.failures, ['GOOGLE_TOKEN_INVALID']);
   f.login.reportFailure('CALLBACK_PARAMS_REJECTED');
+  f.login.reportFailure('CALLBACK_PARAMS_UNKNOWN_ISS');
   assert.deepEqual(
     f.failures,
-    ['GOOGLE_TOKEN_INVALID', 'CALLBACK_PARAMS_REJECTED'],
+    [
+      'GOOGLE_TOKEN_INVALID',
+      'CALLBACK_PARAMS_REJECTED',
+      'CALLBACK_PARAMS_UNKNOWN_ISS',
+    ],
     'Legacy reason remains a valid server-side observer API value',
   );
 });

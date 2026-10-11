@@ -28,7 +28,7 @@ import {
   GOOGLE_LOGIN_COOKIE,
   GoogleBrowserLogin,
 } from '../src/solo/google-login';
-import { GoogleOidcClient } from '../src/solo/google-oidc';
+import { GOOGLE_OIDC, GoogleOidcClient } from '../src/solo/google-oidc';
 import { buildSoloServer } from '../src/solo/server';
 import { SessionManager } from '../src/solo/session-manager';
 
@@ -327,7 +327,7 @@ class CdpPage {
       assert.match(challenge, /^[A-Za-z0-9_-]{43}$/);
       const code = `offline-intercepted-code-${++interceptedAuthorizations}`;
       providerCodes.set(code, { nonce, challenge });
-      lastCallback = `${origin}/auth/google/callback?${new URLSearchParams({ code, state })}`;
+      lastCallback = `${origin}/auth/google/callback?${new URLSearchParams({ code, state, iss: GOOGLE_OIDC.issuer })}`;
       // A real document at the Google origin initiates the native cross-site
       // callback. No fake cookie or forged Fetch Metadata is supplied.
       const html = `<!doctype html><meta name="referrer" content="no-referrer"><link rel="icon" href="data:,"><script>location.replace(${JSON.stringify(lastCallback)})</script>`;

@@ -11,6 +11,7 @@ import {
   type CloudAuthSession,
 } from './cloud-access';
 import {
+  GOOGLE_OIDC,
   GoogleOidcClient,
   GoogleOidcError,
   type VerifiedGoogleIdentity,
@@ -39,6 +40,7 @@ const failureReasons = Object.freeze([
   'CALLBACK_PARAMS_DUPLICATE',
   'CALLBACK_PARAMS_GOOGLE_ERROR',
   'CALLBACK_PARAMS_CODE_FORMAT',
+  'CALLBACK_PARAMS_ISS_MISMATCH',
   'GOOGLE_PROVIDER_UNAVAILABLE',
   'GOOGLE_AUTH_BUSY',
   'GOOGLE_TOKEN_INVALID',
@@ -480,6 +482,7 @@ export class GoogleBrowserLogin {
     const validParams = [
       'state',
       'code',
+      'iss',
       'scope',
       'authuser',
       'prompt',
@@ -497,6 +500,10 @@ export class GoogleBrowserLogin {
         unknownParameterReasons.get(unknown) || 'CALLBACK_PARAMS_UNKNOWN_OTHER';
     else if (names.some((name) => params.getAll(name).length !== 1))
       parameterFailure = 'CALLBACK_PARAMS_DUPLICATE';
+    // Preserve the existing absence-compatible flow. When supplied, RFC 9207
+    // requires exact comparison with our fixed provider before code exchange.
+    else if (params.has('iss') && params.get('iss') !== GOOGLE_OIDC.issuer)
+      parameterFailure = 'CALLBACK_PARAMS_ISS_MISMATCH';
     else if (params.has('error'))
       parameterFailure = 'CALLBACK_PARAMS_GOOGLE_ERROR';
     else if (!code || code.length > 2048 || /[\r\n\0]/.test(code))

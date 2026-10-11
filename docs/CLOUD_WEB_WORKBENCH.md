@@ -53,7 +53,13 @@ GOOGLE_ALLOWED_EMAIL=
 
 实际重现于02:21:26 UTC记录 `CALLBACK_PARAMS_REJECTED`，已定位在token兑换前参数分支；不能猜具体字段或归咎设备确认/浏览器工具。主线程无法从错误协议标签取得参数名，授权第二版固定细分：`CALLBACK_PARAMS_UNKNOWN_ISS`、`CALLBACK_PARAMS_UNKNOWN_SESSION_STATE`、`CALLBACK_PARAMS_UNKNOWN_OTHER`、`CALLBACK_PARAMS_DUPLICATE`、`CALLBACK_PARAMS_GOOGLE_ERROR`、`CALLBACK_PARAMS_CODE_FORMAT`。只有前两个来自写死的名称Map，其余未知名统归OTHER；不打印任意query名称，更不打印值/URL。原粗reason仍保留观察器兼容，实际参数分支改记录对应细分类；缺/非canonical/重复state仍在原前置INPUT拒绝。允许参数、duplicate/error/code原边界及Google OIDC全部校验不变，重现拿到明确类别后才做最小修复。
 
-当前实际允许名称仍是 `state/code/scope/authuser/prompt/hd/error/error_description/error_uri`。[Google示例](https://developers.google.com/identity/openid-connect/openid-connect#3.-confirm-anti-forgery-state-token)包含code/state/scope且明确未知响应项规则；`iss`来自[RFC9207授权响应issuer扩展](https://www.rfc-editor.org/rfc/rfc9207.html#section-2.4)，若支持须精确比较预期issuer；`session_state`来自[OIDC Session Management扩展](https://openid.net/specs/openid-connect-session-1_0.html#CreatingUpdatingSessions)。这些规范不能证明Google本次实际返回它们，固定名称分类不是授权白名单，不扩大真实允许项。
+第二诊断版本的允许名称为 `state/code/scope/authuser/prompt/hd/error/error_description/error_uri`。[Google示例](https://developers.google.com/identity/openid-connect/openid-connect#3.-confirm-anti-forgery-state-token)包含code/state/scope且明确未知响应项规则；`iss`来自[RFC9207授权响应issuer扩展](https://www.rfc-editor.org/rfc/rfc9207.html#section-2.4)，若支持须精确比较预期issuer；`session_state`来自[OIDC Session Management扩展](https://openid.net/specs/openid-connect-session-1_0.html#CreatingUpdatingSessions)。这些规范不能证明Google本次实际返回它们，固定名称分类不是授权白名单，不扩大真实允许项。
+
+### 已证明的 iss 兼容问题与最小修复
+
+02:32:15 UTC新版真实回调日志明确 `CALLBACK_PARAMS_UNKNOWN_ISS`，旧拒绝分支已被具体定位。[Google当前Discovery](https://accounts.google.com/.well-known/openid-configuration)实际声明固定issuer `https://accounts.google.com` 与 `authorization_response_iss_parameter_supported:true`，不是从用户回调猜的来源。新增允许名称仅 `iss`，按URLSearchParams标准表单解码后必须精确等于上述固定issuer；不接受bare/http/slash/case/port/query/hash变体，不跟随它获取metadata/key或向它发请求。错误iss固定记录 `CALLBACK_PARAMS_ISS_MISMATCH`，重复iss仍DUPLICATE，二者401/无cookie/无token兑换且flow不能重放。
+
+本轮保留原无iss响应兼容策略，不把absence称为RFC9207对已知支持方的要求；Google实际带iss的流程严格比较，IDtoken原issuer/audience/签名/nonce与身份限制仍全校验。state/绑定/PKCE、code边界、其他unknown参数拒绝、会话最终提交/期限/CSRF均保持。真实Google完整登录、鉴权状态、续期及退出仍须在新部署后验收；代码修复不代替实际验收。
 
 本轮仅实现代码并在云端 Linux 用虚拟时钟、离线假 Google 提供方和实际 Chromium 验证；不更新 Railway 源码来源、部署、变量、容量或卷，不访问付费 API 或拨号。上一轮主线程的限时部署已于 2026-10-10 23:55–23:57 UTC 停止，两服务 Offline，5 GB 卷保留；平台源码仍固定此前 `5159ce3`。持续托管的预算与启动由主线程另行决定，本模式取消应用试验截止不构成平台账单硬封顶。
 

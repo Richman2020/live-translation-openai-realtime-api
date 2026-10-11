@@ -677,6 +677,38 @@ test('both calls-disabled services wire only fixed login failures without granti
   }
 });
 
+test('both web modes accept the fixed Google authorization-response issuer and reject mismatches before exchange', async (t) => {
+  for (const mode of ['web-verification', 'web-workbench'] as const) {
+    const f = await fixture(t, undefined, mode);
+    const wrong = await f.start();
+    const rejected = await f.finish({
+      ...wrong,
+      url: `${wrong.url}&iss=https%3A%2F%2Fforeign.example.test`,
+    });
+    assert.equal(rejected.statusCode, 401);
+    assert.deepEqual(rejected.json(), { error: 'LOGIN_FAILED' });
+    assert.equal(rejected.headers['set-cookie'], undefined);
+    assert.equal(f.fetches(), 0);
+    assert.deepEqual(f.failures, ['CALLBACK_PARAMS_ISS_MISMATCH']);
+    const fresh = await f.start();
+    const accepted = await f.finish({
+      ...fresh,
+      url: `${fresh.url}&iss=${encodeURIComponent(GOOGLE_OIDC.issuer)}&scope=openid%20email&authuser=0&prompt=select_account&hd=${domain}`,
+    });
+    assert.equal(accepted.statusCode, 200, accepted.body);
+    const cookies = accepted.headers['set-cookie'];
+    assert.ok(Array.isArray(cookies));
+    const session = cookies
+      .find((value) => value.startsWith(`${CLOUD_SESSION_COOKIE}=`))!
+      .split(';')[0];
+    assert.equal(
+      (await f.inject('/api/status', readHeaders(session))).statusCode,
+      200,
+    );
+    assert.deepEqual(f.failures, ['CALLBACK_PARAMS_ISS_MISMATCH']);
+  }
+});
+
 test('session idle expiry revokes authenticated metadata within the test deadline', async (t) => {
   const f = await fixture(t);
   const account = await f.signIn();
