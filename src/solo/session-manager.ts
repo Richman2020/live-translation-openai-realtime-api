@@ -9,6 +9,10 @@ import TwilioRestException from 'twilio/lib/base/RestException';
 import type { SoloConfig } from './config';
 import { safeEqual } from './security';
 import { ConversationEventAdapter } from './conversation-events';
+import {
+  createCloudCallUsageBudget,
+  type CloudProviderAdmission,
+} from './cloud-call-usage';
 import { TranslationBridge } from './translation-bridge';
 import {
   ContinuousTranslationBridge,
@@ -64,6 +68,7 @@ export type BridgeOptions = ConstructorParameters<
   /** Explicit server choice: this adds two separately metered caption streams. */
   outgoingCaptions?: boolean;
   admitAudio?: (event: ContinuousBridgeAudioAdmission) => boolean;
+  admitProviderUsage?: (event: CloudProviderAdmission) => boolean;
   onOutgoingCaptionState?: (event: {
     role: 'local';
     state: 'connecting' | 'ready' | 'failed';
@@ -160,6 +165,7 @@ type Session = {
   uncertainRoles: Set<Role>;
   cleanupTasks: Map<string, Promise<void>>;
   bridge?: BridgeLike;
+  providerUsage?: ReturnType<typeof createCloudCallUsageBudget>;
   readyRoles: Set<Role>;
   timer?: ReturnType<typeof setTimeout>;
   deadlineTimer?: ReturnType<typeof setTimeout>;
@@ -262,6 +268,10 @@ export class SessionManager extends EventEmitter {
 
   private readonly callJournal?: CallJournalPort;
 
+  private readonly providerUsageOptions?: Readonly<
+    Parameters<typeof createCloudCallUsageBudget>[0]
+  >;
+
   private journalFault = false;
 
   constructor(
@@ -272,6 +282,7 @@ export class SessionManager extends EventEmitter {
       setupTimeoutMs?: number;
       maxCallMs?: number;
       callJournal?: CallJournalPort;
+      providerUsage?: Parameters<typeof createCloudCallUsageBudget>[0];
     } = {},
   ) {
     super();
@@ -302,6 +313,12 @@ export class SessionManager extends EventEmitter {
         ))
     )
       throw new SessionError('INVALID_CALL_JOURNAL', 503);
+    if (options.providerUsage) {
+      if (!this.callJournal)
+        throw new SessionError('INVALID_CALL_JOURNAL', 503);
+      createCloudCallUsageBudget(options.providerUsage).close();
+      this.providerUsageOptions = Object.freeze({ ...options.providerUsage });
+    }
   }
 
   get hasExplicitControlDependencies(): boolean {
@@ -398,6 +415,31 @@ export class SessionManager extends EventEmitter {
     }
   }
 
+  private usageFailed(session: Session): void {
+    session.providerUsage?.close();
+    try {
+      this.beginEndIntent(session.view.id, 'BUDGET_LIMIT_REACHED');
+    } catch {
+      // Subscriber exceptions cannot prevent both provider legs being cleaned up.
+    }
+    this.track(this.end(session.view.id, 'BUDGET_LIMIT_REACHED'));
+  }
+
+  private admitProviderUsage(
+    session: Session,
+    event: CloudProviderAdmission,
+  ): boolean {
+    if (!this.liveAdmission(session)) return false;
+    try {
+      this.callJournal!.assertCallCurrent(session.view.id);
+      session.providerUsage!.admit(event);
+      return !session.ended;
+    } catch {
+      this.usageFailed(session);
+      return false;
+    }
+  }
+
   private admitAudio(
     session: Session,
     event: ContinuousBridgeAudioAdmission,
@@ -428,9 +470,20 @@ export class SessionManager extends EventEmitter {
           event.stage === 'output' ? 'output' : 'input',
           event.bytes,
         );
+      if (session.providerUsage && event.stage === 'output') {
+        if (
+          event.path !== 'native_translation' &&
+          event.path !== 'return_original'
+        )
+          throw new SessionError('BUDGET_NOT_READY', 503);
+        session.providerUsage.consumePlayback({
+          path: event.path,
+          bytes: event.bytes,
+        });
+      }
       return true;
     } catch {
-      this.track(this.end(session.view.id, 'BUDGET_LIMIT_REACHED'));
+      this.usageFailed(session);
       return false;
     }
   }
@@ -511,6 +564,13 @@ export class SessionManager extends EventEmitter {
       browserIdentity: trusted?.browserIdentity || 'ai-phone',
       ...(trusted ? { admission: trusted } : {}),
       conversation: new ConversationEventAdapter(id, this.now),
+      ...(this.providerUsageOptions
+        ? {
+            providerUsage: createCloudCallUsageBudget(
+              this.providerUsageOptions,
+            ),
+          }
+        : {}),
       view: {
         id,
         direction,
@@ -981,6 +1041,12 @@ export class SessionManager extends EventEmitter {
           transcriptionModel: session.config.OPENAI_TRANSCRIPTION_MODEL,
           proxyUrl: session.config.OPENAI_PROXY_URL,
           translationEngine: session.view.translationEngine,
+          ...(session.providerUsage
+            ? {
+                admitProviderUsage: (event: CloudProviderAdmission) =>
+                  this.admitProviderUsage(session, event),
+              }
+            : {}),
           ...(this.callJournal
             ? {
                 admitAudio: (event: ContinuousBridgeAudioAdmission) =>
@@ -1390,6 +1456,7 @@ export class SessionManager extends EventEmitter {
     if (!session) throw new SessionError('SESSION_NOT_FOUND', 404);
     if (session.ended) return;
     session.ended = true;
+    session.providerUsage?.close();
     session.view.translationReady = false;
     session.readyRoles.clear();
     clearTimeout(session.timer);

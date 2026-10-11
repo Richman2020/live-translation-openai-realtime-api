@@ -278,6 +278,10 @@ export async function createCloudService(
       now,
       maxCallMs: config.budget.maxWallClockMs,
       callJournal: journal,
+      providerUsage: {
+        reservationUsdMicros: config.budget.worstCaseCallUsdMicros,
+        outgoingPairedCaptions: config.outgoingPairedCaptions,
+      },
     });
     const leases = new CloudControllerLeases({ policy: login.policy, now });
     const voice = new CloudVoiceJoin({

@@ -110,6 +110,8 @@ test('trial rejects expired/extended deadlines, unsupported regions of target, c
     { CLOUD_JOURNAL_DIRECTORY: '/data/../data/private' },
     { CLOUD_JOURNAL_DIRECTORY: '/' },
     { CLOUD_CALL_RESERVATION_USD_MICROS: '5000001' },
+    { CLOUD_CALL_RESERVATION_USD_MICROS: '2000000' },
+    { CLOUD_CALL_RESERVATION_USD_MICROS: '1999999' },
     { CLOUD_CALL_RESERVATION_USD_MICROS: '0' },
     { CLOUD_CALL_RESERVATION_USD_MICROS: '1.5' },
     { CLOUD_WARM_INSTANCES: '2' },

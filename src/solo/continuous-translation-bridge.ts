@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import WebSocket from 'ws';
+import type { CloudProviderAdmission } from './cloud-call-usage';
 
 import {
   createContinuousTranslationClient,
@@ -70,6 +71,7 @@ export type ContinuousTranslationBridgeOptions = TranslationBridgeOptions & {
     translationSource: 'independent_text';
   }) => void;
   admitAudio?: (event: ContinuousBridgeAudioAdmission) => boolean;
+  admitProviderUsage?: (event: CloudProviderAdmission) => boolean;
   onNativeTransportUsage?: (
     event: ContinuousTranslationTransportUsage & { role: TranslationRole },
   ) => void;
@@ -236,6 +238,8 @@ export class ContinuousTranslationBridge {
   private started = false;
 
   private closed = false;
+
+  private providerConnectionSequence = 0;
 
   private readonly nanoAbort = new AbortController();
 
@@ -828,6 +832,21 @@ export class ContinuousTranslationBridge {
     return false;
   }
 
+  private admitProviderUsage(event: CloudProviderAdmission): boolean {
+    if (this.closed) return false;
+    try {
+      if (
+        !this.options.admitProviderUsage ||
+        this.options.admitProviderUsage(event) === true
+      )
+        return !this.closed;
+    } catch {
+      // A caption budget failure must stop every metered branch immediately.
+    }
+    this.shutdown('continuous_provider_usage_denied');
+    return false;
+  }
+
   private guardedSocketFactory(
     role: TranslationRole,
     path: 'native_translation' | 'outgoing_captions' | 'remote_captions',
@@ -839,8 +858,20 @@ export class ContinuousTranslationBridge {
           ? this.outgoingCaptionFailed
           : this.captionFailed));
     return (url, settings) => {
+      const connectionId = `provider_${++this.providerConnectionSequence}`;
       // Recheck each native/ASR/text creation after branch-level preflight.
-      if (!active() || !this.admit(role, path, 'connect', 0, 0))
+      if (
+        !active() ||
+        !this.admit(role, path, 'connect', 0, 0) ||
+        !this.admitProviderUsage({
+          stage: 'connect',
+          connectionId,
+          role,
+          path,
+          url,
+        }) ||
+        !active()
+      )
         throw new Error('CONTINUOUS_ADMISSION_DENIED');
       const socket = this.options.createWebSocket
         ? this.options.createWebSocket(
@@ -853,9 +884,18 @@ export class ContinuousTranslationBridge {
       const send = socket.send.bind(socket);
       socket.send = ((...args: Parameters<WebSocket['send']>) => {
         // Delayed session.update, ASR results and timers can submit requests
-        // without another audio append. Recheck every send. Zero
-        // bytes here is a guard, not a second audio charge or token estimate.
-        if (!active() || !this.admit(role, path, 'input', 0, 0)) {
+        // without another audio append. Reserve the actual wire payload,
+        // including client-generated padding and trailing audio, before send.
+        if (
+          !active() ||
+          !this.admit(role, path, 'input', 0, 0) ||
+          !this.admitProviderUsage({
+            stage: 'send',
+            connectionId,
+            data: args[0],
+          }) ||
+          !active()
+        ) {
           const callback = args.at(-1);
           if (typeof callback === 'function')
             callback(new Error('CONTINUOUS_ADMISSION_DENIED'));

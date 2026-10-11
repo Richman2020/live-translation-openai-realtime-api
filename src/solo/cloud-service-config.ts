@@ -174,6 +174,7 @@ export function parseCloudServiceConfig(
   if (
     !/^[1-9]\d*$/.test(charge) ||
     !Number.isSafeInteger(worstCaseCallUsdMicros) ||
+    worstCaseCallUsdMicros <= 2_000_000 ||
     worstCaseCallUsdMicros > 5_000_000
   )
     throw new Error('CLOUD_CONFIG_INVALID:CLOUD_CALL_RESERVATION_USD_MICROS');

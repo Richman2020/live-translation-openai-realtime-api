@@ -1,5 +1,7 @@
 # 本项目的共享协作规则（用户明确要求）
 
+2026-10-11 最新范围：从 `356b23f` 继续实现整通应用用量闸门与超限提前清理，授权代码、离线验证和原分支交付，本轮不部署、不拨号、不访问付费模型。五会话共享限额已接入生产调用路径，但字节代理和固定非文字工程预留不构成供应商费用证明，不能据此填写 `CLOUD_TRIAL_RATE_BOUND_CONFIRMED` 或开启电话。运行仍固定 `4bab94e`、`calls-disabled`；父线程已实际看到新版 UI，Google 重登、号码编辑无拨号验收与电话准备分别记录。保持原持久 journal、一通/300秒/$5授权，不迁移 schema、清空账本或用重启续额度；详见 [整通限额](docs/CLOUD_CALL_USAGE_LIMITS.md)。
+
 共享仓库：<https://github.com/Richman2020/live-translation-openai-realtime-api>
 
 本项目以这个 GitHub 仓库作为 ChatGPT、电脑端 Codex 和后续会话共同读取的交接来源。聊天说明或某个环境里的本地修改，不能代替仓库中的代码与记录。

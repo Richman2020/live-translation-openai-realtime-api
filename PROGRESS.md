@@ -4,6 +4,14 @@
 
 需求见 [PROJECT_BRIEF.md](PROJECT_BRIEF.md)，工作规则见 [AGENTS.md](AGENTS.md)，运行步骤见 [LOCAL_SETUP.md](LOCAL_SETUP.md)，后续执行入口见 [LOCAL_CODEX_HANDOFF.md](LOCAL_CODEX_HANDOFF.md)。
 
+## 最新实现：整通用量闸门与超限提前清理（2026-10-11）
+
+- 从 `356b23f` 继续已授权代码任务；新增 `cloud-call-usage.ts` 并接入生产 SessionManager、continuous bridge 与 cloud service。每通最多五个固定会话槽，创建和真实 socket.send 前统一准入，客户端补零、drain、重复上下文与延迟触发请求同样计数。两文字分支共享最多60请求、450000输入代理单位和72000预留输出tokens，单次最多1200输出；各PCM输入独立14.4MB，播放亦有限额。详见 [限额与计价边界](docs/CLOUD_CALL_USAGE_LIMITS.md)。
+- 所有文字请求发送前预留，失败/取消不退款；总预留不超过已配置整通金额，金额必须大于2000000且不超过5000000 microUSD，其中2000000为固定非文字工程预留。该预留和UTF-8代理都不是已证明供应商费用，snapshot明确 `application_reserved`、`billed:false`、`costBoundVerified:false`；不得填true确认标记。原durable journal先预留整通、maxCalls=1、300秒截止及未知责任保留不变，不迁移schema、不清账、不因重启重新获得额度。
+- 准入拒绝同步停止整个bridge，关闭所有模型分支并独立清理两条电话腿，迟到创建结果仍清理。接线覆盖实际生产路径；离线结果不能证明供应商终止延迟或账单上界。自动ASR/VAD、特殊tokens、实际目的地、税费和清理拖延仍需闭合，电话准备表已移除“没有整通cap”的旧描述。
+- 本轮云端 Node24.19.0/npm11.9.0：完整离线回归 **1185总/1180pass/5既有Windows skip/0fail**；生产build、源码与测试typecheck、修改文件Prettier及diff检查通过。新增12项用量边界和4项真journal/manager/bridge/协议client集成均通过，覆盖共享金额拒绝、被拒wire零发送、两腿清理、迟到SID、观察者抛错及固定时钟音频突发上限。实际离线Chrome151连续工作台 **60/60**，externalRequests0、realSupplierCalls0、exceptions0。远端精确提交与对应完整CI在[草稿PR #3](https://github.com/Richman2020/live-translation-openai-realtime-api/pull/3)核对记录，不以此前1169项成绩代替。
+- 本轮不部署、不修改变量/秘密/回调、不拨号、不调用付费API。运行仍固定 `4bab94e`、电话/全部WS关闭；父线程已实际看到新版UI，Google重登、号码编辑无拨号验收分别记录，不能扩展成电话ready。Railway两服务资源4美元/3美元提醒及Hobby不升级继续，独立于一通电话5美元预算。
+
 ## 最新部署：真实工作台布局与前台活动续期（2026-10-11 03:15 UTC）
 
 - 用户已批准本轮 UI-only AI 服务部署和日常使用中自动续期，电话仍关闭。独立 `web-workbench` 适配器复用实际号码/键盘、设备选择/本地检测、空的逐句对话界面；没有接电话 SDK、controller、Voice、付费模型、上传、SSE 或 WS，没有制造通话/字幕。指定新静态资产只在 daily 模式开放精确 GET/HEAD，JS/WAV MIME 正确，旧验证白名单及默认 phone 边界保持。
