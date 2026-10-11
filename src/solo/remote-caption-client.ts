@@ -309,6 +309,9 @@ export function createRemoteCaptionClient(
         turn.hasVisibleTranslation = true;
       options.onTranscript({
         id: `remote:${kind}:${turn.id}:0`,
+        utteranceId: `remote:${turn.id}:0`,
+        pairing: 'explicit',
+        boundary: 'utterance',
         role: 'remote',
         kind,
         text,

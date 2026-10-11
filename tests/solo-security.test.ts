@@ -64,7 +64,7 @@ test('speaker test WAV is served locally with matching MIME and same-origin medi
   writeFileSync(join(dir, 'speaker-test.wav'), audio);
   const response = await app.inject({ method: 'GET', url: '/speaker-test.wav', headers, remoteAddress: '127.0.0.1' });
   assert.equal(response.statusCode, 200);
-  assert.match(response.headers['content-type'] || '', /^audio\/wav/);
+  assert.match(response.headers['content-type'] as string || '', /^audio\/wav/);
   assert.match(response.headers['content-security-policy'] || '', /media-src 'self' blob:/);
   assert.deepEqual(response.rawPayload, audio);
   const publicResponse = await app.inject({ method: 'GET', url: '/speaker-test.wav', headers: { host: 'phone.example.com' }, remoteAddress: '198.51.100.2' });

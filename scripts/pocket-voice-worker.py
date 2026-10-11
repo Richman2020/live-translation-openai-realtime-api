@@ -40,6 +40,18 @@ def require(condition, code):
         raise ValueError(code)
 
 
+def runtime_directory(value=None):
+    """Only an operator-selected, preprovisioned absolute local directory."""
+    if value is None:
+        value = os.environ.get("POCKET_RUNTIME_DIR", "")
+        if not value:
+            return LAB
+    require(isinstance(value, str) and value == value.strip()
+            and not any(ord(char) < 32 or ord(char) == 127 for char in value)
+            and Path(value).is_absolute(), "POCKETVOICE_INVALID_RUNTIME_PATH")
+    return Path(os.path.abspath(value))
+
+
 def validate_job(value):
     require(isinstance(value, dict) and set(value) == {"id", "text"}, "POCKETVOICE_INVALID_REQUEST")
     identifier, text = value["id"], value["text"]
@@ -85,6 +97,7 @@ def verify_config(path, package_root, lab=LAB):
 
 class PocketRuntime:
     def __init__(self):
+        lab = runtime_directory()
         os.environ.update(HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1", HF_HUB_DISABLE_TELEMETRY="1")
         # Reuse the audited guard; even the known urllib3 IPv6 probe is blocked.
         # This is a Python socket audit guard, not an OS firewall.
@@ -93,7 +106,7 @@ class PocketRuntime:
         spec.loader.exec_module(guard)
         self.network = {"network": {"blocked_attempts": 0}}
         guard.prohibit_python_network(self.network)
-        verify_assets()
+        verify_assets(lab)
         require(importlib.metadata.version("pocket-tts") == "3.3.0", "POCKETVOICE_RUNTIME_MISMATCH")
         import numpy as np
         import torch
@@ -103,15 +116,15 @@ class PocketRuntime:
         require(sha256(package_root / "models/tts_model.py") == TTS_IMPLEMENTATION_SHA256,
                 "POCKETVOICE_RUNTIME_MISMATCH")
         require(torch.__version__ == "2.6.0+cpu", "POCKETVOICE_RUNTIME_MISMATCH")
-        config = LAB / "model/english-public-local.yaml"
-        verify_config(config, package_root)
+        config = lab / "model/english-public-local.yaml"
+        verify_config(config, package_root, lab)
         torch.set_num_threads(1)
         self.np, self.torch = np, torch
         self.model = TTSModel.load_model(config=str(config))
         require(self.model.sample_rate == 24000 and self.model.device.type == "cpu"
                 and all(p.device.type == "cpu" and (not p.is_floating_point() or p.dtype == torch.float32)
                         for p in self.model.parameters()), "POCKETVOICE_RUNTIME_MISMATCH")
-        self.voice = self.model.get_state_for_audio_prompt(LAB / "model/michael.safetensors")
+        self.voice = self.model.get_state_for_audio_prompt(lab / "model/michael.safetensors")
         self.check_offline()
 
     def check_offline(self):

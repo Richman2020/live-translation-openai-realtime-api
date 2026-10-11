@@ -1,0 +1,95 @@
+# 日常网页工作台
+
+2026-10-11；显式 `CLOUD_SERVICE_MODE=web-workbench` 提供可持续运行的个人工作台，不要求、读取或应用 `CLOUD_TEST_DEADLINE`。继承过期的试验变量也不会让此模式按旧试验时间停止。持续运行按独立 Railway 预算授权管理，取消一小时服务截止不开放日常收费电话。
+
+| 模式 | 服务期限 | 电话与 WebSocket |
+| --- | --- | --- |
+| 缺省 `phone` | 原最多一小时试验期限及完整电话配置/收费门槛 | 原受保护电话能力 |
+| 显式 `web-verification` | 原最多一小时验证期限 | 全部关闭 |
+| 显式 `web-workbench` | 没有试验服务截止时间 | 全部关闭 |
+
+模式只在启动时从运行配置选择；网页请求、URL 和后来修改的环境不能切换权限。`/controlled` 返回本模式固定的工作台页面，共享登录 JS 严格核验固定 HTML 模式与服务端状态。独立浏览器适配器显示实际号码/键盘、设备检测和逐句对话布局，电话按钮禁用、字幕为空；当前不能拨号、接收字幕或打开媒体流。
+
+设备刷新和选择只枚举设备，不请求麦克风。登录用户点击检测后才申请采音，最长30秒，仅本地显示音量，不录音、回放或上传；停止、隐藏、离页、离线、登录失效及迟到授权均释放音轨。试听只播放同源测试 WAV。工作台不导入电话 SDK/controller，不建立电话 API、SSE 或 WS；新增 JS/WAV 仅在 daily 的精确公共资源白名单内，原验证模式不开放它们。
+
+## 最小独立配置
+
+```dotenv
+CLOUD_SERVICE_MODE=web-workbench
+AI_PHONE_RUNTIME_MODE=cloud
+PORT=8080
+CLOUD_WARM_INSTANCES=1
+CLOUD_PUBLIC_ORIGIN=https://ai-phone-test-staging.up.railway.app
+PUBLIC_BASE_URL=https://ai-phone-test-staging.up.railway.app
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+GOOGLE_ALLOWED_EMAIL=
+# 非 Gmail 配置至少一项已核实约束；省略未使用的变量，不能声明空值。
+# GOOGLE_HOSTED_DOMAIN=
+# GOOGLE_SUBJECT=
+```
+
+配置含真实秘密的值只保留在批准的运行环境，不能写 Git、示例或日志。精确 origin、Google redirect URI、已验证精确邮箱、预期 hosted domain 或已核实 subject 的校验与[限时网页模式](CLOUD_WEB_VERIFICATION.md)完全相同，不提供注册或身份猜测。此模式不读取或要求 OpenAI/Twilio 凭据、号码、四个电话确认标记、费率、通话预留或持久卷，也不创建 provider、controller、Voice signer、电话 manager、模型或 journal。
+
+现有 `check:cloud` / `start:cloud` 入口按上述显式模式分流。`--check` 输出固定 `serviceMode:web-workbench`、`callsEnabled:false`，仅证明配置检查通过，不执行 Google 交换、供应商请求或部署。
+
+## 登录期限与安全边界
+
+最新用户要求是“开着工作台就保持登录，关闭后后台退出”。日常`web-workbench`采用独立页面租约，不再按15分钟无操作或8小时登录时长硬回收；每个文档使用独立随机pageId，每60秒发送一次严格Origin/CSRF保护的POST，后台标签与没有键盘鼠标输入仍续约。读取状态不会自行续约，旧`web-verification`和未开放phone仍使用原协议和期限。
+
+多个页面分别登记，关闭一个不会退出其他活页面。最后一个页面关闭时以`fetch keepalive`尽力发送关闭通知，服务端给予30秒刷新/导航交接宽限，新文档可在宽限内登记；已关闭页的迟到心跳不能复活。若关页通知没有送达、浏览器冻结/电脑休眠或网络断开连续超过30分钟，会话失效，恢复后需重新Google登录。这是连续失联上限，不是无操作闲置期限，也不是绝对即时关窗退出保证。
+
+主动退出在线确认后撤销整个会话，其他标签后续请求得到401；迟到的心跳/OAuth结果不能恢复。离线时无法承诺服务器即时收到退出，界面须区分本页退出与服务器确认，连接恢复后先处理退出意图。session cookie不持久化长期凭据，认证、CSRF和页面ID不写浏览器存储或DOM；所有状态只在有界服务器内存中，服务重启清空会话，需要Google重新登录，不增加OAuthscope或记住设备。页面租约不授权电话、controller或付费操作。
+
+保留 Google RS256 验签、issuer/audience、state/nonce/PKCE、verified email、cookie、Origin/CSRF 和发送最终响应前的授权复核。时钟非法或服务关闭时拒绝新权限。固定 HTTPS Host 与代理边界、单进程 loopback 上游及精确路径白名单保持；匿名仅允许登录壳、明确资产、健康与既有登录流程，状态和 session bootstrap 仍须认证。电话创建、controller、Voice、回调、媒体和全部 WebSocket 升级从入口及服务端拒绝。原本机 cloud 启动保护不变。
+
+## 交付与运行状态
+
+### 页面存续租约本轮验收（2026-10-11）
+
+最新实现以页面存续代替用户活动。本轮全量1212项（1207通过、5既有跳过、0失败）、build、typecheck、浏览器脚本独立typecheck、格式及JS语法通过；实际离线Chrome151新版daily82项和旧验证48项通过，外部请求/真实供应商/异常为0。后台无输入续约528分钟、多标签最后关闭、刷新宽限、持续失联、冻结页重新登记和旧CSRF退出失败后的显式刷新均已验收。固定有限内存上限为32个活页、单会话1024个曾见页面ID；达到页面容量时拒绝新增，不驱逐已关闭记录以绕过乱序保护，现有页面仍可续约。
+
+本轮费用与登录代码合并验收后仅部署既有AI一次，当前仍运行4bab94e；远端源码/CI及部署终态见[PROGRESS](../PROGRESS.md)和[PR #3](https://github.com/Richman2020/live-translation-openai-realtime-api/pull/3)。下面UI-only/15分钟与8小时记录保留为此前阶段，不覆盖最新页面租约要求。
+
+
+### 本轮 UI-only 更新已部署（2026-10-11 03:15 UTC）
+
+本轮仅更新 AI 服务的工作台 UI 已获授权，电话与全部 WS 继续关闭。已完成一轮全量1169项（1164通过、5既有跳过、0失败）、typecheck/build；主线程最终实际Chromium离线验收新版daily70项、旧验证48项通过，两组外部请求/真实供应商/异常均0，脚本独立typecheck通过。真实trusted输入触发续期，服务端/浏览器14分钟后续期再过2分钟受保护API仍200，已超过初始15分钟；显式本地合成麦克风、取消/拒绝/迟到释放通过。合成设备不等于用户真实麦克风或手机。新代码已推送，平台固定 `4bab94e009bb56b692ed09750f605f73556a51fb`，部署 `215d94ea-bd07-4ed9-82e0-d134550aa7f1` 于03:15:10.077 UTC SUCCESS、health通过、1/1 Online，日志确认calls-disabled。仅AI源码更新，Portal/资源/卷/秘密/回调保持；重启后需重新登录，父线程公网新版页面复核待完成。精确CI与完整证据见 [PROGRESS](../PROGRESS.md)，电话仍未就绪。
+
+真实电话准备和已获测试预算见 [准备核对](CLOUD_PHONE_READY_CHECK.md)。Railway两服务资源总额4美元、3美元提醒、Hobby保持；单次真实电话最多300秒、Twilio/OpenAI总额5美元，是另一项授权，必须准备完成并由父线程先通知用户 ready，不随 UI 部署自动开始。
+
+### 实际登录成功（2026-10-11 02:42 UTC）
+
+最小iss修复运行源码固定 `e94d2cf0d0f1844374dc2329ceb1c5acc51f7d90`，部署 `516c94de-d42c-4fc8-aa3d-1668bf5858e7` 于02:38:19.452 UTC SUCCESS，health通过、AI1副本Online；[精确源码CI](https://github.com/Richman2020/live-translation-openai-realtime-api/actions/runs/38105750983) attempt1完整成功。
+
+主线程可用浏览器02:41:34 UTC重新开始真实Google登录，正常选已允许账号并回工作台，02:42:18页面确认服务端已验证本次登录及会话状态；无新增consent或设备确认。同部署平台HTTP对应02:41:42.237 UTC start200、02:42:07.233 UTC callback200、02:42:07.354 UTC工作台200；受保护状态从登录前401变为02:42:07.708 UTC与02:42:34.210 UTC的200。该窗口没有固定LOGIN_FAILURE；公开证据只含固定路径/事件、时间与状态，不含query、身份或秘密。
+
+这是实际应用Google登录和鉴权读取通过，覆盖本开发环境此前公网proxy阻断而未验收的部分。刷新由主线程继续复核，实际手动续期、退出及到期未在此轮确认；原离线保护回归通过。此次仅补文档，不再部署；电话/全部WS仍关闭，真实麦克风/手机和翻译听感未验收，两服务合计资源4美元/3美元提醒由主线程持续监控。以下诊断和旧运行状态按当时记录保留。
+
+### Google 登录失败诊断（2026-10-11）
+
+实际浏览器报告选择账号后返回 `401 LOGIN_FAILED`；02:06:24 UTC start 200，02:06:33 callback 401。平台HTTP日志没有查询参数，应用原实现将多个失败合并且不记录原因；不能据此确认 cookie、flow、身份约束或提供方失败。服务在线没有重启，日常模式不使用旧试验截止。
+
+本次授权仅在服务端输出固定 JSON `{ "event": "GOOGLE_LOGIN_FAILURE", "reason": "…" }`。reason 经过运行时白名单，只能为 `CALLBACK_INPUT_REJECTED`、`BINDING_MISSING`、`FLOW_MISSING`、`FLOW_INVALID_OR_EXPIRED`、`CALLBACK_PARAMS_REJECTED`、`GOOGLE_PROVIDER_UNAVAILABLE`、`GOOGLE_AUTH_BUSY`、`GOOGLE_TOKEN_INVALID`、`GOOGLE_IDENTITY_REJECTED`、`POST_EXCHANGE_REJECTED`、`FINAL_COMMIT_REJECTED`。不携带请求、URL/query、code、token、cookie、状态随机值、身份或异常原文；同步或异步日志失败不能改变响应。Fastify请求日志仍关闭，既有HTTP响应和flow消费、JWT、state/nonce/PKCE、精确身份、最终会话提交均保持。
+
+[Google 官方OIDC文档](https://developers.google.com/identity/openid-connect/openid-connect)要求客户端忽略未知响应参数；当前回调严格拒绝未知项，存在兼容风险，但本次没有真实参数证据，未放宽现有规则。离线回归明确保证未知 `iss` / `session_state` 与重复已知参数仍401且不兑换token。固定 `CALLBACK_PARAMS_REJECTED` 只能证明参数分支，不能单独证明未知参数是根因；同样 `GOOGLE_IDENTITY_REJECTED` 不包含被拒绝身份，也不能称为已验签的具体hd不匹配。
+
+仅部署此AI服务，由主线程可访问的浏览器重新开启一次登录，取得固定分类后做最小修复。最终需实际Google授权成功、鉴权状态读取、手动续期及退出；模拟提供方和平台health不替代真实登录。
+
+固定诊断版本 `5df779c7388046468c89da54f15f3583d764b6b0` 已实际部署，`d0a87550-1b0e-4fd5-86e8-6c69ac353554` 于 **02:17:35.025 UTC SUCCESS**，health通过、AI单副本Online；Portal部署没有变更，原资源/卷/凭据/权限保持。进程替换使旧flow/session失效，浏览器重现须重新从页面开始，不能刷新先前OAuth回调来定位新登录。实际完整Google登录仍待主线程验收，费用仍两服务合计资源4美元、3美元提醒。
+
+实际重现于02:21:26 UTC记录 `CALLBACK_PARAMS_REJECTED`，已定位在token兑换前参数分支；不能猜具体字段或归咎设备确认/浏览器工具。主线程无法从错误协议标签取得参数名，授权第二版固定细分：`CALLBACK_PARAMS_UNKNOWN_ISS`、`CALLBACK_PARAMS_UNKNOWN_SESSION_STATE`、`CALLBACK_PARAMS_UNKNOWN_OTHER`、`CALLBACK_PARAMS_DUPLICATE`、`CALLBACK_PARAMS_GOOGLE_ERROR`、`CALLBACK_PARAMS_CODE_FORMAT`。只有前两个来自写死的名称Map，其余未知名统归OTHER；不打印任意query名称，更不打印值/URL。原粗reason仍保留观察器兼容，实际参数分支改记录对应细分类；缺/非canonical/重复state仍在原前置INPUT拒绝。允许参数、duplicate/error/code原边界及Google OIDC全部校验不变，重现拿到明确类别后才做最小修复。
+
+第二诊断版本的允许名称为 `state/code/scope/authuser/prompt/hd/error/error_description/error_uri`。[Google示例](https://developers.google.com/identity/openid-connect/openid-connect#3.-confirm-anti-forgery-state-token)包含code/state/scope且明确未知响应项规则；`iss`来自[RFC9207授权响应issuer扩展](https://www.rfc-editor.org/rfc/rfc9207.html#section-2.4)，若支持须精确比较预期issuer；`session_state`来自[OIDC Session Management扩展](https://openid.net/specs/openid-connect-session-1_0.html#CreatingUpdatingSessions)。这些规范不能证明Google本次实际返回它们，固定名称分类不是授权白名单，不扩大真实允许项。
+
+### 已证明的 iss 兼容问题与最小修复
+
+02:32:15 UTC新版真实回调日志明确 `CALLBACK_PARAMS_UNKNOWN_ISS`，旧拒绝分支已被具体定位。[Google当前Discovery](https://accounts.google.com/.well-known/openid-configuration)实际声明固定issuer `https://accounts.google.com` 与 `authorization_response_iss_parameter_supported:true`，不是从用户回调猜的来源。新增允许名称仅 `iss`，按URLSearchParams标准表单解码后必须精确等于上述固定issuer；不接受bare/http/slash/case/port/query/hash变体，不跟随它获取metadata/key或向它发请求。错误iss固定记录 `CALLBACK_PARAMS_ISS_MISMATCH`，重复iss仍DUPLICATE，二者401/无cookie/无token兑换且flow不能重放。
+
+本轮保留原无iss响应兼容策略，不把absence称为RFC9207对已知支持方的要求；Google实际带iss的流程严格比较，IDtoken原issuer/audience/签名/nonce与身份限制仍全校验。state/绑定/PKCE、code边界、其他unknown参数拒绝、会话最终提交/期限/CSRF均保持。真实Google完整登录、鉴权状态、续期及退出仍须在新部署后验收；代码修复不代替实际验收。
+
+本轮仅实现代码并在云端 Linux 用虚拟时钟、离线假 Google 提供方和实际 Chromium 验证；不更新 Railway 源码来源、部署、变量、容量或卷，不访问付费 API 或拨号。上一轮主线程的限时部署已于 2026-10-10 23:55–23:57 UTC 停止，两服务 Offline，5 GB 卷保留；平台源码仍固定此前 `5159ce3`。持续托管的预算与启动由主线程另行决定，本模式取消应用试验截止不构成平台账单硬封顶。
+
+上述为代码交付时状态。2026-10-11 01:58 UTC 新授权已恢复 AI，部署 `af306eb3-dce9-4861-acc5-09449168052f` 固定已验收 `5b6047f31b4f5470b2e7cfa99c9f639ce5b44cc5`，SUCCESS、1/1 Online、平台 `/api/health` 通过；启动日志固定 calls disabled，资源和原卷保持，旧 deadline 未改。最新费用是两测试服务合计资源最多4美元、3美元提醒，不升级Hobby，30美元/月范围撤回，主线程负责持续监控。真实公网页面单次访问仍被本环境proxy tunnel阻断，未取得页面或实际应用登录证据，留给主线程可用浏览器/用户手动验收；无真实电话或模型调用。
+
+真实公网页面及Google应用OAuth已按上方02:42 UTC证据通过；真实麦克风/手机、数字否定、长讲话积压、自然度和耳听延迟仍未验收。后续开启日常电话还需独立费用准入、每通生命周期及结算设计，本轮不将单通试验计数改成多通。

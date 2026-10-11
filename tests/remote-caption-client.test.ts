@@ -437,6 +437,9 @@ test('an empty final clears a prior draft and never submits a translation for si
   await finished;
   assert.deepEqual(f.transcripts.at(-1), {
     id: 'remote:translation:turn_1:0',
+    utteranceId: 'remote:turn_1:0',
+    pairing: 'explicit',
+    boundary: 'utterance',
     role: 'remote',
     kind: 'translation',
     text: '',

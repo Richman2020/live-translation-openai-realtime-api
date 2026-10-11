@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>逐句对话 · 离线验收</title>
+  <link rel="icon" href="/favicon.svg">
+  <link rel="stylesheet" href="./styles.css">
+  <script type="module" src="./conversation-demo.js"></script>
+</head>
+<body class="conversation-demo">
+  <main>
+    <header class="page-heading"><div><span class="eyebrow">AI 电话 · OFFLINE REPLAY</span><h1>逐句对话</h1><p>中文说话 → 英文译音；英文原声回听 → 中文字幕。</p></div><a class="secondary-button" href="./">电话工作台</a></header>
+    <p class="demo-note">本页仅重放模拟事件，包含插话、乱序、晚到译文和播放排队。无需麦克风或供应商连接；不播放音频，不代表真实电话验收。</p>
+    <div class="demo-controls"><button class="primary-button" id="demo-play">自动重放</button><button class="secondary-button" id="demo-step">下一事件</button><button class="secondary-button" id="demo-all">显示完整示例</button><button class="secondary-button" id="demo-history">追加 30 句</button><button class="secondary-button" id="demo-reset">重新开始</button></div>
+    <p class="demo-progress" id="demo-progress" role="status">等待重放模拟事件。</p>
+    <section class="transcript-card card" aria-labelledby="transcript-heading">
+      <div class="transcript-header"><div><h2 id="transcript-heading">双方逐句记录 <span class="small-badge">离线模拟</span></h2><p>每句原文与译文配对；临时文本可能修订，晚到译文就地更新。</p><p>线路播放确认与文字确定分别显示；线路确认不等于人耳听清。</p></div><span id="demo-count" class="small-badge">0 句</span></div>
+      <div class="conversation-follow-bar"><span id="conversation-history-status" hidden></span><button class="secondary-button conversation-latest" id="conversation-latest" hidden>回到最新</button></div>
+      <div class="transcript-scroll" id="transcript-scroll" tabindex="0" aria-label="可滚动的对话记录">
+        <div class="empty-conversation" id="empty-conversation"><h3>开始一段模拟对话</h3><p>点击「下一事件」逐步查看，或自动重放全部事件。</p></div>
+        <div id="transcript" role="log" aria-live="polite" aria-relevant="additions text" aria-label="双方按时间排列的原文和译文"></div>
+      </div>
+    </section>
+    <p class="demo-note">阅读检查：追加 30 句后向上滚动，再追加一次。页面保留你正在读的位置，点击「回到最新」恢复跟随。</p>
+  </main>
+</body>
+</html>

@@ -2,7 +2,10 @@ import { ConfigStore } from './config';
 import { buildSoloServer } from './server';
 import { SessionManager } from './session-manager';
 import { diagnosticLogRecord } from './diagnostic-log';
+import { loadPhoneRuntime, requireLocalPhoneRuntime } from './cloud-runtime';
 
+// Reject cloud mode before generating a local token or starting any workers.
+requireLocalPhoneRuntime(loadPhoneRuntime());
 const configStore = new ConfigStore();
 const config = configStore.value;
 if (!['127.0.0.1', '::1'].includes(config.API_HOST))

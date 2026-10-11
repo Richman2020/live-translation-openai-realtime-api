@@ -1,10 +1,17 @@
 'use strict';
 
 (async () => {
+  if (document.documentElement?.dataset?.phoneSurface === 'controlled') {
+    const { startControlledWorkbench } = await import('./controlled-workbench.js');
+    await startControlledWorkbench();
+    return;
+  }
   const { createCallLifecycle, createDeviceMediaOwner, microphoneMessages } = await import('./call-lifecycle.js');
   const { createAudioOutput } = await import('./audio-output.js');
   const { createMicrophoneInput } = await import('./microphone-input.js');
   const { createRtcDiagnostics, validatedTwilioEdge } = await import('./rtc-diagnostics.js');
+  const { createConversationModel } = await import('./conversation-model.js');
+  const { createConversationView, renderConversationUtterance } = await import('./conversation-view.js');
   const { createTranslationEngineSelection, translationEngineLabel, translationReadiness, usesNanoVoice, usesPocketVoice, usesLocalVoice, usesRemoteCaptions } = await import('./translation-engine.js');
   const $ = id => document.getElementById(id);
   const tokenKey = 'ai-phone-local-token';
@@ -119,7 +126,13 @@
   let refreshPending = null;
   let record = null;
   const transcriptRows = new Map();
-  let transcriptOrderEngine = null;
+  let conversationModel = null;
+  let canonicalConversation = false;
+  const conversationView = createConversationView({
+    container: $('transcript'), scrollContainer: $('transcript-scroll'),
+    emptyNode: $('empty-conversation'), latestButton: $('conversation-latest'),
+    historyStatus: $('conversation-history-status'),
+  });
   let selectedHistory = null;
   let toastTimer = null;
   let disposed = false;
@@ -352,7 +365,7 @@
     }
     scheduleRegistration();
     $('settings-fields').querySelectorAll('input').forEach(input => { input.disabled = busy() || saving; });
-    $('export-current').disabled = !record?.lines.length;
+    $('export-current').disabled = conversationView.count === 0;
     const currentState = activeSession?.status || (record?.endedAt ? record.status : '');
     const phase = callLifecycle.current?.phase;
     const phaseInstruction = phase === 'checking' && usesLocalVoice(translationEngine.snapshot.value)
@@ -489,7 +502,7 @@
     if (!record || record.endedAt) return;
     record.duration = duration(); record.endedAt = Date.now(); record.status = status;
     if (preferences.saveHistory) { historyRecords = [structuredClone(record), ...historyRecords.filter(r => r.id !== record.id)].slice(0, 30); saveLocal(historyKey, historyRecords); }
-    $('transcript-subtitle').textContent = `${translationEngineLabel(record.translationEngine)} · ${statusNames[status] || '通话已结束'} · ${record.lines.length ? '可导出文字记录' : '未收到文字记录'}`;
+    $('transcript-subtitle').textContent = `${translationEngineLabel(record.translationEngine)} · ${statusNames[status] || '通话已结束'} · ${conversationView.count ? '可导出文字记录' : '未收到文字记录'}`;
     renderHistory();
   }
   function clearSdkCall() {
@@ -525,7 +538,7 @@
       clearCleanupError();
       if (session.error) showError(callFailureMessage(session));
     } else if (session) {
-      if (!record || record.id !== session.id) { if (record && !record.endedAt) finishRecord('completed'); audioDelivery.clear(); translationTiming.clear(); renderAudioDelivery(); record = makeRecord(session); transcriptRows.clear(); transcriptOrderEngine = null; $('transcript').replaceChildren(); $('empty-conversation').hidden = false; }
+      if (!record || record.id !== session.id) { if (record && !record.endedAt) finishRecord('completed'); audioDelivery.clear(); translationTiming.clear(); renderAudioDelivery(); record = makeRecord(session); transcriptRows.clear(); conversationModel = createConversationModel(session.id); canonicalConversation = false; conversationView.reset(); }
       activeSession = session; record.status = session.status; record.translationEngine = session.translationEngine || 'legacy';
       if (session.status === 'active' && !record.connectedAt) record.connectedAt = Date.now();
       $('transcript-subtitle').textContent = `${translationEngineLabel(record.translationEngine)} · ${session.direction === 'inbound' ? '来电' : '拨出'} · ${record.number} · ${statusNames[session.status] || session.status}`;
@@ -578,6 +591,7 @@
     receive('snapshot', value => applySession(value.activeSession || null));
     receive('call', applySession);
     receive('transcript', appendTranscript);
+    receive('conversation', appendConversation);
     receive('caption-status', applyCaptionStatus);
     receive('translation-connection', applyTranslationConnection);
     receive('translation-audio', applyAudioDelivery);
@@ -716,84 +730,44 @@
     audioDelivery.set(value.role, counts);
     renderAudioDelivery();
   }
-  function renderLine(line, engine = record?.translationEngine) {
-    const captionOriginal = usesRemoteCaptions(engine) && line.role === 'remote' && line.kind === 'original';
-    // Keep paired English captions visible even when the general original-text preference is off.
-    const article = element('article', `utterance ${line.role === 'remote' ? 'their' : 'mine'} ${line.kind === 'original' ? (captionOriginal ? 'caption-original-entry' : 'original-entry') : ''}`);
-    article.dataset.transcriptId = line.id;
-    const meta = element('div', 'utterance-meta');
-    meta.append(element('strong', '', line.role === 'local' ? '你' : '对方'), element('span', '', line.kind === 'original' ? '原文' : '译文'), element('span', 'draft-label', line.final ? '' : '更新中'));
-    const at = new Date(line.at); if (!Number.isNaN(at.getTime())) meta.append(element('time', '', at.toLocaleTimeString('zh-CN', { hour12: false })));
-    const bubble = element('div', 'speech-bubble'); bubble.append(element('p', 'transcript-text', line.text)); article.append(meta, bubble); return article;
+  function conversationForRecord(item) {
+    const model = createConversationModel(item.id);
+    if (item.conversationEvents?.length) for (const event of item.conversationEvents) model.apply(event);
+    else for (const line of item.lines || []) model.applyTranscript({ ...line, sessionId: item.id });
+    return model.getUtterances();
   }
-  function orderedTranscriptLines(lines, engine) {
-    const groups = new Map();
-    for (const line of lines) {
-      const match = /^(local|remote):(original|translation):([A-Za-z0-9_-]{1,256}):(0|[1-9]\d*)$/.exec(line.id);
-      const key = match && match[1] === line.role && match[2] === line.kind ? `turn:${match[1]}:${match[3]}:${match[4]}` : `unpaired:${line.id}`;
-      if (!groups.has(key)) groups.set(key, []);
-      groups.get(key).push(line);
+  function renderConversation() {
+    const change = conversationModel?.getLastChange();
+    const updated = change && !change.orderChanged && conversationView.update(conversationModel.getUtterance(change.id));
+    if (!updated) conversationView.render(conversationModel?.getUtterances() || []);
+    $('export-current').disabled = conversationView.count === 0;
+  }
+  function appendConversation(value) {
+    if (!value || !record || value.sessionId !== record.id || !['text', 'playback'].includes(value.type)) return;
+    // A reconnect can introduce the explicit contract after older transcript
+    // events. Retain those same-session cards and their saved accepted events.
+    if (!canonicalConversation) {
+      const candidate = createConversationModel(record.id);
+      if (!candidate.apply(value)) return;
+      canonicalConversation = true;
     }
-    const ordered = [...groups.entries()];
-    if (usesRemoteCaptions(engine)) {
-      const turnTime = group => Math.min(...group.map(line => new Date(line.at).getTime()).filter(Number.isFinite));
-      const isCaption = ([key, group]) => key.startsWith('turn:remote:') && Number.isFinite(turnTime(group));
-      const captions = ordered.filter(isCaption).sort((a, b) => turnTime(a[1]) - turnTime(b[1]));
-      let captionIndex = 0;
-      // ASR completions can arrive out of order. Reorder remote turn slots using
-      // their stable source time while keeping local rows in their existing order.
-      for (let index = 0; index < ordered.length; index += 1) {
-        if (isCaption(ordered[index])) ordered[index] = captions[captionIndex++];
-      }
-    }
-    // Other engines retain first-arrival order, including translation-before-ASR.
-    return ordered.flatMap(([, group]) => group.sort((a, b) => Number(a.kind !== 'original') - Number(b.kind !== 'original')));
+    if (!conversationModel.apply(value)) return;
+    (record.conversationEvents ||= []).push(value);
+    renderConversation();
   }
   function appendTranscript(value) {
     if (!value || typeof value.id !== 'string' || typeof value.text !== 'string' || !['local', 'remote'].includes(value.role) || !['original', 'translation'].includes(value.kind)) return;
     if (!record || (value.sessionId && value.sessionId !== record.id)) return;
-    if (usesRemoteCaptions(record.translationEngine) && value.role === 'remote' && value.final === true && !value.text.trim()) {
-      const removed = transcriptRows.get(value.id);
-      if (removed) {
-        record.lines.splice(removed.index, 1); removed.node.remove(); transcriptRows.delete(value.id);
-        for (let index = removed.index; index < record.lines.length; index += 1) transcriptRows.get(record.lines[index].id).index = index;
-        // Removing a group's earliest timestamp can affect the next caption reorder.
-        transcriptOrderEngine = null;
-      }
-      $('empty-conversation').hidden = record.lines.length > 0;
-      $('export-current').disabled = record.lines.length === 0;
-      return;
-    }
     if (translationRecoveryHint && value.kind === 'translation' && value.final === true && (!usesRemoteCaptions(activeSession?.translationEngine) || value.role === 'local')) { translationRecoveryHint = false; renderStatus(); }
-    const line = { id: value.id, role: value.role, kind: value.kind, text: value.text.slice(0, 20000), final: value.final === true, at: value.at || new Date().toISOString() };
+    const line = { id: value.id, role: value.role, kind: value.kind, text: value.text.slice(0, 20000), final: value.final === true, at: value.at || Date.now(), ...Object.fromEntries(['utteranceId', 'pairing', 'boundary', 'sequence', 'revision', 'conversationVisible'].filter(key => value[key] !== undefined).map(key => [key, value[key]])) };
     const previous = transcriptRows.get(line.id);
-    const oldLine = previous && record.lines[previous.index];
-    const captionMode = usesRemoteCaptions(record.translationEngine);
-    // Ordering depends on membership, id, role, kind and source time; text/final
-    // changes can replace one indexed row without scanning or sorting the history.
-    const sameCaptionOrder = previous && transcriptOrderEngine === record.translationEngine
-      && oldLine.role === line.role && oldLine.kind === line.kind && oldLine.at === line.at;
     const index = previous ? previous.index : record.lines.length;
     if (previous) record.lines[index] = line; else record.lines.push(line);
-    const scroll = $('transcript-scroll'); const nearBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 100;
-    const node = renderLine(line);
-    transcriptRows.set(line.id, { index, node });
-    if (previous) previous.node.replaceWith(node);
-    else if (captionMode) $('transcript').append(node);
-    else {
-      const ordered = orderedTranscriptLines(record.lines, record.translationEngine);
-      const next = ordered[ordered.findIndex(item => item.id === line.id) + 1];
-      $('transcript').insertBefore(node, next ? transcriptRows.get(next.id).node : null);
+    transcriptRows.set(line.id, { index });
+    if (!canonicalConversation && conversationModel?.applyTranscript({ ...line, sessionId: record.id })) {
+      (record.conversationEvents ||= []).push(conversationModel.getLastChange().event);
+      renderConversation();
     }
-    if (captionMode && !sameCaptionOrder) {
-      const children = [...$('transcript').children];
-      const ordered = orderedTranscriptLines(record.lines, record.translationEngine).map(item => transcriptRows.get(item.id).node);
-      if (ordered.some((node, index) => node !== children[index])) $('transcript').replaceChildren(...ordered);
-    }
-    transcriptOrderEngine = record.translationEngine;
-    $('empty-conversation').hidden = true;
-    if (nearBottom) scroll.scrollTop = scroll.scrollHeight;
-    $('export-current').disabled = false;
   }
   async function presence(available) { if (accessToken) await post('/api/presence', { available }); }
   function cancelTokenRenewal() {
@@ -1067,7 +1041,7 @@
     await endCall();
   }
   function exportRecord(item) {
-    if (!item?.lines.length) return;
+    if (!item || !conversationForRecord(item).length) return;
     const captions = usesRemoteCaptions(item.translationEngine);
     const ownVoice = usesNanoVoice(item.translationEngine);
     const pocketVoice = usesPocketVoice(item.translationEngine);
@@ -1077,7 +1051,7 @@
       ? ['本人声线版未开启原文转写，此记录仅包含服务返回的译文。', '电脑中文 → 手机英文使用本机本人声线；对方英文 → 电脑中文保留连续翻译原声。分句合成会增加等待。']
       : item.translationEngine === 'continuous' ? ['连续版未开启原文转写，此记录仅包含服务返回的译文。'] : [];
     const audioNote = captions ? `文字用于辅助理解与排查，不代表声音已播放；电脑听英文原声，手机听${pocketVoice ? 'Michael 固定美式男声' : ownVoice ? '本人英文本音' : '模型声音的连续英文译音'}。` : '文字仅用于辅助排查；以双方实际听到的译音为准。';
-    const text = ['AI 电话 — 通话文字记录', `翻译版本：${translationEngineLabel(item.translationEngine)}`, `方向：${item.direction === 'inbound' ? '来电' : '拨出'}`, `号码：${item.number}`, `时间：${dateText(item.startedAt)}`, `页面观察时长：${timeText(duration(item))}`, audioNote, ...engineNotes, '', ...orderedTranscriptLines(item.lines, item.translationEngine).map(line => `[${line.role === 'local' ? '你' : '对方'} · ${line.kind === 'original' ? '原文' : '译文'}${line.final ? '' : ' · 未定稿'}] ${line.text}`)].join('\r\n');
+    const text = ['AI 电话 — 通话文字记录', `翻译版本：${translationEngineLabel(item.translationEngine)}`, `方向：${item.direction === 'inbound' ? '来电' : '拨出'}`, `号码：${item.number}`, `时间：${dateText(item.startedAt)}`, `页面观察时长：${timeText(duration(item))}`, audioNote, ...engineNotes, '', ...conversationForRecord(item).flatMap(utterance => [`[${utterance.role === 'local' ? '你' : '对方'} · ${new Date(utterance.at).toLocaleTimeString('zh-CN', { hour12: false })}${utterance.pairing === 'unpaired' ? ' · 未配对' : ''}]`, ...['original', 'translation'].map(kind => `${kind === 'original' ? '原文' : '译文'}${utterance[kind]?.final ? '' : '（未确定）'}：${utterance[kind]?.text || '未收到对应文字'}`), ''])].join('\r\n');
     const url = URL.createObjectURL(new Blob(['\uFEFF', text], { type: 'text/plain;charset=utf-8' }));
     const link = element('a'); link.href = url; link.download = `AI电话-通话记录-${new Date(item.startedAt).toISOString().replace(/[:.]/g, '-')}.txt`; document.body.append(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 5000);
   }
@@ -1093,12 +1067,12 @@
     $('history-detail').replaceChildren(); const item = historyRecords.find(r => r.id === selectedHistory);
     if (!item) { const empty = element('div', 'empty-conversation'); empty.append(icon('clock'), element('h3', '', '还没有保存的通话'), element('p', '', '可在连接设置中开启「保存通话文字」。')); $('history-detail').append(empty); return; }
     const heading = element('div', 'detail-heading'); const title = element('div'); title.append(element('h2', '', item.number), element('p', '', `${dateText(item.startedAt)} · ${translationEngineLabel(item.translationEngine)} · 普通话 ↔ English`));
-    const download = element('button', 'secondary-button', '导出文字'); download.disabled = !item.lines.length; download.addEventListener('click', () => exportRecord(item)); heading.append(title, download);
-    $('history-detail').append(heading, ...orderedTranscriptLines(item.lines, item.translationEngine).map(line => renderLine(line, item.translationEngine)));
+    const download = element('button', 'secondary-button', '导出文字'); download.disabled = !conversationForRecord(item).length; download.addEventListener('click', () => exportRecord(item)); heading.append(title, download);
+    $('history-detail').append(heading, ...conversationForRecord(item).map(utterance => renderConversationUtterance(utterance, document)));
   }
   function applyPreferences() {
     document.body.classList.toggle('hide-original', !preferences.showOriginal);
-    for (const [id, key] of [['save-history-toggle', 'saveHistory'], ['show-original-toggle', 'showOriginal']]) { $(id).classList.toggle('on', preferences[key]); $(id).setAttribute('aria-checked', String(preferences[key])); }
+    for (const [id, key] of [['save-history-toggle', 'saveHistory'], ['show-original-toggle', 'showOriginal']]) { const checked = $(id).disabled ? true : preferences[key]; $(id).classList.toggle('on', checked); $(id).setAttribute('aria-checked', String(checked)); }
   }
   function renderSettingsForm() {
     for (const [name, label, secret, placeholder, description] of fields) {
@@ -1187,11 +1161,11 @@
   $('help-button').addEventListener('click', () => $('help-dialog').showModal()); $('close-help').addEventListener('click', () => $('help-dialog').close()); $('help-start').addEventListener('click', () => { $('help-dialog').close(); navigate('workspace'); });
   $('clear-history').addEventListener('click', () => $('clear-dialog').showModal()); $('cancel-clear').addEventListener('click', () => $('clear-dialog').close());
   $('confirm-clear').addEventListener('click', () => { historyRecords = []; selectedHistory = null; saveLocal(historyKey, historyRecords); renderHistory(); $('clear-dialog').close(); });
-  for (const [id, key] of [['save-history-toggle', 'saveHistory'], ['show-original-toggle', 'showOriginal']]) $(id).addEventListener('click', () => { preferences[key] = !preferences[key]; saveLocal(preferencesKey, preferences); applyPreferences(); });
+  for (const [id, key] of [['save-history-toggle', 'saveHistory'], ['show-original-toggle', 'showOriginal']]) $(id).addEventListener('click', () => { if ($(id).disabled) return; preferences[key] = !preferences[key]; saveLocal(preferencesKey, preferences); applyPreferences(); });
   window.addEventListener('beforeunload', event => { if (busy()) { event.preventDefault(); event.returnValue = ''; } });
   window.addEventListener('pagehide', () => {
     disposed = true; enableEpoch += 1; clearTimeout(registrationRetryTimer); registrationRetryTimer = null; clearInterval(heartbeat); stopEvents(); cancelTokenRenewal();
-    transcriptRows.clear(); transcriptOrderEngine = null;
+    transcriptRows.clear(); conversationView.dispose(); conversationModel = null;
     audioOutput.bind(null);
     microphoneInput.dispose();
     callLifecycle.cancel();
@@ -1207,7 +1181,9 @@
   else refreshStatus().then(next => { if (!next.configured) navigate('settings'); }).catch(error => { showError(error); navigate('settings'); });
 })().catch(() => {
   const banner = document.getElementById('app-error');
-  if (banner) { banner.textContent = '电话组件加载失败。请从桌面「AI 电话」重新打开；仍未恢复时请重启本机服务。'; banner.hidden = false; }
+  if (banner) { banner.textContent = document.documentElement?.dataset?.phoneSurface === 'controlled'
+    ? '受控电话组件加载失败。请刷新页面；取得有效登录与控制许可前不能拨号。'
+    : '电话组件加载失败。请从桌面「AI 电话」重新打开；仍未恢复时请重启本机服务。'; banner.hidden = false; }
   const view = document.getElementById('workspace-view'); if (view) view.hidden = false;
   for (const id of ['enable-device', 'start-call', 'accept-call']) { const button = document.getElementById(id); if (button) button.disabled = true; }
 });

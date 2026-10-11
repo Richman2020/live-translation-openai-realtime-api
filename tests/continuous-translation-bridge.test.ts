@@ -6,14 +6,19 @@ import { test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import WebSocket from 'ws';
 
+import { createConversationModel } from '../public/conversation-model.js';
+
 import {
   ContinuousTranslationBridge,
   type ContinuousTranslationBridgeOptions,
+  type IndependentOutgoingCaption,
 } from '../src/solo/continuous-translation-bridge';
 import type {
   ContinuousTranslationClient,
   ContinuousTranslationOptions,
 } from '../src/solo/continuous-translation-client';
+import type { OutgoingPrefixOptions } from '../src/solo/outgoing-prefix-client';
+import type { RemoteCaptionOptions } from '../src/solo/remote-caption-client';
 import {
   muLawToPcm16,
   Pcm24kToPcmu,
@@ -1033,7 +1038,15 @@ test('hangup aborts immediately, settles unconfirmed output once and ignores lat
   f.provider('local').options.onError('late');
   for (const callback of f.phones.remote.writes) callback(new Error('late'));
   f.phones.local.emit('error', new Error('late'));
-  assert.equal(f.phones.remote.sent.length, sentBefore);
+  assert.equal(f.phones.remote.sent.length, sentBefore + 1);
+  assert.deepEqual(f.phones.remote.sent.at(-1), {
+    event: 'clear',
+    streamSid: 'MZ_remote',
+  });
+  assert.deepEqual(f.phones.local.sent.at(-1), {
+    event: 'clear',
+    streamSid: 'MZ_local',
+  });
   assert.deepEqual(
     f.audio.map((event) => event.stage),
     ['generated', 'unconfirmed'],
@@ -1102,4 +1115,425 @@ test('duplicate or cross-role phone attachment fails and closes the unexpected s
   assert.equal(f.providers.length, 0);
   f.bridge.attach('remote', f.phones.remote.socket(), 'MZ_remote');
   assert.equal(f.phones.remote.closeCount, 1);
+});
+
+function outgoingCaptionFixture(
+  options: Partial<ContinuousTranslationBridgeOptions> = {},
+) {
+  let captionOptions: OutgoingPrefixOptions;
+  let resolve: () => void;
+  let reject: (error: Error) => void;
+  let aborted = 0;
+  let created = 0;
+  const appended: Buffer[] = [];
+  const conversations: IndependentOutgoingCaption[] = [];
+  const states: string[] = [];
+  const playback: unknown[] = [];
+  const f = fixture({
+    remoteCaptions: true,
+    outgoingCaptions: true,
+    createCaptionClient: () => ({
+      ready: Promise.resolve(),
+      append: () => {},
+      finish: async () => {},
+      abort: () => {},
+    }),
+    createPrefixClient: (settings) => {
+      created += 1;
+      captionOptions = settings;
+      return {
+        ready: new Promise<void>((yes, no) => {
+          resolve = yes;
+          reject = no;
+        }),
+        append: (pcm) => appended.push(Buffer.from(pcm)),
+        finish: async () => {},
+        abort: () => {
+          aborted += 1;
+        },
+      };
+    },
+    onConversationTranscript: (event) =>
+      conversations.push(event as IndependentOutgoingCaption),
+    onOutgoingCaptionState: (event) => states.push(event.state),
+    onUtterancePlayback: (event) => playback.push(event),
+    ...options,
+  });
+  const start = async () => {
+    f.attach('local');
+    f.attach('remote');
+    if (f.providers.length) await f.ready('local');
+  };
+  const readyCaptions = async () => {
+    resolve();
+    await Promise.resolve();
+  };
+  return {
+    ...f,
+    start,
+    readyCaptions,
+    appended,
+    conversations,
+    states,
+    playback,
+    options: () => captionOptions,
+    reject: (error: Error) => reject(error),
+    aborted: () => aborted,
+    created: () => created,
+  };
+}
+
+test('outgoing captions pair independent text without blocking native audio or claiming playback correspondence', async (t) => {
+  const f = outgoingCaptionFixture();
+  t.after(() => f.bridge.close());
+  await f.start();
+  const input = Buffer.alloc(160, 0x44);
+  f.media('local', input);
+  assert.deepEqual(f.appended, [], 'the caption handshake is independent');
+  f.provider('local').audio(tone());
+  assert.ok(
+    mediaBytes(f.phones.remote).length > 0,
+    'speech is sent before any caption',
+  );
+  await f.readyCaptions();
+  assert.deepEqual(Buffer.concat(f.appended), new PcmuToPcm24k().push(input));
+  const source: TranscriptEvent = {
+    id: 'local:original:section:0',
+    utteranceId: 'local:section:0',
+    role: 'local',
+    kind: 'original',
+    text: '明天，不是今天。',
+    final: true,
+    at: 10,
+    pairing: 'explicit',
+    boundary: 'semantic',
+  };
+  f.options().onConversationTranscript(source);
+  f.options().onConversationTranscript({
+    ...source,
+    id: 'local:translation:section:0',
+    kind: 'translation',
+    text: 'Tomorrow, not today.',
+  });
+  f.options().onCommit({
+    id: 'section',
+    text: 'Tomorrow, not today.',
+    source: source.text,
+    firstDeltaAt: 10,
+    committedAt: 20,
+    utteranceId: source.utteranceId,
+    finalPart: true,
+  });
+  assert.equal(f.conversations.length, 2);
+  assert.ok(
+    f.conversations.every(
+      (event) =>
+        event.utteranceId === source.utteranceId &&
+        event.captionSource === 'independent_text' &&
+        event.audioCorrespondence === 'none',
+    ),
+  );
+  assert.deepEqual(f.playback, []);
+  assert.ok(f.audio.every((event) => event.utteranceId === undefined));
+  const count = f.conversations.length;
+  f.bridge.close();
+  f.options().onConversationTranscript(source);
+  f.options().onCommit({
+    id: 'late',
+    text: 'Late.',
+    source: '迟到。',
+    firstDeltaAt: 10,
+    committedAt: 20,
+  });
+  assert.equal(f.conversations.length, count);
+  assert.equal(f.aborted(), 1);
+  assert.deepEqual(f.failures, []);
+});
+
+test('outgoing caption queue overflow and rejected readiness fail only the independent text branch', async (t) => {
+  for (const reason of ['overflow', 'ready_rejection'] as const) {
+    const f = outgoingCaptionFixture();
+    t.after(() => f.bridge.close());
+    await f.start();
+    if (reason === 'overflow') {
+      f.media('local', Buffer.alloc(8000, 0x55));
+      f.media('local', Buffer.alloc(8000, 0x55));
+      f.media('local', Buffer.alloc(160, 0x55));
+    } else {
+      f.reject(new Error('PRIVATE_SUPPLIER_DETAILS'));
+      await Promise.resolve();
+      await Promise.resolve();
+    }
+    assert.deepEqual(f.states, ['connecting', 'failed']);
+    f.provider('local').audio(tone());
+    f.media('remote', Buffer.alloc(160, 0x55));
+    assert.ok(mediaBytes(f.phones.remote).length > 0);
+    assert.equal(mediaBytes(f.phones.local).length, 160);
+    assert.deepEqual(f.failures, []);
+    const before = f.appended.length;
+    f.options().onConversationTranscript({
+      id: 'local:original:late:0',
+      utteranceId: 'local:late:0',
+      role: 'local',
+      kind: 'original',
+      text: '迟到',
+      final: true,
+      at: 10,
+      pairing: 'explicit',
+      boundary: 'semantic',
+    });
+    f.media('local', Buffer.alloc(160, 0x55));
+    assert.equal(f.appended.length, before);
+    assert.deepEqual(f.conversations, []);
+  }
+});
+
+test('native synchronous admission rejects connection before creating clients and rejects input before append', async (t) => {
+  for (const denied of ['connect', 'input'] as const) {
+    const f = fixture({ admitAudio: (event) => event.stage !== denied });
+    t.after(() => f.bridge.close());
+    f.attach('local');
+    f.attach('remote');
+    if (denied === 'input') {
+      await f.ready('local');
+      await f.ready('remote');
+      f.media('local');
+      assert.deepEqual(f.provider('local').appended, []);
+    } else assert.deepEqual(f.providers, []);
+    assert.deepEqual(f.failures, ['continuous_audio_admission_denied:local']);
+    f.assertClosed();
+    assert.equal(
+      f.phones.local.sent.filter((event) => event.event === 'clear').length,
+      1,
+    );
+    assert.equal(
+      f.phones.remote.sent.filter((event) => event.event === 'clear').length,
+      1,
+    );
+  }
+});
+
+test('denied native output and return original never reach the opposite stream', async (t) => {
+  const native = fixture({ admitAudio: (event) => event.stage !== 'output' });
+  t.after(() => native.bridge.close());
+  await native.pair();
+  native.provider('local').audio(tone());
+  assert.deepEqual(mediaBytes(native.phones.remote), Buffer.alloc(0));
+  native.assertClosed();
+  const original = outgoingCaptionFixture({
+    admitAudio: (event) => event.path !== 'return_original',
+  });
+  t.after(() => original.bridge.close());
+  await original.start();
+  original.media('remote', Buffer.alloc(160, 0x44));
+  assert.deepEqual(mediaBytes(original.phones.local), Buffer.alloc(0));
+  assert.deepEqual(original.failures, [
+    'continuous_audio_admission_denied:remote',
+  ]);
+});
+
+test('outgoing caption connection and input admission failures leave native speech active', async (t) => {
+  for (const denied of ['connect', 'input'] as const) {
+    const f = outgoingCaptionFixture({
+      admitAudio: (event) =>
+        event.path !== 'outgoing_captions' || event.stage !== denied,
+    });
+    t.after(() => f.bridge.close());
+    await f.start();
+    if (denied === 'input') {
+      await f.readyCaptions();
+      f.media('local');
+      assert.deepEqual(f.appended, []);
+    } else assert.equal(f.created(), 0);
+    f.provider('local').audio(tone());
+    assert.ok(mediaBytes(f.phones.remote).length > 0);
+    assert.equal(f.states.at(-1), 'failed');
+    assert.deepEqual(f.failures, []);
+  }
+});
+
+test('asynchronous bridge admission answers and reentrant shutdown cannot grant a connection', (t) => {
+  const asynchronous = fixture({
+    admitAudio: (() => Promise.resolve(true)) as unknown as NonNullable<
+      ContinuousTranslationBridgeOptions['admitAudio']
+    >,
+  });
+  t.after(() => asynchronous.bridge.close());
+  asynchronous.attach('local');
+  asynchronous.attach('remote');
+  assert.equal(asynchronous.providers.length, 0);
+  const reentrant = fixture({
+    admitAudio: () => {
+      reentrant.bridge.close();
+      return true;
+    },
+  });
+  reentrant.attach('local');
+  reentrant.attach('remote');
+  assert.equal(reentrant.providers.length, 0);
+  assert.deepEqual(reentrant.failures, []);
+});
+
+test('native source and output captions stay unpaired in separate namespaces and append without inserted spaces', async (t) => {
+  const f = fixture();
+  t.after(() => f.bridge.close());
+  await f.pair();
+  const provider = f.provider('local');
+  provider.audio(tone());
+  assert.ok(mediaBytes(f.phones.remote).length > 0);
+  provider.options.onTranscript('Hel', { providerElapsedMs: 1200 });
+  provider.options.onTranscript('lo');
+  provider.options.onTranscript(' world.', { providerElapsedMs: 1200 });
+  const output = f.transcripts.at(-1) as TranscriptEvent & {
+    captionSource: string;
+    audioCorrespondence: string;
+  };
+  assert.equal(output.text, 'Hello world.');
+  assert.equal(output.captionSource, 'native_output');
+  assert.equal(output.audioCorrespondence, 'generated_only');
+  provider.options.onInputTranscript('你', { providerElapsedMs: 1200 });
+  provider.options.onInputTranscript('好。', { providerElapsedMs: 1200 });
+  const source = f.transcripts.at(-1) as typeof output;
+  assert.equal(source.text, '你好。');
+  assert.equal(source.captionSource, 'native_input');
+  assert.equal(source.kind, 'original');
+  assert.equal(source.audioCorrespondence, 'none');
+  assert.notEqual(source.id, output.id);
+  assert.ok(
+    f.transcripts.every(
+      (event) =>
+        event.pairing === 'unpaired' &&
+        event.boundary === 'diagnostic' &&
+        event.final === false &&
+        !event.utteranceId,
+    ),
+  );
+  f.bridge.close();
+  const count = f.transcripts.length;
+  provider.options.onTranscript('LATE');
+  provider.options.onInputTranscript('迟到');
+  assert.equal(f.transcripts.length, count);
+});
+
+test('new remote turns separate native display excerpts in time order while late revisions retain their IDs', async (t) => {
+  for (const firstKind of ['original', 'translation'] as const) {
+    let now = 100;
+    let captions: RemoteCaptionOptions;
+    const events: TranscriptEvent[] = [];
+    const model = createConversationModel({ sessionId: 'native-display' });
+    const f = fixture({
+      now: () => now,
+      remoteCaptions: true,
+      createCaptionClient: (options) => {
+        captions = options;
+        return {
+          ready: Promise.resolve(),
+          append: () => {},
+          finish: async () => {},
+          abort: () => {},
+        };
+      },
+      onTranscript: (event) => {
+        events.push(event);
+        model.applyTranscript(event);
+      },
+    });
+    t.after(() => f.bridge.close());
+    f.attach('local');
+    f.attach('remote');
+    await f.ready('local');
+    const native = f.provider('local').options;
+    native.onTranscript('A');
+    native.onInputTranscript('甲');
+    const firstOutput = events[0];
+    const firstInput = events[1];
+    const remote = (
+      kind: 'original' | 'translation',
+      text: string,
+      turn = 'turn_b',
+      at = 200,
+    ) =>
+      captions.onTranscript({
+        id: `remote:${kind}:${turn}:0`,
+        utteranceId: `remote:${turn}:0`,
+        pairing: 'explicit',
+        boundary: 'utterance',
+        role: 'remote',
+        kind,
+        text,
+        final: false,
+        at,
+      });
+    now = 200;
+    remote(firstKind, firstKind === 'original' ? 'B' : '乙');
+    now = 300;
+    native.onTranscript('C');
+    native.onInputTranscript('丙');
+    const secondOutput = events.at(-2)!;
+    const secondInput = events.at(-1)!;
+    assert.notEqual(secondOutput.id, firstOutput.id);
+    assert.notEqual(secondInput.id, firstInput.id);
+    assert.equal(firstOutput.text, 'A');
+    assert.equal(secondOutput.text, 'C');
+    assert.equal(secondInput.text, '丙');
+    assert.equal(secondOutput.at, 300);
+    assert.equal(secondInput.at, 300);
+    const visibleOrder = model
+      .getUtterances()
+      .filter((row) => row.captionSource !== 'native_input');
+    assert.deepEqual(
+      visibleOrder.map((row) => row.role),
+      ['local', 'remote', 'local'],
+    );
+    assert.deepEqual(
+      visibleOrder.map((row) => row.at),
+      [100, 200, 300],
+    );
+    assert.equal(visibleOrder[0].translation?.text, 'A');
+    assert.equal(visibleOrder[2].translation?.text, 'C');
+
+    // Both a late translated counterpart and old source revisions update B
+    // in place; neither creates another display break after the C excerpt.
+    now = 400;
+    remote('translation', '乙修订');
+    remote('original', 'B revised');
+    native.onTranscript('D');
+    native.onInputTranscript('丁');
+    assert.equal(events.at(-2)!.id, secondOutput.id);
+    assert.equal(events.at(-2)!.text, 'CD');
+    assert.equal(events.at(-2)!.at, 300);
+    assert.equal(events.at(-1)!.id, secondInput.id);
+    assert.equal(events.at(-1)!.text, '丙丁');
+    const rows = model.getUtterances();
+    assert.equal(rows.length, 5);
+    assert.equal(rows[2].original?.text, 'B revised');
+    assert.equal(rows[2].translation?.text, '乙修订');
+    now = 500;
+    remote('original', 'Second remote turn', 'turn_two', 500);
+    now = 600;
+    native.onTranscript('E');
+    const thirdOutput = events.at(-1)!;
+    assert.notEqual(thirdOutput.id, secondOutput.id);
+    assert.equal(thirdOutput.at, 600);
+    remote('translation', '乙再次修订');
+    native.onTranscript('F');
+    assert.equal(events.at(-1)!.id, thirdOutput.id);
+    assert.equal(events.at(-1)!.text, 'EF');
+    assert.equal(model.getUtterances().length, 7);
+    assert.ok(
+      events
+        .filter((event) => event.role === 'local')
+        .every(
+          (event) =>
+            event.pairing === 'unpaired' &&
+            event.boundary === 'diagnostic' &&
+            event.final === false &&
+            !event.utteranceId,
+        ),
+    );
+    native.onAudio(tone());
+    assert.ok(mediaBytes(f.phones.remote).length > 0);
+    assert.deepEqual(f.failures, []);
+    f.bridge.close();
+  }
 });

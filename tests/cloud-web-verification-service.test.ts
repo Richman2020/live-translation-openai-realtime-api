@@ -1,0 +1,1306 @@
+import assert from 'node:assert/strict';
+import { generateKeyPairSync, sign } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import {
+  createServer,
+  request as httpRequest,
+  type IncomingHttpHeaders,
+} from 'node:http';
+import { createConnection, type AddressInfo } from 'node:net';
+import { resolve } from 'node:path';
+import { test, type TestContext } from 'node:test';
+
+import { CLOUD_SESSION_COOKIE } from '../src/solo/cloud-access';
+import { createCloudIngress } from '../src/solo/cloud-ingress';
+import {
+  parsePhoneRuntime,
+  type CloudPhoneRuntime,
+} from '../src/solo/cloud-runtime';
+import type {
+  CloudWebVerificationConfig,
+  CloudWebWorkbenchConfig,
+} from '../src/solo/cloud-web-verification-config';
+import {
+  createCloudWebVerificationService,
+  createCloudWebWorkbenchService,
+} from '../src/solo/cloud-web-verification-service';
+import type { GoogleLoginFailureReason } from '../src/solo/google-login';
+import { GOOGLE_OIDC } from '../src/solo/google-oidc';
+
+const origin = 'https://phone.example.test';
+const authority = 'phone.example.test';
+const initialTime = 1_800_000_000_000;
+const clientId = 'offline.apps.googleusercontent.com';
+const email = 'owner@workspace.example.test';
+const domain = 'workspace.example.test';
+const pair = generateKeyPairSync('rsa', { modulusLength: 2048 });
+const jwk = {
+  ...pair.publicKey.export({ format: 'jwk' }),
+  kid: 'offline-web',
+  alg: 'RS256',
+  use: 'sig',
+};
+const readHeaders = (cookie?: string) => ({
+  host: authority,
+  'sec-fetch-site': 'same-origin',
+  'sec-fetch-mode': 'cors',
+  'sec-fetch-dest': 'empty',
+  ...(cookie ? { cookie } : {}),
+});
+const writeHeaders = (cookie?: string, csrf?: string) => ({
+  ...readHeaders(cookie),
+  origin,
+  'x-phone-login': 'start',
+  ...(csrf ? { 'x-phone-csrf': csrf } : {}),
+});
+const callbackHeaders = (cookie: string) => ({
+  host: authority,
+  cookie,
+  'sec-fetch-site': 'cross-site',
+  'sec-fetch-mode': 'navigate',
+  'sec-fetch-dest': 'document',
+});
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+async function reservePort() {
+  const server = createServer();
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = (server.address() as AddressInfo).port;
+  await new Promise<void>((resolve, reject) =>
+    server.close((error) => (error ? reject(error) : resolve())),
+  );
+  return port;
+}
+function config(port: number): CloudWebVerificationConfig {
+  return {
+    mode: 'web-verification',
+    runtime: parsePhoneRuntime({
+      AI_PHONE_RUNTIME_MODE: 'cloud',
+      PORT: String(port),
+      CLOUD_PUBLIC_ORIGIN: origin,
+      CLOUD_WARM_INSTANCES: '1',
+    }) as CloudPhoneRuntime,
+    google: {
+      clientId,
+      clientSecret: 'offline-not-a-secret',
+      allowedEmail: email,
+      expectedHostedDomain: domain,
+      redirectUri: `${origin}/auth/google/callback`,
+    },
+    testDeadline: initialTime + 3_600_000,
+  };
+}
+async function fixture(
+  t: TestContext,
+  deadlineDurationMs = 3_600_000,
+  mode: 'web-verification' | 'web-workbench' = 'web-verification',
+) {
+  let now = initialTime;
+  let fetches = 0;
+  let tokenBarrier: ReturnType<typeof deferred> | undefined;
+  const enteredToken = deferred();
+  const codes = new Map<string, string>();
+  const claims: Record<string, unknown> = {};
+  const failures: GoogleLoginFailureReason[] = [];
+  const fakeFetch: typeof fetch = async (input, init) => {
+    fetches += 1;
+    const url = String(input);
+    if (url === GOOGLE_OIDC.jwksUri)
+      return new Response(JSON.stringify({ keys: [jwk] }), {
+        headers: { 'content-type': 'application/json' },
+      });
+    assert.equal(
+      url,
+      GOOGLE_OIDC.tokenEndpoint,
+      'No other external URL is used',
+    );
+    enteredToken.resolve();
+    if (tokenBarrier) await tokenBarrier.promise;
+    const header = Buffer.from(
+      JSON.stringify({ alg: 'RS256', kid: jwk.kid }),
+    ).toString('base64url');
+    const payload = Buffer.from(
+      JSON.stringify({
+        iss: GOOGLE_OIDC.issuer,
+        aud: clientId,
+        sub: 'offline-subject',
+        iat: Math.floor(now / 1000),
+        exp: Math.floor(now / 1000) + 300,
+        nonce: codes.get(new URLSearchParams(String(init?.body)).get('code')!),
+        email,
+        email_verified: true,
+        hd: domain,
+        ...claims,
+      }),
+    ).toString('base64url');
+    const data = `${header}.${payload}`;
+    const idToken = `${data}.${sign('RSA-SHA256', Buffer.from(data), pair.privateKey).toString('base64url')}`;
+    return new Response(
+      JSON.stringify({
+        id_token: idToken,
+        access_token: 'offline-unused-token',
+        token_type: 'Bearer',
+        expires_in: 300,
+      }),
+      { headers: { 'content-type': 'application/json' } },
+    );
+  };
+  const settings = config(await reservePort());
+  const boundedSettings = {
+    ...settings,
+    testDeadline: initialTime + deadlineDurationMs,
+  };
+  const workbenchSettings: CloudWebWorkbenchConfig = {
+    mode: 'web-workbench',
+    runtime: settings.runtime,
+    google: settings.google,
+  };
+  const ports = {
+    googleFetch: fakeFetch,
+    now: () => now,
+    onLoginFailure: (reason: GoogleLoginFailureReason) => failures.push(reason),
+  };
+  const trialService =
+    mode === 'web-verification'
+      ? await createCloudWebVerificationService(boundedSettings, ports)
+      : undefined;
+  const service =
+    trialService ||
+    (await createCloudWebWorkbenchService(workbenchSettings, ports));
+  t.after(() => service.close());
+  const inject = (
+    url: string,
+    headers: Record<string, string> = readHeaders(),
+    method: 'GET' | 'POST' | 'HEAD' = 'GET',
+    payload: Record<string, unknown> = {},
+  ) =>
+    service.app.inject({
+      method,
+      url,
+      headers,
+      remoteAddress: '127.0.0.1',
+      ...(method === 'POST' ? { payload } : {}),
+    });
+  const start = async (cookie?: string) => {
+    const result = await inject(
+      '/auth/google/start',
+      writeHeaders(cookie),
+      'POST',
+    );
+    assert.equal(result.statusCode, 200, result.body);
+    const url = new URL(result.json().authorizationUrl);
+    const code = `offline-code-${codes.size}`;
+    codes.set(code, url.searchParams.get('nonce')!);
+    return {
+      url: `/auth/google/callback?state=${url.searchParams.get('state')}&code=${code}`,
+      cookie: String(result.headers['set-cookie']).split(';')[0],
+    };
+  };
+  const finish = (flow: Awaited<ReturnType<typeof start>>) =>
+    inject(flow.url, callbackHeaders(flow.cookie));
+  const signIn = async () => {
+    const result = await finish(await start());
+    assert.equal(result.statusCode, 200, result.body);
+    const cookies = result.headers['set-cookie'];
+    const values = Array.isArray(cookies) ? cookies : [cookies as string];
+    const cookie = values
+      .find((value) => value.startsWith(`${CLOUD_SESSION_COOKIE}=`))!
+      .split(';')[0];
+    const session = await inject('/api/browser-session', readHeaders(cookie));
+    assert.equal(session.statusCode, 200, session.body);
+    return {
+      cookie,
+      csrf: session.json().csrfToken,
+      expiresAt: session.json().expiresAt,
+    };
+  };
+  return {
+    service,
+    deadline: trialService?.deadline,
+    settings: boundedSettings,
+    restartWorkbench: () =>
+      createCloudWebWorkbenchService(workbenchSettings, ports),
+    inject,
+    start,
+    finish,
+    signIn,
+    claims,
+    failures,
+    fetches: () => fetches,
+    advance: (milliseconds: number) => {
+      now += milliseconds;
+    },
+    invalidateClock: () => {
+      now = NaN;
+    },
+    blockToken: () => {
+      tokenBarrier = deferred();
+      return { entered: enteredToken.promise, release: tokenBarrier.resolve };
+    },
+  };
+}
+function send(
+  port: number,
+  path: string,
+  method = 'GET',
+  headers: Record<string, string> = {},
+) {
+  return new Promise<{
+    status: number;
+    body: string;
+    bytes: Buffer;
+    headers: IncomingHttpHeaders;
+  }>((resolve, reject) => {
+    const request = httpRequest(
+      {
+        host: '127.0.0.1',
+        port,
+        path,
+        method,
+        agent: false,
+        headers: { host: authority, 'x-forwarded-proto': 'https', ...headers },
+      },
+      (response) => {
+        const chunks: Buffer[] = [];
+        response.on('data', (chunk) => chunks.push(chunk));
+        response.once('end', () =>
+          resolve({
+            status: response.statusCode!,
+            body: Buffer.concat(chunks).toString(),
+            bytes: Buffer.concat(chunks),
+            headers: response.headers,
+          }),
+        );
+        response.once('error', reject);
+      },
+    );
+    request.once('error', reject);
+    request.end();
+  });
+}
+
+test('continuous workbench stays available beyond one hour and reports its actual calls-disabled mode', async (t) => {
+  const f = await fixture(t, undefined, 'web-workbench');
+  assert.equal(Object.hasOwn(f.service, 'deadline'), false);
+  assert.equal(f.fetches(), 0);
+  f.advance(2 * 60 * 60 * 1000);
+  const health = await f.inject('/api/health');
+  assert.deepEqual(health.json(), {
+    appId: 'ai-phone-solo',
+    mode: 'web-workbench',
+    callsEnabled: false,
+  });
+  assert.equal((await f.inject('/controlled')).statusCode, 200);
+  const account = await f.signIn();
+  assert.equal(
+    account.expiresAt,
+    initialTime + 2 * 60 * 60 * 1000 + 30 * 60 * 1000,
+  );
+  assert.deepEqual(
+    (await f.inject('/api/status', readHeaders(account.cookie))).json(),
+    {
+      mode: 'web-workbench',
+      authenticated: true,
+      callsEnabled: false,
+      phoneStatus: 'disabled',
+    },
+  );
+  assert.equal(f.service.ingress.server.listening, true);
+  assert.equal(f.service.app.server.listening, true);
+});
+
+test('daily workbench serves its actual dial, local devices and conversation surface with exact GET and HEAD assets', async (t) => {
+  const f = await fixture(t, undefined, 'web-workbench');
+  const page = await send(f.settings.runtime.port, '/controlled');
+  assert.equal(page.status, 200);
+  assert.match(page.body, /data-service-mode="web-workbench"/);
+  assert.match(page.body, /src="\/web-workbench\.js"/);
+  for (const id of [
+    'phone-number',
+    'start-call',
+    'test-microphone',
+    'test-audio-output',
+    'transcript-scroll',
+    'transcript',
+  ])
+    assert.match(page.body, new RegExp(`id="${id}"`));
+  assert.match(page.body, /电话功能关闭/);
+  assert.doesNotMatch(
+    page.body,
+    /src="\/(?:app|controller-client|controlled-workbench)\.js"|twilio\.min\.js/,
+  );
+
+  for (const [path, filename, mime] of [
+    ['/controlled', 'web-workbench.html', 'text/html'],
+    ['/web-verification.js', 'web-verification.js', 'text/javascript'],
+    ['/web-workbench.js', 'web-workbench.js', 'text/javascript'],
+    ['/session-page-lease.js', 'session-page-lease.js', 'text/javascript'],
+    ['/microphone-input.js', 'microphone-input.js', 'text/javascript'],
+    ['/audio-output.js', 'audio-output.js', 'text/javascript'],
+    ['/conversation-model.js', 'conversation-model.js', 'text/javascript'],
+    ['/conversation-view.js', 'conversation-view.js', 'text/javascript'],
+    ['/assets/speaker-test.wav', 'assets/speaker-test.wav', 'audio/wav'],
+    ['/styles.css', 'styles.css', 'text/css'],
+    ['/favicon.svg', 'favicon.svg', 'image/svg+xml'],
+  ]) {
+    const bytes = readFileSync(resolve('public', filename));
+    for (const method of ['GET', 'HEAD'] as const) {
+      const privateResponse = await f.inject(path, readHeaders(), method);
+      const publicResponse = await send(f.settings.runtime.port, path, method);
+      assert.equal(
+        privateResponse.statusCode,
+        200,
+        `${method} private ${path}`,
+      );
+      assert.equal(publicResponse.status, 200, `${method} public ${path}`);
+      for (const headers of [privateResponse.headers, publicResponse.headers]) {
+        assert.equal(String(headers['content-type']).split(';')[0], mime, path);
+        assert.equal(Number(headers['content-length']), bytes.length, path);
+        assert.match(String(headers['cache-control']), /no-store/);
+        assert.equal(headers['x-content-type-options'], 'nosniff');
+        assert.match(
+          String(headers['content-security-policy']),
+          /default-src 'self'/,
+        );
+      }
+      assert.deepEqual(
+        privateResponse.rawPayload,
+        method === 'GET' ? bytes : Buffer.alloc(0),
+        path,
+      );
+      assert.deepEqual(
+        publicResponse.bytes,
+        method === 'GET' ? bytes : Buffer.alloc(0),
+        path,
+      );
+    }
+  }
+  assert.equal(
+    f.fetches(),
+    0,
+    'Public UI assets never create a Google or telephone request',
+  );
+  assert.equal((await f.inject('/api/status')).statusCode, 401);
+});
+
+test('workbench-only assets stay closed in verification and reject alternate paths, queries and writes', async (t) => {
+  const trial = await fixture(t);
+  const daily = await fixture(t, undefined, 'web-workbench');
+  const trialPage = await trial.inject('/controlled');
+  assert.match(trialPage.body, /data-service-mode="web-verification"/);
+  assert.match(trialPage.body, /src="\/web-verification\.js"/);
+  assert.doesNotMatch(trialPage.body, /src="\/web-workbench\.js"/);
+  for (const path of [
+    '/web-workbench.js',
+    '/session-page-lease.js',
+    '/microphone-input.js',
+    '/audio-output.js',
+    '/conversation-model.js',
+    '/conversation-view.js',
+    '/assets/speaker-test.wav',
+  ]) {
+    for (const method of ['GET', 'HEAD'] as const) {
+      assert.equal(
+        (await trial.inject(path, readHeaders(), method)).statusCode,
+        403,
+        `${method} private ${path}`,
+      );
+      assert.equal(
+        (await send(trial.settings.runtime.port, path, method)).status,
+        404,
+        `${method} public ${path}`,
+      );
+    }
+    assert.equal(
+      (await daily.inject(path, writeHeaders(), 'POST')).statusCode,
+      403,
+      path,
+    );
+    assert.equal(
+      (await send(daily.settings.runtime.port, path, 'POST')).status,
+      404,
+      path,
+    );
+    assert.equal(
+      (await daily.inject(`${path}?mode=phone`)).statusCode,
+      403,
+      path,
+    );
+    assert.equal(
+      (await send(daily.settings.runtime.port, `${path}?mode=phone`)).status,
+      404,
+      path,
+    );
+  }
+  for (const path of [
+    '/session-activity.js',
+    '/app.js',
+    '/controller-client.js',
+    '/controlled-workbench.js',
+    '/vendor/twilio.min.js',
+    '/call-lifecycle.js',
+    '/rtc-diagnostics.js',
+    '/translation-engine.js',
+    '/assets/other.wav',
+    '/assets/%73peaker-test.wav',
+    '/assets/../speaker-test.wav',
+  ]) {
+    for (const mode of [trial, daily])
+      for (const method of ['GET', 'HEAD'] as const) {
+        assert.equal(
+          (await mode.inject(path, readHeaders(), method)).statusCode,
+          403,
+          `${method} private ${path}`,
+        );
+        assert.equal(
+          (await send(mode.settings.runtime.port, path, method)).status,
+          404,
+          `${method} public ${path}`,
+        );
+      }
+  }
+  assert.equal(trial.fetches() + daily.fetches(), 0);
+});
+
+test('daily page heartbeats survive inactivity and eight hours but lost pages expire after thirty minutes', async (t) => {
+  const f = await fixture(t, undefined, 'web-workbench');
+  const account = await f.signIn();
+  const pageId = 'A'.repeat(43);
+  for (let sequence = 1; sequence <= 33; sequence++) {
+    f.advance(16 * 60 * 1000);
+    const heartbeat = await f.inject(
+      '/auth/session/page',
+      writeHeaders(account.cookie, account.csrf),
+      'POST',
+      { pageId, sequence, state: 'open' },
+    );
+    assert.equal(heartbeat.statusCode, 200, heartbeat.body);
+    assert.equal(
+      heartbeat.json().expiresAt,
+      initialTime + sequence * 16 * 60 * 1000 + 30 * 60 * 1000,
+    );
+  }
+  assert.equal(
+    (await f.inject('/api/status', readHeaders(account.cookie))).statusCode,
+    200,
+  );
+  f.advance(29 * 60 * 1000);
+  assert.equal(
+    (await f.inject('/api/status', readHeaders(account.cookie))).statusCode,
+    200,
+  );
+  f.advance(60 * 1000);
+  assert.equal(
+    (await f.inject('/api/status', readHeaders(account.cookie))).statusCode,
+    401,
+  );
+  assert.equal(
+    (
+      await f.inject(
+        '/auth/session/page',
+        writeHeaders(account.cookie, account.csrf),
+        'POST',
+        { pageId, sequence: 34, state: 'open' },
+      )
+    ).statusCode,
+    401,
+  );
+  assert.equal((await f.inject('/api/health')).statusCode, 200);
+});
+
+test('daily pages isolate tab close, reload grace and stale heartbeat resurrection', async (t) => {
+  const f = await fixture(t, undefined, 'web-workbench');
+  const account = await f.signIn();
+  const update = (pageId: string, sequence: number, state: string) =>
+    f.inject(
+      '/auth/session/page',
+      writeHeaders(account.cookie, account.csrf),
+      'POST',
+      { pageId: pageId.repeat(42) + 'A', sequence, state },
+    );
+  assert.equal((await update('A', 1, 'open')).statusCode, 200);
+  assert.equal((await update('B', 1, 'open')).statusCode, 200);
+  assert.equal((await update('A', 2, 'close')).statusCode, 200);
+  f.advance(31_000);
+  assert.equal(
+    (await f.inject('/api/status', readHeaders(account.cookie))).statusCode,
+    200,
+  );
+  await update('B', 2, 'close');
+  f.advance(20_000);
+  assert.equal((await update('C', 1, 'open')).statusCode, 200);
+  f.advance(11_000);
+  assert.equal(
+    (await f.inject('/api/status', readHeaders(account.cookie))).statusCode,
+    200,
+  );
+  await update('C', 2, 'close');
+  f.advance(20_000);
+  assert.equal((await update('C', 3, 'open')).statusCode, 409);
+  assert.equal((await update('B', 1, 'open')).statusCode, 409);
+  f.advance(10_000);
+  assert.equal(
+    (await f.inject('/api/status', readHeaders(account.cookie))).statusCode,
+    401,
+  );
+});
+
+test('daily page writes enforce CSRF and Origin and logout rejects delayed heartbeats', async (t) => {
+  const f = await fixture(t, undefined, 'web-workbench');
+  const account = await f.signIn();
+  const payload = { pageId: 'A'.repeat(43), sequence: 1, state: 'open' };
+  assert.equal(
+    (
+      await f.inject(
+        '/auth/session/page',
+        writeHeaders(account.cookie),
+        'POST',
+        payload,
+      )
+    ).statusCode,
+    403,
+  );
+  assert.equal(
+    (
+      await f.inject(
+        '/auth/session/page',
+        {
+          ...writeHeaders(account.cookie, account.csrf),
+          origin: 'https://other.example.test',
+        },
+        'POST',
+        payload,
+      )
+    ).statusCode,
+    403,
+  );
+  assert.equal(
+    (
+      await f.inject(
+        '/auth/session/page',
+        writeHeaders(account.cookie, account.csrf),
+        'POST',
+        payload,
+      )
+    ).statusCode,
+    200,
+  );
+  assert.equal(
+    (
+      await f.inject(
+        '/auth/session/renew',
+        writeHeaders(account.cookie, account.csrf),
+        'POST',
+      )
+    ).statusCode,
+    403,
+  );
+  assert.equal(
+    (
+      await f.inject(
+        '/auth/logout',
+        writeHeaders(account.cookie, account.csrf),
+        'POST',
+      )
+    ).statusCode,
+    200,
+  );
+  assert.equal(
+    (
+      await f.inject(
+        '/auth/session/page',
+        writeHeaders(account.cookie, account.csrf),
+        'POST',
+        { ...payload, sequence: 2 },
+      )
+    ).statusCode,
+    401,
+  );
+  assert.equal(
+    (await f.inject('/api/status', readHeaders(account.cookie))).statusCode,
+    401,
+  );
+});
+
+test('workbench logout revokes a pending re-login and prevents its late cookie commit', async (t) => {
+  const f = await fixture(t, undefined, 'web-workbench');
+  const account = await f.signIn();
+  const flow = await f.start(account.cookie);
+  const gate = f.blockToken();
+  const pending = f.finish(flow);
+  await gate.entered;
+  const loggedOut = await f.inject(
+    '/auth/logout',
+    writeHeaders(`${account.cookie}; ${flow.cookie}`, account.csrf),
+    'POST',
+  );
+  assert.equal(loggedOut.statusCode, 200, loggedOut.body);
+  gate.release();
+  const callback = await pending;
+  assert.equal(callback.statusCode, 401);
+  assert.equal(callback.headers['set-cookie'], undefined);
+  assert.equal(
+    (await f.inject('/api/status', readHeaders(account.cookie))).statusCode,
+    401,
+  );
+});
+
+test('workbench restart rejects old opaque sessions and does not restore an authenticated owner', async (t) => {
+  const f = await fixture(t, undefined, 'web-workbench');
+  const account = await f.signIn();
+  const context = f.service.login.policy.authenticate(
+    readHeaders(account.cookie),
+    'read',
+    { surface: 'http', method: 'GET' },
+  );
+  await f.service.close();
+  assert.throws(
+    () => f.service.login.policy.revalidate(context, 'read'),
+    /UNAUTHORIZED/,
+  );
+  const restarted = await f.restartWorkbench();
+  t.after(() => restarted.close());
+  const response = await restarted.app.inject({
+    method: 'GET',
+    url: '/api/status',
+    headers: readHeaders(account.cookie),
+    remoteAddress: '127.0.0.1',
+  });
+  assert.equal(response.statusCode, 401);
+  assert.equal(
+    (
+      await restarted.app.inject({
+        method: 'GET',
+        url: '/api/health',
+        headers: readHeaders(),
+        remoteAddress: '127.0.0.1',
+      })
+    ).statusCode,
+    200,
+  );
+});
+
+test('workbench preserves strict CSRF and fails closed on invalid runtime clock', async (t) => {
+  const f = await fixture(t, undefined, 'web-workbench');
+  const account = await f.signIn();
+  assert.equal(
+    (
+      await f.inject(
+        '/auth/session/renew',
+        writeHeaders(account.cookie),
+        'POST',
+      )
+    ).statusCode,
+    403,
+  );
+  assert.equal(
+    (
+      await f.inject('/api/status', {
+        ...readHeaders(account.cookie),
+        origin: 'https://other.example.test',
+      })
+    ).statusCode,
+    403,
+  );
+  f.invalidateClock();
+  const result = await f.inject('/api/status', readHeaders(account.cookie));
+  assert.equal(result.statusCode, 503);
+  assert.deepEqual(result.json(), { error: 'CLOUD_WEB_UNAVAILABLE' });
+  await f.service.close();
+  assert.equal(f.service.ingress.server.listening, false);
+});
+
+test('workbench rejects phone HTTP and every WS through the same exact ingress allowlist', async (t) => {
+  const f = await fixture(t, undefined, 'web-workbench');
+  const account = await f.signIn();
+  for (const path of [
+    '/api/calls',
+    '/api/controller/acquire',
+    '/api/token',
+    '/api/presence',
+    '/api/settings',
+    '/api/events',
+    '/voice/client',
+    '/voice/connect',
+    '/voice/status',
+    '/voice/media',
+    '/session-activity.js',
+    '/app.js',
+    '/vendor/twilio.min.js',
+  ]) {
+    assert.equal(
+      (await f.inject(path, writeHeaders(account.cookie, account.csrf), 'POST'))
+        .statusCode,
+      403,
+      path,
+    );
+    for (const method of ['GET', 'POST', 'HEAD'])
+      assert.equal(
+        (await send(f.settings.runtime.port, path, method)).status,
+        404,
+        `${method} ${path}`,
+      );
+  }
+  for (const path of ['/voice/media', '/api/status', '/controlled']) {
+    const socket = createConnection({
+      host: '127.0.0.1',
+      port: f.settings.runtime.port,
+    });
+    const result = new Promise<string>((resolve, reject) => {
+      socket.once('error', reject);
+      socket.once('data', (chunk) => resolve(chunk.toString()));
+    });
+    socket.once('connect', () =>
+      socket.write(
+        `GET ${path} HTTP/1.1\r\nHost: ${authority}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n`,
+      ),
+    );
+    assert.match(await result, /403 Rejected/);
+    socket.destroy();
+  }
+  const probe = await send(f.settings.runtime.port, '/api/health', 'GET', {
+    host: 'healthcheck.railway.app',
+  });
+  assert.deepEqual(JSON.parse(probe.body), {
+    appId: 'ai-phone-solo',
+    mode: 'web-workbench',
+    callsEnabled: false,
+  });
+});
+
+test('web factories reject mode reinterpretation before creating resources and never read workbench deadline', async () => {
+  const trial = config(await reservePort());
+  const workbench: CloudWebWorkbenchConfig = {
+    mode: 'web-workbench',
+    runtime: trial.runtime,
+    google: trial.google,
+  };
+  await assert.rejects(
+    createCloudWebVerificationService(
+      workbench as unknown as CloudWebVerificationConfig,
+      { now: () => initialTime },
+    ),
+    /CLOUD_WEB_VERIFICATION_CONFIG_INVALID/,
+  );
+  await assert.rejects(
+    createCloudWebWorkbenchService(
+      trial as unknown as CloudWebWorkbenchConfig,
+      { now: () => initialTime },
+    ),
+    /CLOUD_WEB_WORKBENCH_CONFIG_INVALID/,
+  );
+  const guarded = new Proxy(workbench, {
+    get(target, name, receiver) {
+      if (
+        name === 'testDeadline' ||
+        (typeof name === 'string' &&
+          /^(TWILIO_|OPENAI_|CLOUD_TEST_)/.test(name))
+      )
+        throw new Error('Unrelated field read');
+      return Reflect.get(target, name, receiver);
+    },
+  });
+  const service = await createCloudWebWorkbenchService(guarded, {
+    now: () => initialTime,
+  });
+  await service.close();
+});
+
+test('web service starts without provider traffic, exposes only public shell and anonymous metadata', async (t) => {
+  const f = await fixture(t);
+  assert.equal(f.fetches(), 0);
+  const health = await f.inject('/api/health');
+  assert.deepEqual(health.json(), {
+    appId: 'ai-phone-solo',
+    mode: 'web-verification',
+    callsEnabled: false,
+  });
+  for (const path of [
+    '/controlled',
+    '/web-verification.js',
+    '/styles.css',
+    '/favicon.svg',
+  ]) {
+    const result = await f.inject(path);
+    assert.equal(result.statusCode, 200, path);
+    assert.match(
+      String(result.headers['content-security-policy']),
+      /script-src 'self'/,
+    );
+  }
+  for (const path of ['/api/status', '/api/browser-session']) {
+    const result = await f.inject(path);
+    assert.equal(result.statusCode, 401, path);
+    assert.deepEqual(result.json(), { error: 'UNAUTHORIZED' });
+  }
+  assert.equal(f.fetches(), 0);
+});
+
+test('real login routes validate offline signed Google identity; session reads never grant calls', async (t) => {
+  const f = await fixture(t);
+  const account = await f.signIn();
+  const status = await f.inject('/api/status', readHeaders(account.cookie));
+  assert.deepEqual(status.json(), {
+    mode: 'web-verification',
+    authenticated: true,
+    callsEnabled: false,
+    phoneStatus: 'disabled',
+  });
+  const browser = await f.inject(
+    '/api/browser-session',
+    readHeaders(account.cookie),
+  );
+  assert.deepEqual(Object.keys(browser.json()).sort(), [
+    'authenticated',
+    'csrfToken',
+    'expiresAt',
+  ]);
+  assert.equal(browser.json().csrfToken, account.csrf);
+  assert.doesNotMatch(
+    status.body + browser.body,
+    /offline-subject|owner@|provider|controller|voiceIdentity/,
+  );
+  for (const path of [
+    '/api/calls',
+    '/api/controller/acquire',
+    '/api/token',
+    '/api/settings',
+    '/api/events',
+    '/voice/client',
+    '/voice/connect',
+    '/voice/media',
+    '/vendor/twilio.min.js',
+    '/session-activity.js',
+    '/app.js',
+  ]) {
+    const denied = await f.inject(
+      path,
+      writeHeaders(account.cookie, account.csrf),
+      'POST',
+    );
+    assert.equal(denied.statusCode, 403, path);
+    assert.deepEqual(denied.json(), { error: 'CALLS_DISABLED' });
+  }
+});
+
+test('renew and logout keep original Origin and CSRF boundaries and revoke reads', async (t) => {
+  const f = await fixture(t);
+  const account = await f.signIn();
+  for (const path of ['/auth/session/renew', '/auth/logout']) {
+    const denied = await f.inject(path, writeHeaders(account.cookie), 'POST');
+    assert.equal(denied.statusCode, 403, path);
+  }
+  const crossSite = await f.inject(
+    '/auth/logout',
+    {
+      ...writeHeaders(account.cookie, account.csrf),
+      origin: 'https://other.example.test',
+    },
+    'POST',
+  );
+  assert.equal(crossSite.statusCode, 403);
+  const renewed = await f.inject(
+    '/auth/session/renew',
+    writeHeaders(account.cookie, account.csrf),
+    'POST',
+  );
+  assert.equal(renewed.statusCode, 200, renewed.body);
+  assert.equal(
+    (
+      await f.inject(
+        '/auth/logout',
+        writeHeaders(account.cookie, account.csrf),
+        'POST',
+      )
+    ).statusCode,
+    200,
+  );
+  assert.equal(
+    (await f.inject('/api/status', readHeaders(account.cookie))).statusCode,
+    401,
+  );
+});
+
+test('missing hosted-domain signed claim fails real callback without session cookie', async (t) => {
+  const f = await fixture(t);
+  f.claims.hd = undefined;
+  const result = await f.finish(await f.start());
+  assert.equal(result.statusCode, 401);
+  assert.deepEqual(result.json(), { error: 'LOGIN_FAILED' });
+  assert.equal(result.headers['set-cookie'], undefined);
+  assert.deepEqual(f.failures, ['GOOGLE_IDENTITY_REJECTED']);
+});
+
+test('both calls-disabled services wire only fixed login failures without granting a session', async (t) => {
+  for (const mode of ['web-verification', 'web-workbench'] as const) {
+    const f = await fixture(t, undefined, mode);
+    const flow = await f.start();
+    const result = await f.inject(flow.url, {
+      ...callbackHeaders(flow.cookie),
+      cookie: '',
+    });
+    assert.equal(result.statusCode, 401);
+    assert.deepEqual(result.json(), { error: 'LOGIN_FAILED' });
+    assert.equal(result.headers['set-cookie'], undefined);
+    assert.equal(f.fetches(), 0);
+    assert.deepEqual(f.failures, ['BINDING_MISSING']);
+    assert.equal((await f.inject('/api/status')).statusCode, 401);
+    const signedIn = await f.signIn();
+    assert.equal(
+      (await f.inject('/api/status', readHeaders(signedIn.cookie))).statusCode,
+      200,
+    );
+    assert.deepEqual(f.failures, ['BINDING_MISSING']);
+  }
+});
+
+test('both web modes accept the fixed Google authorization-response issuer and reject mismatches before exchange', async (t) => {
+  for (const mode of ['web-verification', 'web-workbench'] as const) {
+    const f = await fixture(t, undefined, mode);
+    const wrong = await f.start();
+    const rejected = await f.finish({
+      ...wrong,
+      url: `${wrong.url}&iss=https%3A%2F%2Fforeign.example.test`,
+    });
+    assert.equal(rejected.statusCode, 401);
+    assert.deepEqual(rejected.json(), { error: 'LOGIN_FAILED' });
+    assert.equal(rejected.headers['set-cookie'], undefined);
+    assert.equal(f.fetches(), 0);
+    assert.deepEqual(f.failures, ['CALLBACK_PARAMS_ISS_MISMATCH']);
+    const fresh = await f.start();
+    const accepted = await f.finish({
+      ...fresh,
+      url: `${fresh.url}&iss=${encodeURIComponent(GOOGLE_OIDC.issuer)}&scope=openid%20email&authuser=0&prompt=select_account&hd=${domain}`,
+    });
+    assert.equal(accepted.statusCode, 200, accepted.body);
+    const cookies = accepted.headers['set-cookie'];
+    assert.ok(Array.isArray(cookies));
+    const session = cookies
+      .find((value) => value.startsWith(`${CLOUD_SESSION_COOKIE}=`))!
+      .split(';')[0];
+    assert.equal(
+      (await f.inject('/api/status', readHeaders(session))).statusCode,
+      200,
+    );
+    assert.deepEqual(f.failures, ['CALLBACK_PARAMS_ISS_MISMATCH']);
+  }
+});
+
+test('session idle expiry revokes authenticated metadata within the test deadline', async (t) => {
+  const f = await fixture(t);
+  const account = await f.signIn();
+  f.advance(16 * 60 * 1000);
+  assert.equal(
+    (await f.inject('/api/status', readHeaders(account.cookie))).statusCode,
+    401,
+  );
+  assert.equal(
+    (await f.inject('/api/browser-session', readHeaders(account.cookie)))
+      .statusCode,
+    401,
+  );
+});
+
+test('session bootstrap and renew expose the earlier service deadline', async (t) => {
+  const f = await fixture(t, 60_000);
+  const account = await f.signIn();
+  assert.equal(account.expiresAt, f.settings.testDeadline);
+  assert.equal(
+    (
+      await f.inject(
+        '/auth/session/renew',
+        writeHeaders(account.cookie, account.csrf),
+        'POST',
+      )
+    ).statusCode,
+    200,
+  );
+  const browser = await f.inject(
+    '/api/browser-session',
+    readHeaders(account.cookie),
+  );
+  assert.equal(browser.json().expiresAt, f.settings.testDeadline);
+});
+
+test('expiry during awaited OIDC exchange cannot commit a cookie and clock rollback cannot reopen', async (t) => {
+  const f = await fixture(t);
+  const flow = await f.start();
+  const gate = f.blockToken();
+  const pending = f.finish(flow);
+  await gate.entered;
+  f.advance(3_600_000);
+  gate.release();
+  const result = await pending;
+  assert.equal(result.statusCode, 503, result.body);
+  assert.equal(result.headers['set-cookie'], undefined);
+  assert.equal(result.headers.location, undefined);
+  await f.service.close();
+  f.advance(-3_600_000);
+  assert.ok(f.deadline);
+  assert.throws(() => f.deadline.assertCurrent(), /CLOUD_TEST_EXPIRED/);
+  assert.equal(f.service.ingress.server.listening, false);
+  assert.equal(f.service.app.server.listening, false);
+  assert.equal(f.service.close(), f.service.close());
+});
+
+test('deadline revokes existing identity and closes both listeners, including half-open upgrade sockets', async (t) => {
+  const f = await fixture(t);
+  const account = await f.signIn();
+  const context = f.service.login.policy.authenticate(
+    readHeaders(account.cookie),
+    'read',
+    { surface: 'http', method: 'GET' },
+  );
+  const port = (f.service.app.server.address() as AddressInfo).port;
+  const socket = createConnection({
+    host: '127.0.0.1',
+    port,
+    allowHalfOpen: true,
+  });
+  t.after(() => socket.destroy());
+  const response = new Promise<string>((resolve, reject) => {
+    socket.once('error', reject);
+    socket.once('data', (chunk) => resolve(chunk.toString()));
+  });
+  socket.once('connect', () =>
+    socket.write(
+      `GET /voice/media HTTP/1.1\r\nHost: ${authority}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n`,
+    ),
+  );
+  assert.match(await response, /403 Forbidden/);
+  f.advance(3_600_000);
+  assert.ok(f.deadline);
+  await f.deadline.expireIfDue();
+  assert.throws(
+    () => f.service.login.policy.revalidate(context, 'read'),
+    /UNAUTHORIZED/,
+  );
+  assert.equal(f.service.ingress.server.listening, false);
+  assert.equal(f.service.app.server.listening, false);
+});
+
+test('deadline shutdown destroys a private unfinished HTTP request without waiting for its body', async (t) => {
+  const f = await fixture(t);
+  const port = (f.service.app.server.address() as AddressInfo).port;
+  const received = new Promise<void>((resolve) =>
+    f.service.app.server.once('request', () => resolve()),
+  );
+  const socket = createConnection({
+    host: '127.0.0.1',
+    port,
+    allowHalfOpen: true,
+  });
+  t.after(() => socket.destroy());
+  socket.on('error', () => {});
+  socket.once('connect', () =>
+    socket.write(
+      `POST /auth/google/start HTTP/1.1\r\nHost: ${authority}\r\nOrigin: ${origin}\r\nX-Phone-Login: start\r\nSec-Fetch-Site: same-origin\r\nSec-Fetch-Mode: cors\r\nSec-Fetch-Dest: empty\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{`,
+    ),
+  );
+  await received;
+  f.advance(3_600_000);
+  let timeout: ReturnType<typeof setTimeout>;
+  try {
+    await Promise.race([
+      f.deadline!.expireIfDue(),
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error('Private incomplete body blocked shutdown')),
+          300,
+        );
+      }),
+    ]);
+  } finally {
+    clearTimeout(timeout!);
+  }
+  assert.equal(f.fetches(), 0);
+  assert.equal(f.service.ingress.server.listening, false);
+  assert.equal(f.service.app.server.listening, false);
+});
+
+test('connections arriving while ingress close is pending are destroyed before private listener close', async (t) => {
+  const f = await fixture(t);
+  const released = deferred();
+  const reached = deferred();
+  const originalClose = f.service.ingress.server.close.bind(
+    f.service.ingress.server,
+  );
+  f.service.ingress.server.close = ((callback?: (error?: Error) => void) =>
+    originalClose((error?: Error) => {
+      reached.resolve();
+      void released.promise.then(() => callback?.(error));
+    })) as typeof f.service.ingress.server.close;
+  const closing = f.service.close();
+  const sockets: ReturnType<typeof createConnection>[] = [];
+  try {
+    await reached.promise;
+    assert.equal(f.service.app.server.listening, true);
+    for (const upgrade of [false, true]) {
+      const socket = createConnection({
+        host: '127.0.0.1',
+        port: (f.service.app.server.address() as AddressInfo).port,
+      });
+      sockets.push(socket);
+      socket.on('error', () => {});
+      if (upgrade)
+        socket.once('connect', () =>
+          socket.write(
+            `GET /voice/media HTTP/1.1\r\nHost: ${authority}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n`,
+          ),
+        );
+      let timeout: ReturnType<typeof setTimeout>;
+      try {
+        await Promise.race([
+          new Promise<void>((resolve) => socket.once('close', () => resolve())),
+          new Promise<never>((_resolve, reject) => {
+            timeout = setTimeout(
+              () =>
+                reject(
+                  new Error('New private socket survived closing boundary'),
+                ),
+              300,
+            );
+          }),
+        ]);
+      } finally {
+        clearTimeout(timeout!);
+      }
+      assert.equal(f.service.app.server.listening, true);
+    }
+    assert.equal(f.fetches(), 0);
+  } finally {
+    released.resolve();
+    for (const socket of sockets) socket.destroy();
+    await closing;
+  }
+});
+
+test('factory rejects mode, runtime, callback and deadline mismatches before listener or network work', async () => {
+  const good = config(await reservePort());
+  let fetches = 0;
+  const fakeFetch: typeof fetch = async () => {
+    fetches += 1;
+    throw new Error('must not run');
+  };
+  const variants = [
+    { ...good, mode: 'phone' },
+    { ...good, runtime: { ...good.runtime, port: 0 } },
+    { ...good, runtime: { ...good.runtime, host: '127.0.0.1' } },
+    {
+      ...good,
+      runtime: { ...good.runtime, mediaOrigin: 'wss://other.example.test' },
+    },
+    {
+      ...good,
+      google: {
+        ...good.google,
+        redirectUri: 'https://other.example.test/auth/google/callback',
+      },
+    },
+    { ...good, testDeadline: initialTime },
+    { ...good, testDeadline: initialTime + 3_600_001 },
+  ];
+  for (const value of variants)
+    await assert.rejects(
+      createCloudWebVerificationService(value as CloudWebVerificationConfig, {
+        now: () => initialTime,
+        googleFetch: fakeFetch,
+      }),
+      /CLOUD_WEB_VERIFICATION_CONFIG_INVALID/,
+    );
+  assert.equal(fetches, 0);
+});
+
+test('web ingress forwards only exact web routes and denies all upgrades before contacting upstream', async (t) => {
+  let upstreamRequests = 0;
+  let upstreamUpgrades = 0;
+  const upstream = createServer((_request, response) => {
+    upstreamRequests += 1;
+    response.end('offline');
+  });
+  upstream.on('upgrade', (_request, socket) => {
+    upstreamUpgrades += 1;
+    socket.destroy();
+  });
+  await new Promise<void>((resolve) =>
+    upstream.listen(0, '127.0.0.1', resolve),
+  );
+  t.after(
+    () => new Promise<void>((resolve) => upstream.close(() => resolve())),
+  );
+  const settings = config(await reservePort());
+  const ingress = createCloudIngress({
+    runtime: settings.runtime,
+    mode: 'web-verification',
+    upstreamPort: (upstream.address() as AddressInfo).port,
+  });
+  await new Promise<void>((resolve) =>
+    ingress.server.listen(settings.runtime.port, '127.0.0.1', resolve),
+  );
+  t.after(() => ingress.close());
+  for (const path of [
+    '/api/calls',
+    '/api/controller/acquire',
+    '/api/events',
+    '/api/token',
+    '/voice/client',
+    '/voice/media',
+    '/session-activity.js',
+    '/app.js',
+    '/vendor/twilio.min.js',
+    '/api/status?ownerId=forged',
+  ]) {
+    for (const method of ['GET', 'POST', 'HEAD'])
+      assert.equal(
+        (await send(settings.runtime.port, path, method)).status,
+        404,
+        `${method} ${path}`,
+      );
+  }
+  assert.equal(upstreamRequests, 0);
+  for (const path of ['/voice/media', '/api/status', '/controlled']) {
+    const socket = createConnection({
+      host: '127.0.0.1',
+      port: settings.runtime.port,
+      allowHalfOpen: true,
+    });
+    const reply = new Promise<string>((resolve, reject) => {
+      socket.once('error', reject);
+      socket.once('data', (chunk) => resolve(chunk.toString()));
+    });
+    socket.once('connect', () =>
+      socket.write(
+        `GET ${path} HTTP/1.1\r\nHost: ${authority}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n`,
+      ),
+    );
+    assert.match(await reply, /403 Rejected/);
+    socket.destroy();
+  }
+  assert.equal(upstreamRequests, 0);
+  assert.equal(upstreamUpgrades, 0);
+  assert.equal((await send(settings.runtime.port, '/api/status')).status, 200);
+  assert.equal(upstreamRequests, 1);
+  const probe = await send(settings.runtime.port, '/api/health', 'GET', {
+    host: 'healthcheck.railway.app',
+  });
+  assert.deepEqual(JSON.parse(probe.body), {
+    appId: 'ai-phone-solo',
+    mode: 'web-verification',
+    callsEnabled: false,
+  });
+  assert.equal(upstreamRequests, 1);
+  assert.throws(
+    () =>
+      createCloudIngress({
+        runtime: settings.runtime,
+        upstreamPort: (upstream.address() as AddressInfo).port,
+        mode: 'unknown' as 'phone',
+      }),
+    /INVALID_CLOUD_INGRESS/,
+  );
+});

@@ -15,6 +15,8 @@ export type OutgoingPrefixCommit = {
   source: string;
   firstDeltaAt: number;
   committedAt: number;
+  utteranceId?: string;
+  finalPart?: boolean;
 };
 export type OutgoingPrefixOptions = {
   apiKey: string;
@@ -27,6 +29,7 @@ export type OutgoingPrefixOptions = {
     options: WebSocket.ClientOptions,
   ) => WebSocket;
   onTranscript: (event: TranscriptEvent) => void;
+  onConversationTranscript?: (event: TranscriptEvent) => void;
   onCommit: (event: OutgoingPrefixCommit) => void;
   onError: (code: string) => void;
   onTiming?: (event: {
@@ -47,6 +50,8 @@ type Job = {
   segment: PrefixSourceSegment;
   key: string;
   output: string;
+  /** First observation of this semantic source section, not translation time. */
+  sourceAt: number;
   startedAt?: number;
   responseId?: string;
   cancelled?: boolean;
@@ -252,6 +257,29 @@ export function createOutgoingPrefixClient(
       /* diagnostics isolated */
     }
   };
+  const publishConversation = (
+    job: Job,
+    kind: TranscriptEvent['kind'],
+    value: string,
+    final: boolean,
+  ) => {
+    if (closed()) return;
+    try {
+      options.onConversationTranscript?.({
+        id: `local:${kind}:${job.segment.id}:0`,
+        utteranceId: `local:${job.segment.id}:0`,
+        role: 'local',
+        kind,
+        text: value,
+        final,
+        at: job.sourceAt,
+        pairing: 'explicit',
+        boundary: 'semantic',
+      });
+    } catch {
+      // Caption presentation cannot interrupt spoken translation.
+    }
+  };
   const maybeFinish = () => {
     if (
       state !== 'draining' ||
@@ -357,6 +385,12 @@ export function createOutgoingPrefixClient(
       return;
     }
     for (const id of update.invalidatedIds) {
+      const previous =
+        queued.get(id) || (active?.segment.id === id ? active : undefined);
+      if (previous) {
+        publishConversation(previous, 'original', '', true);
+        publishConversation(previous, 'translation', '', true);
+      }
       queued.delete(id);
       if (active?.segment.id === id) {
         active.cancelled = true;
@@ -369,11 +403,14 @@ export function createOutgoingPrefixClient(
         return;
       }
       sequence += 1;
-      queued.set(segment.id, {
+      const job: Job = {
         segment,
         key: `prefix_request_${sequence}`,
         output: '',
-      });
+        sourceAt: now(),
+      };
+      queued.set(segment.id, job);
+      publishConversation(job, 'original', segment.text, false);
       timing(
         'prefix_source_wait_ms',
         now() - segment.firstDeltaAt,
@@ -598,6 +635,7 @@ export function createOutgoingPrefixClient(
       }
       job.output = event.type.endsWith('.delta') ? job.output + value : value;
       if (job.output.length > MAX_TEXT) fail('PREFIX_INVALID_TRANSLATION');
+      else publishConversation(job, 'translation', job.output, false);
       return;
     }
     if (event.type !== 'response.done') return;
@@ -636,6 +674,11 @@ export function createOutgoingPrefixClient(
         return;
       }
       const at = now();
+      const utteranceId = `local:${job.segment.id}:0`;
+      // One verified prefix and its exact translation form one semantic pair.
+      // Splitting a long TTS waveform never duplicates that source.
+      publishConversation(job, 'original', job.segment.text, true);
+      publishConversation(job, 'translation', value, true);
       try {
         segmenter.markCommitted(job.segment.id);
         chunks.forEach((chunk, index) =>
@@ -648,6 +691,8 @@ export function createOutgoingPrefixClient(
             source: job.segment.text,
             firstDeltaAt: job.segment.firstDeltaAt,
             committedAt: at,
+            utteranceId,
+            finalPart: index === chunks.length - 1,
           }),
         );
       } catch {

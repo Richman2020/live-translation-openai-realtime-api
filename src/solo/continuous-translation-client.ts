@@ -12,6 +12,23 @@ export type ContinuousTranslationSessionMetadata = {
   expiresAtEpochSeconds: number;
 };
 
+export type ContinuousTranslationAudioAdmission = {
+  direction: 'input' | 'output';
+  pcmBytes: number;
+  audioMs: number;
+};
+
+/** Transport observations only; neither provider token usage nor a bill. */
+export type ContinuousTranslationTransportUsage =
+  ContinuousTranslationAudioAdmission & {
+    scope: 'transport_observed';
+    billed: false;
+    inputPcmBytes: number;
+    outputPcmBytes: number;
+    inputAudioMs: number;
+    outputAudioMs: number;
+  };
+
 export type ContinuousTranslationOptions = {
   apiKey: string;
   targetLanguage: 'en' | 'zh';
@@ -19,9 +36,20 @@ export type ContinuousTranslationOptions = {
   proxyUrl?: string;
   onAudio: (pcm: Buffer, metadata?: ContinuousTranslationAudioMetadata) => void;
   onSessionMetadata?: (event: ContinuousTranslationSessionMetadata) => void;
+  /** Synchronous, fail-closed gate before input submission or audio delivery. */
+  admitAudio?: (event: ContinuousTranslationAudioAdmission) => boolean;
+  onTransportUsage?: (event: ContinuousTranslationTransportUsage) => void;
   /** Append-only translated text; no provider sentence-final event is implied. */
   onTranslatedText?: (delta: string) => void;
-  onTranscript?: (delta: string) => void;
+  onTranscript?: (
+    delta: string,
+    metadata?: ContinuousTranslationAudioMetadata,
+  ) => void;
+  /** Consume source deltas only if sent; this never enables paid transcription. */
+  onInputTranscript?: (
+    delta: string,
+    metadata?: ContinuousTranslationAudioMetadata,
+  ) => void;
   onError?: (code: string) => void;
   createWebSocket?: (
     url: string,
@@ -41,6 +69,7 @@ const MODEL = 'gpt-realtime-translate';
 const MAX_EVENT_BYTES = 1024 * 1024;
 const MAX_INPUT_BYTES = 48000; // One second of mono PCM16 at 24 kHz.
 const MAX_BUFFERED_BYTES = 256 * 1024;
+const MAX_SESSION_EVENT_IDS = 32768;
 // Diagnostic bounds only: invalid optional metadata never interrupts audio.
 const MAX_ALIGNMENT_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_EXPIRY_SECONDS = 4102444800; // 2100-01-01, a finite Unix timestamp.
@@ -113,7 +142,13 @@ export function createContinuousTranslationClient(
       typeof options.onTranslatedText !== 'function') ||
     (options.onTranscript !== undefined &&
       typeof options.onTranscript !== 'function') ||
+    (options.onInputTranscript !== undefined &&
+      typeof options.onInputTranscript !== 'function') ||
     (options.onError !== undefined && typeof options.onError !== 'function') ||
+    (options.admitAudio !== undefined &&
+      typeof options.admitAudio !== 'function') ||
+    (options.onTransportUsage !== undefined &&
+      typeof options.onTransportUsage !== 'function') ||
     !Number.isFinite(timeoutMs) ||
     timeoutMs < 1 ||
     timeoutMs > 120000
@@ -123,13 +158,18 @@ export function createContinuousTranslationClient(
   const ready = deferred();
   const finished = deferred();
   let state: 'connecting' | 'ready' | 'draining' | 'closed' = 'connecting';
+  const isClosed = () => state === 'closed';
   let configured = false;
   let socket: WebSocket;
   let timer: ReturnType<typeof setTimeout>;
+  let inputPcmBytes = 0;
+  let outputPcmBytes = 0;
   const listeners: [string, (...args: any[]) => void][] = [];
+  const sessionEventIds = new Set<string>();
 
   const cleanup = () => {
     clearTimeout(timer);
+    sessionEventIds.clear();
     if (!socket) return;
     for (const [name, listener] of listeners) socket.off(name, listener);
     listeners.length = 0;
@@ -158,6 +198,54 @@ export function createContinuousTranslationClient(
       } catch {
         // A diagnostic subscriber cannot prevent deterministic cleanup.
       }
+    }
+  };
+
+  const admit = (direction: 'input' | 'output', pcmBytes: number) => {
+    if (state === 'closed') return false;
+    try {
+      if (
+        options.admitAudio &&
+        options.admitAudio({
+          direction,
+          pcmBytes,
+          audioMs: pcmBytes / 48,
+        }) !== true
+      ) {
+        fail('PROVIDER_AUDIO_ADMISSION_DENIED');
+        return false;
+      }
+      return !isClosed();
+    } catch {
+      fail('PROVIDER_AUDIO_ADMISSION_DENIED');
+      return false;
+    }
+  };
+
+  const usage = (direction: 'input' | 'output', pcmBytes: number) => {
+    if (direction === 'input') inputPcmBytes += pcmBytes;
+    else outputPcmBytes += pcmBytes;
+    if (
+      !Number.isSafeInteger(inputPcmBytes) ||
+      !Number.isSafeInteger(outputPcmBytes)
+    ) {
+      fail('PROVIDER_TRANSPORT_USAGE_OVERFLOW');
+      return;
+    }
+    try {
+      options.onTransportUsage?.({
+        direction,
+        pcmBytes,
+        audioMs: pcmBytes / 48,
+        scope: 'transport_observed',
+        billed: false,
+        inputPcmBytes,
+        outputPcmBytes,
+        inputAudioMs: inputPcmBytes / 48,
+        outputAudioMs: outputPcmBytes / 48,
+      });
+    } catch {
+      // Optional accounting observers cannot change transport delivery.
     }
   };
 
@@ -235,6 +323,24 @@ export function createContinuousTranslationClient(
       fail('INVALID_PROVIDER_EVENT');
       return;
     }
+    // Retain exact IDs for this socket's lifetime: evicting an old ID could
+    // replay already-spoken audio. Exhaustion fails closed instead. Alignment
+    // can repeat and is never a key; absent IDs preserve arrival order.
+    if (event.event_id !== undefined) {
+      if (
+        typeof event.event_id !== 'string' ||
+        !/^[a-zA-Z0-9_-]{1,256}$/u.test(event.event_id)
+      ) {
+        fail('INVALID_PROVIDER_EVENT_ID');
+        return;
+      }
+      if (sessionEventIds.has(event.event_id)) return;
+      if (sessionEventIds.size >= MAX_SESSION_EVENT_IDS) {
+        fail('PROVIDER_EVENT_LIMIT');
+        return;
+      }
+      sessionEventIds.add(event.event_id);
+    }
     if (event.type === 'error') {
       fail('PROVIDER_SESSION_REJECTED');
       return;
@@ -277,7 +383,8 @@ export function createContinuousTranslationClient(
     }
     if (
       event.type !== 'session.output_audio.delta' &&
-      event.type !== 'session.output_transcript.delta'
+      event.type !== 'session.output_transcript.delta' &&
+      event.type !== 'session.input_transcript.delta'
     )
       return;
     if (state === 'connecting') {
@@ -304,6 +411,9 @@ export function createContinuousTranslationClient(
         fail('INVALID_PROVIDER_AUDIO');
         return;
       }
+      // Received, validated output is observed even if admission denies replay.
+      usage('output', pcm.length);
+      if (!admit('output', pcm.length)) return;
       try {
         const elapsed = event.elapsed_ms;
         options.onAudio(pcm, {
@@ -319,6 +429,22 @@ export function createContinuousTranslationClient(
     } else if (typeof event.delta !== 'string') {
       fail('INVALID_PROVIDER_TRANSCRIPT');
     } else {
+      const elapsed = event.elapsed_ms;
+      const metadata: ContinuousTranslationAudioMetadata = {
+        ...(Number.isSafeInteger(elapsed) &&
+        elapsed >= 0 &&
+        elapsed <= MAX_ALIGNMENT_MS
+          ? { providerElapsedMs: elapsed }
+          : {}),
+      };
+      if (event.type === 'session.input_transcript.delta') {
+        try {
+          options.onInputTranscript?.(event.delta, metadata);
+        } catch {
+          // Optional source text never gates native speech or target text.
+        }
+        return;
+      }
       try {
         options.onTranslatedText?.(event.delta);
       } catch {
@@ -328,7 +454,7 @@ export function createContinuousTranslationClient(
       // A required text consumer can abort the client while handling a delta.
       if (state !== 'ready' && state !== 'draining') return;
       try {
-        options.onTranscript?.(event.delta);
+        options.onTranscript?.(event.delta, metadata);
       } catch {
         // Captions are optional diagnostics and cannot interrupt spoken output.
       }
@@ -381,6 +507,8 @@ export function createContinuousTranslationClient(
         pcm.length > MAX_INPUT_BYTES
       )
         throw new Error('INVALID_PCM_INPUT');
+      if (!admit('input', pcm.length))
+        throw new Error('PROVIDER_AUDIO_ADMISSION_DENIED');
       if (
         !send({
           type: 'session.input_audio_buffer.append',
@@ -388,6 +516,8 @@ export function createContinuousTranslationClient(
         })
       )
         throw new Error('PROVIDER_SEND_FAILED');
+      // Accepted by the local WebSocket sender; not proof of server receipt.
+      usage('input', pcm.length);
     },
     finish() {
       if (state === 'connecting') fail('CLIENT_NOT_READY');
