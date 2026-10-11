@@ -33,6 +33,9 @@ export function startWebVerification() {
   let operation = null;
   let disposed = false;
   let activity = null;
+  let logoutRequested = false;
+  let pendingLogoutCsrf = '';
+  let logoutNeedsReload = false;
   const pending = () => Boolean(operation);
   const messages = {
     checking: ['正在检查登录', '请稍候，正在读取会话状态。', dailyWorkbench ? '正在检查工作台服务。' : '正在检查网页验收服务。'],
@@ -58,19 +61,19 @@ export function startWebVerification() {
     text('app-error', state.error); $('app-error').hidden = !state.error;
     text('verification-message', state.message);
     $('google-login').hidden = state.authenticated || state.phase === 'logging-out';
-    $('google-login').disabled = pending() || !state.loginAvailable || navigator.onLine === false;
-    $('google-logout').hidden = !state.authenticated && state.phase !== 'logging-out';
-    $('google-logout').disabled = (pending() && operation?.kind !== 'activity-renew') || !state.authenticated;
+    $('google-login').disabled = pending() || Boolean(pendingLogoutCsrf) || !state.loginAvailable || navigator.onLine === false;
+    $('google-logout').hidden = !state.authenticated && state.phase !== 'logging-out' && !pendingLogoutCsrf;
+    $('google-logout').disabled = logoutNeedsReload || (pending() && (!dailyWorkbench || operation?.kind === 'logout')) || (!state.authenticated && !pendingLogoutCsrf);
     $('google-login-cancel').hidden = operation?.kind !== 'login' && state.phase !== 'cancelling';
     $('google-login-cancel').disabled = state.phase === 'cancelling';
-    $('renew-session').hidden = !state.authenticated;
+    $('renew-session').hidden = dailyWorkbench || !state.authenticated;
     $('renew-session').disabled = pending() || !state.csrfToken || navigator.onLine === false;
     $('refresh-status').disabled = pending() || !validMode;
     text('session-expiry', state.authenticated
-      ? `当前有效期剩余约 ${Math.max(0, Math.ceil((state.expiresAt - Date.now()) / 60000))} 分钟。`
+      ? (dailyWorkbench ? '页面打开期间每分钟续期；关最后页会尝试退出。通知未送达或失联30分钟后失效。' : `当前有效期剩余约 ${Math.max(0, Math.ceil((state.expiresAt - Date.now()) / 60000))} 分钟。`)
       : '尚未确认有效的登录会话。');
     activity?.updateSession({ authenticated: state.authenticated, expiresAt: state.expiresAt,
-      paused: Boolean(operation && operation.kind !== 'activity-renew') });
+      paused: Boolean(operation && operation.kind !== 'activity-renew' && operation.kind !== 'page-renew') });
     publishPublicState(state);
   }
   function begin(kind, phase) {
@@ -99,7 +102,7 @@ export function startWebVerification() {
     state.message = '登录已失效，电话功能保持关闭。'; render();
   }
   function activityExpired(current) {
-    if (current.kind !== 'activity-renew') return false;
+    if (current.kind !== 'activity-renew' && current.kind !== 'page-renew') return false;
     if (Date.now() >= current.activityExpiresAt) { expired(); return true; }
     return current.activitySignal.aborted;
   }
@@ -107,7 +110,7 @@ export function startWebVerification() {
     const status = await request('/api/status', current);
     if (!currentOperation(current) || activityExpired(current)) return false;
     if (status.status === 401) {
-      if (current.kind === 'activity-renew') expired(); else { clearSession(); state.phase = 'signed-out'; }
+      if (current.kind === 'activity-renew' || current.kind === 'page-renew') expired(); else { clearSession(); state.phase = 'signed-out'; }
       return false;
     }
     const value = status.value;
@@ -129,10 +132,12 @@ export function startWebVerification() {
     return true;
   }
   async function refresh() {
+    if (logoutNeedsReload) return;
+    if (dailyWorkbench && logoutRequested) { if (pendingLogoutCsrf) await sessionAction('logout'); return; }
     const previouslyAuthenticated = state.authenticated || state.phase === 'expired';
     const current = begin('refresh', 'checking');
     if (!current) return;
-    clearSession(); state.message = '电话功能保持关闭。'; render();
+    if (!dailyWorkbench) clearSession(); state.message = '电话功能保持关闭。'; render();
     try {
       const auth = await request('/auth/status', current);
       if (!currentOperation(current)) return;
@@ -142,8 +147,9 @@ export function startWebVerification() {
       if (currentOperation(current) && !authenticated && previouslyAuthenticated) state.phase = 'expired';
     } catch {
       if (currentOperation(current)) {
-        clearSession(); state.phase = navigator.onLine === false ? 'offline' : 'unavailable';
-        state.error = '网页登录状态未能确认，请检查连接并刷新状态。';
+        if (!dailyWorkbench || Date.now() >= state.expiresAt) clearSession();
+        state.phase = navigator.onLine === false ? 'offline' : 'unavailable';
+        state.error = '暂时无法连接；仅保留上次确认的登录期限，将自动重试。';
       }
     } finally {
       if (currentOperation(current)) document.documentElement.dataset.webVerificationReady = 'true';
@@ -151,7 +157,8 @@ export function startWebVerification() {
     }
   }
   async function login() {
-    if (!state.loginAvailable || state.authenticated || navigator.onLine === false) return;
+    if (!state.loginAvailable || state.authenticated || pendingLogoutCsrf || navigator.onLine === false) return;
+    logoutRequested = false;
     const current = begin('login', 'login-pending');
     if (!current) return;
     let navigating = false;
@@ -190,15 +197,17 @@ export function startWebVerification() {
     } finally { finish(current); }
   }
   async function sessionAction(kind, activityOptions = null) {
-    if (!state.authenticated || !state.csrfToken || navigator.onLine === false) return;
+    if (logoutNeedsReload) return;
+    if ((!state.authenticated || !state.csrfToken) && !(dailyWorkbench && kind === 'logout' && pendingLogoutCsrf)) return;
+    if (navigator.onLine === false && !(dailyWorkbench && kind === 'logout')) return;
     // Explicit logout must remain usable during a background renewal. Retire
     // that generation before sending logout, so a late success cannot revive it.
-    if (kind === 'logout' && operation?.kind === 'activity-renew') {
+    if (kind === 'logout' && (operation?.kind === 'activity-renew' || (dailyWorkbench && operation))) {
       generation += 1; operation.controller.abort(); clearTimeout(operation.timeout); operation = null;
     }
     if (activityOptions?.signal.aborted) return;
-    if (Date.now() >= state.expiresAt) { expired(); return; }
-    const csrfToken = state.csrfToken;
+    if (!pendingLogoutCsrf && Date.now() >= state.expiresAt) { expired(); return; }
+    const csrfToken = pendingLogoutCsrf || state.csrfToken;
     const originalExpiresAt = state.expiresAt;
     const automatic = Boolean(activityOptions);
     const current = begin(automatic ? 'activity-renew' : kind,
@@ -208,14 +217,22 @@ export function startWebVerification() {
     current.activitySignal = activityOptions?.signal;
     const abortActivity = () => current.controller.abort();
     activityOptions?.signal.addEventListener('abort', abortActivity, { once: true });
-    if (kind === 'logout') { clearSession(); render(); }
+    if (kind === 'logout') { logoutRequested = true; if (dailyWorkbench) pendingLogoutCsrf = csrfToken; clearSession(); render(); }
     try {
       const response = await request(kind === 'logout' ? '/auth/logout' : '/auth/session/renew', current,
         { 'x-phone-csrf': csrfToken });
       if (!currentOperation(current) || activityExpired(current)) return;
-      if (response.status === 401) { expired(); return; }
+      if (response.status === 401) { pendingLogoutCsrf = ''; expired(); return; }
+      if (dailyWorkbench && kind === 'logout' && response.status === 403) {
+        // A different tab may have deliberately replaced the shared cookie.
+        // Never fetch fresh CSRF to silently log that newer session out.
+        logoutNeedsReload = true; clearSession(); state.phase = 'unavailable';
+        state.error = '退出未确认，登录可能已在其它页面更新；点击刷新状态重新核验。';
+        state.message = '本页已停止保持登录，服务端退出未确认。';
+        return;
+      }
       if (!response.ok || response.value?.ok !== true) throw new Error('Session change unconfirmed');
-      if (kind === 'logout') { clearSession(); state.phase = 'signed-out'; state.message = '已退出登录。电话功能保持关闭。'; }
+      if (kind === 'logout') { pendingLogoutCsrf = ''; clearSession(); state.phase = 'signed-out'; state.message = '已退出登录。电话功能保持关闭。'; }
       else { await readSession(current); if (currentOperation(current) && state.authenticated) state.message = '登录会话已延长。电话功能保持关闭。'; }
     } catch {
       if (currentOperation(current)) {
@@ -224,7 +241,7 @@ export function startWebVerification() {
           state.phase = 'authenticated'; // Keep only the previously confirmed deadline on hide/cancel.
         } else {
           clearSession(); state.phase = navigator.onLine === false ? 'offline' : 'unavailable';
-          state.error = kind === 'logout' ? '退出登录尚未确认，请刷新状态后检查。' : '会话延长尚未确认，请刷新状态后检查。';
+          state.error = kind === 'logout' ? '本页已退出，服务端退出尚未确认；恢复联网后优先重试退出。' : '会话延长尚未确认，请刷新状态后检查。';
         }
       }
     } finally {
@@ -232,27 +249,64 @@ export function startWebVerification() {
       finish(current);
     }
   }
-  // Only the explicitly approved daily workbench loads activity renewal. The
-  // legacy verification surface keeps its fixed asset set and manual behavior.
+  async function pageRenew(options) {
+    if (disposed || logoutRequested || !state.authenticated || !state.csrfToken || options.signal.aborted) return;
+    if (Date.now() >= state.expiresAt) { expired(); return; }
+    if (navigator.onLine === false) return;
+    const current = begin('page-renew', state.phase === 'offline' ? 'offline' : 'authenticated');
+    if (!current) return;
+    current.activityExpiresAt = state.expiresAt;
+    current.activitySignal = options.signal;
+    const abort = () => current.controller.abort();
+    options.signal.addEventListener('abort', abort, { once: true });
+    try {
+      if (options.resume && !await readSession(current)) return;
+      if (!currentOperation(current) || activityExpired(current)) return;
+      const response = await fetch('/auth/session/page', {
+        method: 'POST', credentials: 'same-origin', cache: 'no-store', signal: current.controller.signal,
+        headers: { 'content-type': 'application/json', 'x-phone-csrf': state.csrfToken },
+        body: JSON.stringify({ pageId: options.pageId, sequence: options.sequence, state: 'open' }),
+      });
+      const value = await response.json();
+      if (!currentOperation(current) || activityExpired(current)) return;
+      if (response.status === 401) { expired(); return; }
+      if (response.status === 409 && value?.error === 'PAGE_LEASE_RETIRED') {
+        if (await readSession(current) && currentOperation(current) && !activityExpired(current))
+          return { retired: true };
+        return;
+      }
+      if (!response.ok || value?.ok !== true || !Number.isSafeInteger(value.expiresAt) || value.expiresAt <= Date.now())
+        throw new Error('Page lease unconfirmed');
+      state.expiresAt = value.expiresAt; state.phase = 'authenticated'; state.error = '';
+      state.message = '页面保持登录，电话功能仍关闭。';
+    } catch {
+      if (currentOperation(current) && !options.signal.aborted) {
+        if (Date.now() >= state.expiresAt) expired();
+        else { state.phase = navigator.onLine === false ? 'offline' : 'unavailable';
+          state.error = '暂时无法续期；保留已确认登录期限，恢复连接后自动重试。'; }
+      }
+    } finally { options.signal.removeEventListener('abort', abort); finish(current); }
+  }
+  // Only the daily surface loads page leases. Legacy verification stays manual.
   if (dailyWorkbench) {
-    import('./session-activity.js').then(({ createSessionActivity }) => {
+    import('./session-page-lease.js').then(({ createSessionPageLease }) => {
       if (disposed) return;
-      activity = createSessionActivity({ eventSource: document, lifecycleSource: window,
-        isForeground: () => !document.hidden && document.hasFocus(),
-        acceptEvent: event => !event.target?.closest?.('#google-login, #google-login-cancel, #google-logout, #renew-session, #refresh-status'),
-        renew: options => sessionAction('renew', options) });
-      activity.updateSession({ authenticated: state.authenticated, expiresAt: state.expiresAt,
-        paused: Boolean(operation && operation.kind !== 'activity-renew') });
-    }).catch(() => {
-      if (disposed) return;
-      state.error = '自动保持登录未能加载，可在账号菜单手动延长会话。'; render();
-    });
+      activity = createSessionPageLease({ eventSource: window, renew: pageRenew, onExpire: expired,
+        close: fields => {
+          if (!state.csrfToken || logoutRequested) return;
+          return fetch('/auth/session/page', { method: 'POST', credentials: 'same-origin', cache: 'no-store', keepalive: true,
+            headers: { 'content-type': 'application/json', 'x-phone-csrf': state.csrfToken }, body: JSON.stringify(fields) });
+        } });
+      render();
+    }).catch(() => { if (!disposed) { state.error = '自动保持登录未能加载，请刷新页面。'; render(); } });
   }
   $('google-login').addEventListener('click', login);
   $('google-login-cancel').addEventListener('click', cancelLogin);
   $('google-logout').addEventListener('click', () => sessionAction('logout'));
   $('renew-session').addEventListener('click', () => sessionAction('renew'));
-  $('refresh-status').addEventListener('click', refresh);
+  $('refresh-status').addEventListener('click', () => {
+    if (logoutNeedsReload) window.location.reload(); else void refresh();
+  });
   const clock = setInterval(() => {
     if (disposed) return;
     if (state.authenticated && Date.now() >= state.expiresAt) {
@@ -260,13 +314,22 @@ export function startWebVerification() {
     } else render();
   }, 1000);
   const offline = () => {
+    if (logoutNeedsReload) return;
     generation += 1; operation?.controller.abort(); clearTimeout(operation?.timeout); operation = null;
-    clearSession(); state.phase = 'offline'; state.error = '';
+    if (!dailyWorkbench || Date.now() >= state.expiresAt) clearSession();
+    state.phase = 'offline'; state.error = '';
     state.message = '网络离线，登录状态待确认；电话功能保持关闭。'; render();
   };
   window.addEventListener('offline', offline);
-  window.addEventListener('online', refresh);
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
+  function resumePage() {
+    if (disposed || logoutNeedsReload) return;
+    if (pendingLogoutCsrf) { void sessionAction('logout'); return; }
+    if (dailyWorkbench && state.authenticated && Date.now() >= state.expiresAt) expired();
+    if (!dailyWorkbench || !state.authenticated) void refresh();
+    else activity?.resume();
+  }
+  window.addEventListener('online', resumePage);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) resumePage(); });
   window.addEventListener('pagehide', () => {
     activity?.dispose();
     generation += 1; disposed = true; operation?.controller.abort(); clearTimeout(operation?.timeout);
@@ -275,7 +338,7 @@ export function startWebVerification() {
     document.documentElement.dataset.webVerificationReady = 'false';
     publishPublicState({ phase: 'disposed', authenticated: false, expiresAt: 0 });
   });
-  window.addEventListener('pageshow', event => { if (event.persisted && disposed) window.location.reload(); });
+  window.addEventListener('pageshow', event => { if (event.persisted && disposed) window.location.reload(); else if (dailyWorkbench) resumePage(); });
   if (!validMode) {
     state.phase = 'unavailable'; state.error = '页面模式未能确认，请重新打开工作台。';
     document.documentElement.dataset.webVerificationReady = 'true'; render();

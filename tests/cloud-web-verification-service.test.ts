@@ -177,13 +177,14 @@ async function fixture(
     url: string,
     headers: Record<string, string> = readHeaders(),
     method: 'GET' | 'POST' | 'HEAD' = 'GET',
+    payload: Record<string, unknown> = {},
   ) =>
     service.app.inject({
       method,
       url,
       headers,
       remoteAddress: '127.0.0.1',
-      ...(method === 'POST' ? { payload: {} } : {}),
+      ...(method === 'POST' ? { payload } : {}),
     });
   const start = async (cookie?: string) => {
     const result = await inject(
@@ -298,7 +299,7 @@ test('continuous workbench stays available beyond one hour and reports its actua
   const account = await f.signIn();
   assert.equal(
     account.expiresAt,
-    initialTime + 2 * 60 * 60 * 1000 + 15 * 60 * 1000,
+    initialTime + 2 * 60 * 60 * 1000 + 30 * 60 * 1000,
   );
   assert.deepEqual(
     (await f.inject('/api/status', readHeaders(account.cookie))).json(),
@@ -338,7 +339,7 @@ test('daily workbench serves its actual dial, local devices and conversation sur
     ['/controlled', 'web-workbench.html', 'text/html'],
     ['/web-verification.js', 'web-verification.js', 'text/javascript'],
     ['/web-workbench.js', 'web-workbench.js', 'text/javascript'],
-    ['/session-activity.js', 'session-activity.js', 'text/javascript'],
+    ['/session-page-lease.js', 'session-page-lease.js', 'text/javascript'],
     ['/microphone-input.js', 'microphone-input.js', 'text/javascript'],
     ['/audio-output.js', 'audio-output.js', 'text/javascript'],
     ['/conversation-model.js', 'conversation-model.js', 'text/javascript'],
@@ -396,7 +397,7 @@ test('workbench-only assets stay closed in verification and reject alternate pat
   assert.doesNotMatch(trialPage.body, /src="\/web-workbench\.js"/);
   for (const path of [
     '/web-workbench.js',
-    '/session-activity.js',
+    '/session-page-lease.js',
     '/microphone-input.js',
     '/audio-output.js',
     '/conversation-model.js',
@@ -437,6 +438,7 @@ test('workbench-only assets stay closed in verification and reject alternate pat
     );
   }
   for (const path of [
+    '/session-activity.js',
     '/app.js',
     '/controller-client.js',
     '/controlled-workbench.js',
@@ -465,39 +467,128 @@ test('workbench-only assets stay closed in verification and reject alternate pat
   assert.equal(trial.fetches() + daily.fetches(), 0);
 });
 
-test('workbench preserves idle and absolute session expiry without passive renewal', async (t) => {
+test('daily page heartbeats survive inactivity and eight hours but lost pages expire after thirty minutes', async (t) => {
   const f = await fixture(t, undefined, 'web-workbench');
-  const idleAccount = await f.signIn();
-  f.advance(14 * 60 * 1000);
+  const account = await f.signIn();
+  const pageId = 'A'.repeat(43);
+  for (let sequence = 1; sequence <= 33; sequence++) {
+    f.advance(16 * 60 * 1000);
+    const heartbeat = await f.inject(
+      '/auth/session/page',
+      writeHeaders(account.cookie, account.csrf),
+      'POST',
+      { pageId, sequence, state: 'open' },
+    );
+    assert.equal(heartbeat.statusCode, 200, heartbeat.body);
+    assert.equal(
+      heartbeat.json().expiresAt,
+      initialTime + sequence * 16 * 60 * 1000 + 30 * 60 * 1000,
+    );
+  }
   assert.equal(
-    (await f.inject('/api/status', readHeaders(idleAccount.cookie))).statusCode,
+    (await f.inject('/api/status', readHeaders(account.cookie))).statusCode,
+    200,
+  );
+  f.advance(29 * 60 * 1000);
+  assert.equal(
+    (await f.inject('/api/status', readHeaders(account.cookie))).statusCode,
     200,
   );
   f.advance(60 * 1000);
   assert.equal(
-    (await f.inject('/api/status', readHeaders(idleAccount.cookie))).statusCode,
+    (await f.inject('/api/status', readHeaders(account.cookie))).statusCode,
     401,
   );
+  assert.equal(
+    (
+      await f.inject(
+        '/auth/session/page',
+        writeHeaders(account.cookie, account.csrf),
+        'POST',
+        { pageId, sequence: 34, state: 'open' },
+      )
+    ).statusCode,
+    401,
+  );
+  assert.equal((await f.inject('/api/health')).statusCode, 200);
+});
+
+test('daily pages isolate tab close, reload grace and stale heartbeat resurrection', async (t) => {
+  const f = await fixture(t, undefined, 'web-workbench');
   const account = await f.signIn();
-  const signedInAt = initialTime + 15 * 60 * 1000;
-  for (let elapsed = 10; elapsed <= 470; elapsed += 10) {
-    f.advance(10 * 60 * 1000);
-    const renewed = await f.inject(
-      '/auth/session/renew',
+  const update = (pageId: string, sequence: number, state: string) =>
+    f.inject(
+      '/auth/session/page',
       writeHeaders(account.cookie, account.csrf),
       'POST',
+      { pageId: pageId.repeat(42) + 'A', sequence, state },
     );
-    assert.equal(renewed.statusCode, 200, renewed.body);
-  }
-  const lastRead = await f.inject(
-    '/api/browser-session',
-    readHeaders(account.cookie),
+  assert.equal((await update('A', 1, 'open')).statusCode, 200);
+  assert.equal((await update('B', 1, 'open')).statusCode, 200);
+  assert.equal((await update('A', 2, 'close')).statusCode, 200);
+  f.advance(31_000);
+  assert.equal(
+    (await f.inject('/api/status', readHeaders(account.cookie))).statusCode,
+    200,
   );
-  assert.equal(lastRead.json().expiresAt, signedInAt + 8 * 60 * 60 * 1000);
-  f.advance(10 * 60 * 1000);
+  await update('B', 2, 'close');
+  f.advance(20_000);
+  assert.equal((await update('C', 1, 'open')).statusCode, 200);
+  f.advance(11_000);
+  assert.equal(
+    (await f.inject('/api/status', readHeaders(account.cookie))).statusCode,
+    200,
+  );
+  await update('C', 2, 'close');
+  f.advance(20_000);
+  assert.equal((await update('C', 3, 'open')).statusCode, 409);
+  assert.equal((await update('B', 1, 'open')).statusCode, 409);
+  f.advance(10_000);
   assert.equal(
     (await f.inject('/api/status', readHeaders(account.cookie))).statusCode,
     401,
+  );
+});
+
+test('daily page writes enforce CSRF and Origin and logout rejects delayed heartbeats', async (t) => {
+  const f = await fixture(t, undefined, 'web-workbench');
+  const account = await f.signIn();
+  const payload = { pageId: 'A'.repeat(43), sequence: 1, state: 'open' };
+  assert.equal(
+    (
+      await f.inject(
+        '/auth/session/page',
+        writeHeaders(account.cookie),
+        'POST',
+        payload,
+      )
+    ).statusCode,
+    403,
+  );
+  assert.equal(
+    (
+      await f.inject(
+        '/auth/session/page',
+        {
+          ...writeHeaders(account.cookie, account.csrf),
+          origin: 'https://other.example.test',
+        },
+        'POST',
+        payload,
+      )
+    ).statusCode,
+    403,
+  );
+  assert.equal(
+    (
+      await f.inject(
+        '/auth/session/page',
+        writeHeaders(account.cookie, account.csrf),
+        'POST',
+        payload,
+      )
+    ).statusCode,
+    200,
   );
   assert.equal(
     (
@@ -507,9 +598,33 @@ test('workbench preserves idle and absolute session expiry without passive renew
         'POST',
       )
     ).statusCode,
+    403,
+  );
+  assert.equal(
+    (
+      await f.inject(
+        '/auth/logout',
+        writeHeaders(account.cookie, account.csrf),
+        'POST',
+      )
+    ).statusCode,
+    200,
+  );
+  assert.equal(
+    (
+      await f.inject(
+        '/auth/session/page',
+        writeHeaders(account.cookie, account.csrf),
+        'POST',
+        { ...payload, sequence: 2 },
+      )
+    ).statusCode,
     401,
   );
-  assert.equal((await f.inject('/api/health')).statusCode, 200);
+  assert.equal(
+    (await f.inject('/api/status', readHeaders(account.cookie))).statusCode,
+    401,
+  );
 });
 
 test('workbench logout revokes a pending re-login and prevents its late cookie commit', async (t) => {
@@ -614,6 +729,7 @@ test('workbench rejects phone HTTP and every WS through the same exact ingress a
     '/voice/connect',
     '/voice/status',
     '/voice/media',
+    '/session-activity.js',
     '/app.js',
     '/vendor/twilio.min.js',
   ]) {
@@ -759,6 +875,7 @@ test('real login routes validate offline signed Google identity; session reads n
     '/voice/connect',
     '/voice/media',
     '/vendor/twilio.min.js',
+    '/session-activity.js',
     '/app.js',
   ]) {
     const denied = await f.inject(
@@ -1133,6 +1250,7 @@ test('web ingress forwards only exact web routes and denies all upgrades before 
     '/api/token',
     '/voice/client',
     '/voice/media',
+    '/session-activity.js',
     '/app.js',
     '/vendor/twilio.min.js',
     '/api/status?ownerId=forged',

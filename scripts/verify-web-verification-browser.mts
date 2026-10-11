@@ -72,6 +72,8 @@ const callbackHeaders: {
   sessionCookiePresent: boolean;
 }[] = [];
 const callbackStatuses: number[] = [];
+const pageLeaseStatuses: number[] = [];
+const logoutStatuses: number[] = [];
 const authWrites: {
   path: string;
   originMatches: boolean;
@@ -224,6 +226,7 @@ const fakeProviderFetch: typeof fetch = async (input, init) => {
 };
 
 class CdpPage {
+  blockLogoutRequests = false;
   socket: WebSocket;
   nextId = 0;
   pending = new Map<
@@ -304,8 +307,17 @@ class CdpPage {
       source: `
       window.__webVerificationProbe={microphones:0,devices:0,webSockets:0};
       const probe=window.__webVerificationProbe;
-      window.__fixtureClockOffset=0;
+      window.__fixtureClockOffset=${clockOffset};
       if(${JSON.stringify(browserMode)}==='web-workbench'){const nativeNow=Date.now.bind(Date);Date.now=()=>nativeNow()+window.__fixtureClockOffset;}
+      if(${JSON.stringify(browserMode)}==='web-workbench'){
+        const nativeSet=window.setTimeout.bind(window),nativeClear=window.clearTimeout.bind(window);
+        const nativeFetch=window.fetch.bind(window);window.__pageLeaseWrites=[];
+        window.fetch=(input,options)=>{if(input==='/auth/session/page'&&options?.body){const body=JSON.parse(options.body);window.__pageLeaseWrites.push({pageId:body.pageId,state:body.state});}return nativeFetch(input,options);};
+        const timers=new Map();
+        window.setTimeout=(callback,delay,...args)=>{const id=nativeSet(()=>{timers.delete(id);callback(...args)},delay);if(delay>=50000&&delay<=60000)timers.set(id,()=>callback(...args));return id;};
+        window.clearTimeout=id=>{timers.delete(id);nativeClear(id)};
+        window.__pulsePageHeartbeat=()=>{const pending=[...timers];for(const [id,callback] of pending){timers.delete(id);nativeClear(id);callback();}return pending.length;};
+      }
       window.__workbenchMediaProbe={streams:[],rejectNext:false,deferNext:false,pendingReady:false,releasePending:null};
       if(navigator.mediaDevices){
         const nativeGetUserMedia=navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
@@ -334,6 +346,17 @@ class CdpPage {
   }
   async intercept(event: any) {
     const url = new URL(event.request.url);
+    if (
+      this.blockLogoutRequests &&
+      url.origin === origin &&
+      url.pathname === '/auth/logout'
+    ) {
+      await this.send('Fetch.failRequest', {
+        requestId: event.requestId,
+        errorReason: 'ConnectionClosed',
+      });
+      return;
+    }
     if (
       url.origin === origin ||
       url.protocol === 'data:' ||
@@ -523,6 +546,9 @@ const proxy = https.createServer((request, response) => {
     (stream) => {
       if (path === '/auth/google/callback')
         callbackStatuses.push(stream.statusCode!);
+      if (path === '/auth/logout') logoutStatuses.push(stream.statusCode!);
+      if (path === '/auth/session/page')
+        pageLeaseStatuses.push(stream.statusCode!);
       response.writeHead(stream.statusCode!, stream.headers);
       stream.pipe(response);
       response.once('close', () => stream.destroy());
@@ -932,46 +958,47 @@ try {
       12,
       'actual local dialpad includes all twelve keys',
     );
-    await page.evaluate(`document.getElementById('phone-number').focus()`);
-    const activityRenewalsBefore = authWrites.filter(
-      (item) => item.path === '/auth/session/renew',
-    ).length;
-    await page.send('Input.insertText', { text: '+12025550123' });
     await eventually(
-      () =>
-        authWrites.filter((item) => item.path === '/auth/session/renew')
-          .length > activityRenewalsBefore,
-      'Actual user input renews the current idle session',
+      () => authWrites.some((item) => item.path === '/auth/session/page'),
+      'Initial authenticated page lease',
     );
-    const initialIdleExpiry = await page.evaluate(
+    const initialExpiry = await page.evaluate(
       `fetch('/api/browser-session').then(r=>r.json()).then(v=>v.expiresAt)`,
     );
-    const activeRenewalsBefore = authWrites.filter(
-      (item) => item.path === '/auth/session/renew',
-    ).length;
-    clockOffset += 14 * 60 * 1000;
-    await page.evaluate(`window.__fixtureClockOffset=${clockOffset}`);
-    await page.trustedClick('refresh-microphones');
-    await eventually(
-      () =>
-        authWrites.filter((item) => item.path === '/auth/session/renew')
-          .length > activeRenewalsBefore,
-      'Later foreground action sends an automatic authenticated renewal',
+    // Accelerate only the page heartbeat timer while preserving real browser HTTP.
+    // Hidden visibility never requires a trusted input or foreground gesture.
+    await page.evaluate(
+      `Object.defineProperty(document,'visibilityState',{configurable:true,get:()=> 'hidden'});Object.defineProperty(document,'hidden',{configurable:true,get:()=>true});document.dispatchEvent(new Event('visibilitychange'));`,
     );
-    await eventually(
-      () =>
-        page.evaluate(
-          `import('/web-verification.js').then(m=>{let value;const off=m.observeWebVerificationState(v=>value=v);off();return value?.expiresAt>${initialIdleExpiry};})`,
-        ),
-      'Only confirmed server renewal publishes a later idle deadline',
-    );
-    clockOffset += 2 * 60 * 1000;
-    await page.evaluate(`window.__fixtureClockOffset=${clockOffset}`);
+    for (let cycle = 0; cycle < 33; cycle++) {
+      clockOffset += 16 * 60 * 1000;
+      await page.evaluate(`window.__fixtureClockOffset=${clockOffset}`);
+      await eventually(
+        () => page.evaluate(`window.__pulsePageHeartbeat()>0`),
+        'Scheduled background heartbeat',
+      );
+      await eventually(
+        () =>
+          page.evaluate(
+            `fetch('/api/browser-session').then(r=>r.json()).then(v=>v.expiresAt>${initialExpiry + (cycle + 1) * 16 * 60 * 1000 - 1000})`,
+          ),
+        'Server confirms rolling page lease',
+      );
+    }
     check(
       await page.evaluate(`fetch('/api/status').then(r=>r.status)`),
       200,
-      'Actual user activity preserves authenticated access past the initial fifteen-minute deadline',
+      'Scheduled background heartbeats preserve login without input beyond fifteen minutes and eight hours',
     );
+    check(
+      authWrites.filter((item) => item.path === '/auth/session/renew').length,
+      0,
+      'Daily lease never invokes legacy manual renewal',
+    );
+    await page.evaluate(
+      `delete document.visibilityState;delete document.hidden;document.getElementById('phone-number').focus()`,
+    );
+    await page.send('Input.insertText', { text: '+12025550123' });
     check(
       await page.evaluate(`document.getElementById('phone-number').value`),
       '+12025550123',
@@ -1223,14 +1250,22 @@ try {
   const renewBefore = authWrites.filter(
     (item) => item.path === '/auth/session/renew',
   ).length;
-  await page.click('renew-session');
-  await eventually(
-    () =>
-      authWrites.filter((item) => item.path === '/auth/session/renew')
-        .length ===
-      renewBefore + 1,
-    'Explicit login session renewal',
-  );
+  if (browserMode === 'web-verification') {
+    await page.click('renew-session');
+    await eventually(
+      () =>
+        authWrites.filter((item) => item.path === '/auth/session/renew')
+          .length ===
+        renewBefore + 1,
+      'Explicit legacy login session renewal',
+    );
+  } else {
+    check(
+      await page.evaluate(`document.getElementById('renew-session').hidden`),
+      true,
+      'Daily workbench needs no manual session renewal',
+    );
+  }
   check(
     (await page.state()).callsDisabled,
     true,
@@ -1245,8 +1280,8 @@ try {
   );
   check(
     (await page.state()).authenticated,
-    false,
-    'a failed read is displayed as unconfirmed rather than authenticated',
+    browserMode === 'web-workbench',
+    'failed read preserves only the daily confirmed finite page lease',
   );
   check(
     (await page.state()).callsDisabled,
@@ -1261,7 +1296,7 @@ try {
   );
   check(
     authWrites.filter((item) => item.path === '/auth/session/renew').length,
-    renewBefore + 1,
+    renewBefore + (browserMode === 'web-verification' ? 1 : 0),
     'read reconnect never renews the authenticated session',
   );
   const logoutBefore = authWrites.filter(
@@ -1301,6 +1336,24 @@ try {
     401,
     'revoked old credential cannot read private status',
   );
+  if (browserMode === 'web-workbench') {
+    const lateHeartbeat = await service.app.inject({
+      method: 'POST',
+      url: '/auth/session/page',
+      headers: {
+        host: new URL(origin).host,
+        origin,
+        cookie: `${CLOUD_SESSION_COOKIE}=${session.value}`,
+        'x-phone-csrf': bootstrap.csrfToken,
+      },
+      payload: { pageId: 'A'.repeat(43), sequence: 999, state: 'open' },
+    });
+    check(
+      lateHeartbeat.statusCode,
+      401,
+      'Logout rejects a delayed page heartbeat with the revoked cookie',
+    );
+  }
   await page.send('Page.reload');
   await eventually(
     async () =>
@@ -1405,11 +1458,208 @@ try {
       (await page.state()).authenticated,
     'Second valid login',
   );
-  clockOffset += 16 * 60 * 1000;
+  if (browserMode === 'web-workbench') {
+    const secondTarget = await (
+      await fetch(`http://127.0.0.1:${port}/json/new?about:blank`, {
+        method: 'PUT',
+      })
+    ).json();
+    const secondPage = new CdpPage(secondTarget.webSocketDebuggerUrl);
+    clients.push(secondPage);
+    await secondPage.ready();
+    await secondPage.send('Page.navigate', { url: `${origin}/controlled` });
+    await eventually(
+      async () => (await secondPage.state()).authenticated,
+      'Second physical page shares authenticated session',
+    );
+    await eventually(
+      () => secondPage.evaluate(`window.__pulsePageHeartbeat()>0`),
+      'Second page lease registered',
+    );
+    // A cannot deliver logout while offline. B deliberately replaces the shared
+    // session through real logout/login, so A's retained CSRF is now obsolete.
+    page.blockLogoutRequests = true;
+    await page.evaluate(
+      `Object.defineProperty(navigator,'onLine',{configurable:true,get:()=>false});window.dispatchEvent(new Event('offline'));`,
+    );
+    await page.click('google-logout');
+    await eventually(
+      async () =>
+        !(await page.state()).authenticated &&
+        (await page.state()).phase === 'offline',
+      'Offline logout clears A locally but remains unconfirmed',
+    );
+    await secondPage.click('google-logout');
+    await eventually(
+      async () => (await secondPage.state()).loginVisible,
+      'B explicitly signs out before replacing shared session',
+    );
+    await secondPage.click('google-login');
+    await eventually(
+      async () => (await secondPage.state()).authenticated,
+      'B completes a new intercepted Google login',
+    );
+    const logoutStart = logoutStatuses.length;
+    page.blockLogoutRequests = false;
+    await page.evaluate(
+      `delete navigator.onLine;window.dispatchEvent(new Event('online'));`,
+    );
+    await eventually(
+      () => logoutStatuses.slice(logoutStart).includes(403),
+      'A obsolete pending logout is rejected against B new session',
+    );
+    check(
+      await page.evaluate(
+        `document.documentElement.dataset.authenticated==='false' && document.getElementById('app-error').textContent.includes('退出未确认')`,
+      ),
+      true,
+      'Stale offline logout stays locally unauthenticated and explicitly unconfirmed',
+    );
+    const rejectedLogoutCount = logoutStatuses.length;
+    await page.evaluate(
+      `window.dispatchEvent(new Event('online'));window.dispatchEvent(new Event('pageshow'));document.dispatchEvent(new Event('visibilitychange'));window.dispatchEvent(new Event('online'));`,
+    );
+    await pause(200);
+    check(
+      logoutStatuses.length,
+      rejectedLogoutCount,
+      'Obsolete logout stops automatic retry after CSRF rejection',
+    );
+    check(
+      await secondPage.evaluate(`fetch('/api/status').then(r=>r.status)`),
+      200,
+      'A stale logout never revokes B replacement login',
+    );
+    await page.click('refresh-status');
+    await eventually(
+      async () => (await page.state()).authenticated,
+      'Explicit refresh reloads A and confirms B current shared login',
+    );
+    check(
+      (await page.state()).authenticated,
+      true,
+      'Explicit refresh recovers A from stale pending logout',
+    );
+    await eventually(
+      () => page.evaluate(`window.__pulsePageHeartbeat()>0`),
+      'Refreshed A registers its new page lease',
+    );
+    // Only B receives scheduled heartbeats while A is frozen past its own lease.
+    for (let cycle = 0; cycle < 2; cycle++) {
+      const previousExpiry = await secondPage.evaluate(
+        `fetch('/api/browser-session').then(r=>r.json()).then(v=>v.expiresAt)`,
+      );
+      clockOffset += 16 * 60 * 1000;
+      await secondPage.evaluate(`window.__fixtureClockOffset=${clockOffset}`);
+      await eventually(
+        () => secondPage.evaluate(`window.__pulsePageHeartbeat()>0`),
+        'Live B heartbeat while A is frozen',
+      );
+      await eventually(
+        () =>
+          secondPage.evaluate(
+            `fetch('/api/browser-session').then(r=>r.json()).then(v=>v.expiresAt>${previousExpiry})`,
+          ),
+        'B server lease extended',
+      );
+    }
+    await page.evaluate(
+      `window.__retiredPageId=window.__pageLeaseWrites.filter(v=>v.state==='open').at(-1)?.pageId`,
+    );
+    const recoveryStart = pageLeaseStatuses.length;
+    await page.evaluate(
+      `window.__fixtureClockOffset=${clockOffset};window.dispatchEvent(new Event('online'));`,
+    );
+    await eventually(
+      async () =>
+        pageLeaseStatuses.slice(recoveryStart).includes(200) &&
+        (await page.evaluate(
+          `window.__pageLeaseWrites.some(v=>v.state==='open'&&v.pageId!==window.__retiredPageId)`,
+        )),
+      'Frozen A replaces its retired page ID after current shared session confirmation',
+    );
+    check(
+      await page.evaluate(`fetch('/api/status').then(r=>r.status)`),
+      200,
+      'A resumes with a new page lease after B preserved shared login',
+    );
+    await secondPage.evaluate(
+      `window.dispatchEvent(new PageTransitionEvent('pagehide'))`,
+    );
+    await pause(100);
+    clockOffset += 31_000;
+    await page.evaluate(`window.__fixtureClockOffset=${clockOffset}`);
+    check(
+      await page.evaluate(`fetch('/api/status').then(r=>r.status)`),
+      200,
+      'Closing B cannot expire resumed A with its new page lease',
+    );
+    await secondPage.send('Page.reload');
+    await eventually(
+      async () => (await secondPage.state()).authenticated,
+      'B reopens for remaining close and reload cases',
+    );
+    await eventually(
+      () => secondPage.evaluate(`window.__pulsePageHeartbeat()>0`),
+      'B reopened lease registered',
+    );
+    await page.evaluate(
+      `window.dispatchEvent(new PageTransitionEvent('pagehide'))`,
+    );
+    await pause(100);
+    clockOffset += 31_000;
+    await secondPage.evaluate(`window.__fixtureClockOffset=${clockOffset}`);
+    check(
+      await secondPage.evaluate(`fetch('/api/status').then(r=>r.status)`),
+      200,
+      'Closing one tab leaves another page authenticated',
+    );
+    await secondPage.send('Page.reload');
+    await eventually(
+      async () => (await secondPage.state()).authenticated,
+      'Reload opens a fresh page inside close grace',
+    );
+    await eventually(
+      () => secondPage.evaluate(`window.__pulsePageHeartbeat()>0`),
+      'Reloaded page registered',
+    );
+    check(
+      await secondPage.evaluate(`fetch('/api/status').then(r=>r.status)`),
+      200,
+      'Reload grace preserves the authenticated session',
+    );
+    await secondPage.evaluate(
+      `window.dispatchEvent(new PageTransitionEvent('pagehide'))`,
+    );
+    await pause(100);
+    clockOffset += 31_000;
+    check(
+      await secondPage.evaluate(`fetch('/api/status').then(r=>r.status)`),
+      401,
+      'Last page close expires the session after thirty-second grace',
+    );
+    await page.send('Page.navigate', { url: `${origin}/controlled` });
+    await eventually(
+      async () => (await page.state()).loginVisible,
+      'Fresh login after all pages closed',
+    );
+    await page.click('google-login');
+    await eventually(
+      async () => (await page.state()).authenticated,
+      'Login for frozen-page expiry',
+    );
+    await eventually(
+      () => page.evaluate(`window.__pulsePageHeartbeat()>0`),
+      'Frozen-page scenario has registered lease',
+    );
+    await page.evaluate(`window.dispatchEvent(new Event('offline'))`);
+  }
+  clockOffset += (browserMode === 'web-workbench' ? 31 : 16) * 60 * 1000;
+  await page.evaluate(`window.__fixtureClockOffset=${clockOffset}`);
   await page.click('refresh-status');
   await eventually(
     async () => !(await page.state()).authenticated,
-    'Current session idle expiry',
+    'Current session expiry without heartbeat',
   );
   await eventually(
     async () => (await page.state()).phase === 'expired',
@@ -1429,7 +1679,7 @@ try {
     check(
       await page.evaluate(`fetch('/api/health').then(r=>r.status)`),
       200,
-      'idle login expiry leaves the workbench service running',
+      'lost page expiry leaves the workbench service running',
     );
   }
   check(

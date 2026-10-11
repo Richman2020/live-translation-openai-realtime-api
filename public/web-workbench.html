@@ -37,9 +37,9 @@
             <h2 id="auth-state" role="status">正在检查登录</h2><p id="auth-copy">请稍候，正在读取会话状态。</p>
             <button class="primary-button" id="google-login" disabled>使用 Google 登录</button>
             <button class="secondary-button full-width" id="google-login-cancel" hidden>取消登录</button>
-            <p id="session-expiry">尚未确认登录会话。</p>
-            <button class="secondary-button full-width" id="renew-session" hidden>继续本次登录</button>
-            <p class="account-policy">使用中自动保持登录；停止操作约 15 分钟后失效，本次最长 8 小时。服务重启后需要重新登录。</p>
+            <p id="session-expiry">页面打开期间自动保持登录。</p>
+            <button class="secondary-button full-width" id="renew-session" hidden>保持页面登录</button>
+            <p class="account-policy">页面打开期间每分钟尝试续期，包含后台。收到最后页关闭通知后保留30秒刷新宽限；通知未送达或失联30分钟后失效。主动退出立即发起注销，服务重启后需重新登录。</p>
             <p id="verification-status" role="status">正在检查工作台服务。</p>
             <div class="account-actions"><button class="secondary-button" id="refresh-status">刷新状态</button><button class="secondary-button" id="google-logout" hidden>退出登录</button></div>
           </section>

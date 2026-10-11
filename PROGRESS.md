@@ -4,6 +4,12 @@
 
 需求见 [PROJECT_BRIEF.md](PROJECT_BRIEF.md)，工作规则见 [AGENTS.md](AGENTS.md)，运行步骤见 [LOCAL_SETUP.md](LOCAL_SETUP.md)，后续执行入口见 [LOCAL_CODEX_HANDOFF.md](LOCAL_CODEX_HANDOFF.md)。
 
+## 最新实现：页面开着保持登录（2026-10-11）
+
+- 用户明确撤销日常工作台按15分钟闲置/8小时强制退出的策略；改为页面每60秒自动续约，后台或无用户输入不暂停。单页面ID只在内存，多个页面分别续约；最后关闭尽力通知并留30秒刷新交接宽限，丢失通知/网络中断/浏览器冻结连续30分钟由有限租约兜底，不能保证unload瞬时登出。服务重启仍需Google登录。
+- 新增daily专用页面租约端点与纯浏览器模块，仍严格Origin/CSRF、当前会话、序号和已关闭页面终态；心跳不创建身份、不发登录cookie，主动退出撤销整会话，过期/迟到请求不能恢复。旧web-verification与未开放phone保持原身份期限和精确路由面。
+- 本轮Node24.19.0/npm11.9.0完整离线回归1212总/1207pass/5既有Windows skip/0fail；build、全源码/测试typecheck、修改文件格式与JS语法通过。实际离线Chrome151 daily82/82、legacy48/48，外部请求/真实供应商调用/异常均0；覆盖无输入后台528分钟、多标签、最后关闭、刷新宽限、冻结后另页保活再登记、logout后迟到请求及跨标签旧CSRF退出403显式刷新恢复。Google登录43项与新页面模块13项通过；浏览器验收脚本独立typecheck通过。费用代码与本次租约统一纳入原分支/草稿PR，精确远端CI通过后仅部署既有AI一次；当前运行仍固定4bab94e、calls-disabled，Portal与原卷资源保持。
+
 ## 最新用户修订：不固定五分钟，仍仅单次且总额5美元（2026-10-11）
 
 - 用户撤销“五分钟”产品/测试要求，保留单次测试和Twilio/OpenAI合计最多5美元，不允许无限通话或新增预算。已批准旧桌面App出呼Voice回调迁至Railway，旧桌面出呼受影响、号码来电不改；父线程已完成外部App Voice URL更新并刷新回读：固定Railway /voice/client POST，Fallback/Status仍空、未拨号；来电配置未改，浏览器复核由父线程继续。本人目标已由父线程从原用户消息核验，不再要求重复提供；清值只用于已授权测试的私有配置，本代码任务未写目标到云配置或仓库。部署隐藏App SID不能按名称推定。

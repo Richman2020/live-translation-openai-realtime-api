@@ -67,6 +67,7 @@ async function fixture(
   t: TestContext,
   options: {
     flowTimeoutMs?: number;
+    pageLease?: true;
     idleTimeoutMs?: number;
     absoluteTimeoutMs?: number;
     onFailure?: (reason: GoogleLoginFailureReason) => void;
@@ -1043,5 +1044,589 @@ test('runtime-invalid diagnostic reasons cannot pass arbitrary strings or object
       'CALLBACK_PARAMS_UNKNOWN_ISS',
     ],
     'Legacy reason remains a valid server-side observer API value',
+  );
+});
+
+const pageId = (number: number) => {
+  const bytes = Buffer.alloc(32);
+  bytes.writeUInt32BE(number);
+  return bytes.toString('base64url');
+};
+const pageBody = (
+  number: number,
+  sequence = 1,
+  state: 'open' | 'close' = 'open',
+) => ({ pageId: pageId(number), sequence, state });
+const leaseMs = 30 * 60 * 1000;
+
+test('page-presence mode is server-only, starts with a finite claim lease and keeps a nonpersistent cookie', async (t) => {
+  const legacy = await fixture(t);
+  const old = await legacy.signIn();
+  assert.equal(
+    (
+      await legacy.write(
+        '/auth/session/page',
+        old.session,
+        old.csrf,
+        pageBody(1),
+      )
+    ).statusCode,
+    404,
+  );
+  const f = await fixture(t, {
+    pageLease: true,
+    idleTimeoutMs: 1000,
+    absoluteTimeoutMs: 2000,
+  });
+  const session = await f.signIn();
+  assert.equal(session.deadline, f.now + leaseMs);
+  const sessionCookie = (session.result.headers['set-cookie'] as string[]).find(
+    (value) => value.startsWith(CLOUD_SESSION_COOKIE),
+  )!;
+  assert.doesNotMatch(sessionCookie, /Max-Age|Expires/);
+  assert.match(sessionCookie, /Secure; HttpOnly; SameSite=Strict/);
+  f.setNow(f.now + 16 * 60 * 1000);
+  assert.equal(
+    (await f.current(session.session)).json().deadline,
+    session.deadline,
+  );
+  assert.equal(
+    (await f.write('/auth/session/renew', session.session, session.csrf))
+      .statusCode,
+    403,
+  );
+  f.setNow(session.deadline);
+  assert.equal(
+    (
+      await f.write(
+        '/auth/session/page',
+        session.session,
+        session.csrf,
+        pageBody(1),
+      )
+    ).statusCode,
+    401,
+  );
+  f.setNow(session.deadline - 1000);
+  assert.equal(
+    (await f.current(session.session)).statusCode,
+    401,
+    'observed expiry never revives after a clock correction',
+  );
+});
+
+test('page heartbeats without user input keep a background workbench authenticated beyond eight hours', async (t) => {
+  const f = await fixture(t, { pageLease: true });
+  const session = await f.signIn();
+  const started = f.now;
+  let deadline = session.deadline;
+  // The server deliberately has no visibility/activity gate. A hidden page
+  // sends the same authenticated presence message as a visible one.
+  for (let sequence = 1; sequence <= 28; sequence += 1) {
+    f.setNow(f.now + 20 * 60 * 1000);
+    const response = await f.write(
+      '/auth/session/page',
+      session.session,
+      session.csrf,
+      pageBody(1, sequence),
+    );
+    assert.equal(response.statusCode, 200, response.body);
+    assert.deepEqual(response.json(), { ok: true, expiresAt: f.now + leaseMs });
+    assert.equal(response.headers['set-cookie'], undefined);
+    deadline = response.json().expiresAt;
+    assert.equal((await f.current(session.session)).json().deadline, deadline);
+  }
+  assert.ok(f.now - started > 8 * 60 * 60 * 1000);
+  assert.equal(
+    f.tokenRequests,
+    1,
+    'presence neither refreshes OAuth nor exchanges a token',
+  );
+  f.setNow(deadline);
+  assert.equal((await f.current(session.session)).statusCode, 401);
+  assert.equal(
+    (
+      await f.write(
+        '/auth/session/page',
+        session.session,
+        session.csrf,
+        pageBody(1, 29),
+      )
+    ).statusCode,
+    401,
+  );
+});
+
+test('closing one page preserves the other; the last close allows only a short new-page reload grace', async (t) => {
+  const f = await fixture(t, { pageLease: true });
+  const session = await f.signIn();
+  await f.write(
+    '/auth/session/page',
+    session.session,
+    session.csrf,
+    pageBody(1),
+  );
+  f.setNow(f.now + 60000);
+  const second = await f.write(
+    '/auth/session/page',
+    session.session,
+    session.csrf,
+    pageBody(2),
+  );
+  const closeFirst = await f.write(
+    '/auth/session/page',
+    session.session,
+    session.csrf,
+    pageBody(1, 2, 'close'),
+  );
+  assert.equal(closeFirst.json().expiresAt, second.json().expiresAt);
+  f.setNow(f.now + 60000);
+  assert.equal((await f.current(session.session)).statusCode, 200);
+  const last = await f.write(
+    '/auth/session/page',
+    session.session,
+    session.csrf,
+    pageBody(2, 2, 'close'),
+  );
+  assert.equal(last.json().expiresAt, f.now + 30000);
+  f.setNow(f.now + 29000);
+  const reload = await f.write(
+    '/auth/session/page',
+    session.session,
+    session.csrf,
+    pageBody(3),
+  );
+  assert.equal(reload.statusCode, 200);
+  assert.equal(reload.json().expiresAt, f.now + leaseMs);
+  f.setNow(f.now + 2000);
+  assert.equal((await f.current(session.session)).statusCode, 200);
+  const closed = await f.write(
+    '/auth/session/page',
+    session.session,
+    session.csrf,
+    pageBody(3, 2, 'close'),
+  );
+  f.setNow(closed.json().expiresAt);
+  assert.equal(
+    (
+      await f.write(
+        '/auth/session/page',
+        session.session,
+        session.csrf,
+        pageBody(4),
+      )
+    ).statusCode,
+    401,
+  );
+});
+
+test('stale sequences and closed-page tombstones defeat reordered heartbeats, closes and duplicate grace extension', async (t) => {
+  const f = await fixture(t, { pageLease: true });
+  const session = await f.signIn();
+  await f.write(
+    '/auth/session/page',
+    session.session,
+    session.csrf,
+    pageBody(1, 2),
+  );
+  f.setNow(f.now + 60000);
+  for (const body of [
+    pageBody(1, 1),
+    pageBody(1, 2),
+    pageBody(1, 1, 'close'),
+  ]) {
+    const response = await f.write(
+      '/auth/session/page',
+      session.session,
+      session.csrf,
+      body,
+    );
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.json().expiresAt, session.deadline);
+  }
+  const close = await f.write(
+    '/auth/session/page',
+    session.session,
+    session.csrf,
+    pageBody(1, 3, 'close'),
+  );
+  const grace = close.json().expiresAt;
+  f.setNow(f.now + 10000);
+  for (const body of [
+    pageBody(1, 4),
+    pageBody(1, 3, 'close'),
+    pageBody(1, 999, 'close'),
+    pageBody(9, 2, 'close'),
+    pageBody(9, 1),
+  ]) {
+    const response = await f.write(
+      '/auth/session/page',
+      session.session,
+      session.csrf,
+      body,
+    );
+    if (body.state === 'open') {
+      assert.equal(response.statusCode, 409);
+      assert.deepEqual(response.json(), { error: 'PAGE_LEASE_RETIRED' });
+    } else {
+      assert.equal(response.statusCode, 200);
+      assert.equal(response.json().expiresAt, grace);
+    }
+  }
+  f.setNow(grace);
+  assert.equal((await f.current(session.session)).statusCode, 401);
+});
+
+test('an expired page cannot revive while another page retains the session', async (t) => {
+  const f = await fixture(t, { pageLease: true });
+  const session = await f.signIn();
+  await f.write(
+    '/auth/session/page',
+    session.session,
+    session.csrf,
+    pageBody(1),
+  );
+  f.setNow(f.now + 20 * 60 * 1000);
+  const active = await f.write(
+    '/auth/session/page',
+    session.session,
+    session.csrf,
+    pageBody(2),
+  );
+  f.setNow(f.now + 11 * 60 * 1000);
+  const retired = await f.write(
+    '/auth/session/page',
+    session.session,
+    session.csrf,
+    pageBody(1, 2),
+  );
+  assert.equal(retired.statusCode, 409);
+  assert.deepEqual(retired.json(), { error: 'PAGE_LEASE_RETIRED' });
+  assert.equal(
+    (await f.current(session.session)).json().deadline,
+    active.json().expiresAt,
+  );
+  const close = await f.write(
+    '/auth/session/page',
+    session.session,
+    session.csrf,
+    pageBody(2, 2, 'close'),
+  );
+  assert.equal(close.json().expiresAt, f.now + 30000);
+  f.setNow(close.json().expiresAt);
+  assert.equal((await f.current(session.session)).statusCode, 401);
+});
+
+test('page endpoint requires strict body, same-origin source, current CSRF and opaque session', async (t) => {
+  const f = await fixture(t, { pageLease: true });
+  const session = await f.signIn();
+  for (const body of [
+    {},
+    { ...pageBody(1), extra: true },
+    { ...pageBody(1), state: 'hidden' },
+    { ...pageBody(1), pageId: 'x'.repeat(43) },
+    ...[0, -1, 0.5, Number.MAX_SAFE_INTEGER + 1, '1', null].map((sequence) => ({
+      ...pageBody(1),
+      sequence,
+    })),
+  ]) {
+    assert.equal(
+      (await f.write('/auth/session/page', session.session, session.csrf, body))
+        .statusCode,
+      403,
+    );
+  }
+  for (const headers of [
+    { ...writeHeaders(session.session) },
+    { ...writeHeaders(session.session), 'x-phone-csrf': 'wrong' },
+    {
+      ...writeHeaders(session.session),
+      'x-phone-csrf': session.csrf,
+      origin: 'https://evil.example.test',
+    },
+    {
+      ...writeHeaders(session.session),
+      'x-phone-csrf': session.csrf,
+      'sec-fetch-site': 'cross-site',
+    },
+  ]) {
+    const response = await f.app.inject({
+      method: 'POST',
+      url: '/auth/session/page',
+      headers,
+      payload: pageBody(1),
+      remoteAddress: '127.0.0.1',
+    });
+    assert.equal(response.statusCode, 403);
+  }
+  assert.equal(
+    (await f.write('/auth/session/page', undefined, session.csrf, pageBody(1)))
+      .statusCode,
+    401,
+  );
+  assert.equal(
+    (
+      await f.write(
+        '/auth/session/page?mode=true',
+        session.session,
+        session.csrf,
+        pageBody(1),
+      )
+    ).statusCode,
+    403,
+  );
+  assert.equal(
+    (await f.current(session.session)).json().deadline,
+    session.deadline,
+  );
+});
+
+test('explicit logout immediately revokes every page and delayed opens cannot restore authority', async (t) => {
+  const f = await fixture(t, { pageLease: true });
+  const session = await f.signIn();
+  await f.write(
+    '/auth/session/page',
+    session.session,
+    session.csrf,
+    pageBody(1),
+  );
+  await f.write(
+    '/auth/session/page',
+    session.session,
+    session.csrf,
+    pageBody(2),
+  );
+  const cached = f.login.policy.authenticate(
+    readHeaders(session.session),
+    'read',
+    { surface: 'http', method: 'GET' },
+  );
+  assert.equal(
+    (await f.write('/auth/logout', session.session, session.csrf)).statusCode,
+    200,
+  );
+  assert.throws(() => f.login.policy.expiresAt(cached), /UNAUTHORIZED/);
+  for (const body of [pageBody(1, 2), pageBody(2, 2), pageBody(3)])
+    assert.equal(
+      (await f.write('/auth/session/page', session.session, session.csrf, body))
+        .statusCode,
+      401,
+    );
+  assert.equal((await f.current(session.session)).statusCode, 401);
+});
+
+for (const retire of ['logout', 'lease-expiry'] as const) {
+  test(`page-mode callback cannot publish a prepared login after ${retire}`, async (t) => {
+    const f = await fixture(t, { pageLease: true });
+    const session = await f.signIn();
+    await f.write(
+      '/auth/session/page',
+      session.session,
+      session.csrf,
+      pageBody(1),
+    );
+    await f.write(
+      '/auth/session/page',
+      session.session,
+      session.csrf,
+      pageBody(1, 2, 'close'),
+    );
+    const flow = await f.start(session.session);
+    const barrier = f.blockSend();
+    const pending = f.callback(flow).then((value) => value);
+    await barrier.entered;
+    if (retire === 'logout')
+      await f.write('/auth/logout', session.session, session.csrf);
+    else f.setNow(f.now + 30000);
+    barrier.release();
+    const result = await pending;
+    assert.equal(result.statusCode, 401);
+    assert.equal(result.headers['set-cookie'], undefined);
+    assert.equal((await f.current(session.session)).statusCode, 401);
+  });
+}
+
+test('page registries are bounded without dropping tombstones or blocking heartbeats of admitted pages', async (t) => {
+  const f = await fixture(t, { pageLease: true });
+  const session = await f.signIn();
+  for (let number = 1; number <= 32; number += 1)
+    assert.equal(
+      (
+        await f.write(
+          '/auth/session/page',
+          session.session,
+          session.csrf,
+          pageBody(number),
+        )
+      ).statusCode,
+      200,
+    );
+  assert.equal(
+    (
+      await f.write(
+        '/auth/session/page',
+        session.session,
+        session.csrf,
+        pageBody(33),
+      )
+    ).statusCode,
+    503,
+  );
+  for (let number = 2; number <= 32; number += 1)
+    await f.write(
+      '/auth/session/page',
+      session.session,
+      session.csrf,
+      pageBody(number, 2, 'close'),
+    );
+  for (let number = 33; number <= 1024; number += 1)
+    assert.equal(
+      (
+        await f.write(
+          '/auth/session/page',
+          session.session,
+          session.csrf,
+          pageBody(number, 1, 'close'),
+        )
+      ).statusCode,
+      200,
+    );
+  assert.equal(
+    (
+      await f.write(
+        '/auth/session/page',
+        session.session,
+        session.csrf,
+        pageBody(1025),
+      )
+    ).statusCode,
+    503,
+  );
+  f.setNow(f.now + 1000);
+  const heartbeat = await f.write(
+    '/auth/session/page',
+    session.session,
+    session.csrf,
+    pageBody(1, 2),
+  );
+  assert.equal(heartbeat.statusCode, 200);
+  assert.equal(heartbeat.json().expiresAt, f.now + leaseMs);
+  const tombstone = await f.write(
+    '/auth/session/page',
+    session.session,
+    session.csrf,
+    pageBody(2, 3),
+  );
+  assert.equal(tombstone.statusCode, 409);
+  assert.deepEqual(tombstone.json(), { error: 'PAGE_LEASE_RETIRED' });
+  assert.equal(
+    (await f.current(session.session)).json().deadline,
+    heartbeat.json().expiresAt,
+  );
+  const closed = await f.write(
+    '/auth/session/page',
+    session.session,
+    session.csrf,
+    pageBody(1, 3, 'close'),
+  );
+  assert.equal(closed.json().expiresAt, f.now + 30000);
+});
+
+test('page leases remain process-memory only across registry replacement and close', async (t) => {
+  const f = await fixture(t, { pageLease: true });
+  const session = await f.signIn();
+  await f.write(
+    '/auth/session/page',
+    session.session,
+    session.csrf,
+    pageBody(1),
+  );
+  const other = await fixture(t, { pageLease: true });
+  assert.equal(
+    (
+      await other.write(
+        '/auth/session/page',
+        session.session,
+        session.csrf,
+        pageBody(1, 2),
+      )
+    ).statusCode,
+    401,
+  );
+  f.login.close();
+  assert.equal((await f.current(session.session)).statusCode, 401);
+});
+
+test('restored page replaces its retired identifier and survives the other tab closing', async (t) => {
+  const f = await fixture(t, { pageLease: true });
+  const session = await f.signIn();
+  await f.write(
+    '/auth/session/page',
+    session.session,
+    session.csrf,
+    pageBody(1),
+  );
+  f.setNow(f.now + 20 * 60 * 1000);
+  await f.write(
+    '/auth/session/page',
+    session.session,
+    session.csrf,
+    pageBody(2),
+  );
+  f.setNow(f.now + 11 * 60 * 1000);
+  assert.equal((await f.current(session.session)).statusCode, 200);
+  const retired = await f.write(
+    '/auth/session/page',
+    session.session,
+    session.csrf,
+    pageBody(1, 2),
+  );
+  assert.equal(retired.statusCode, 409);
+  assert.deepEqual(retired.json(), { error: 'PAGE_LEASE_RETIRED' });
+  const replacement = await f.write(
+    '/auth/session/page',
+    session.session,
+    session.csrf,
+    pageBody(3),
+  );
+  assert.equal(replacement.statusCode, 200);
+  const closedOther = await f.write(
+    '/auth/session/page',
+    session.session,
+    session.csrf,
+    pageBody(2, 2, 'close'),
+  );
+  assert.equal(closedOther.json().expiresAt, replacement.json().expiresAt);
+  f.setNow(f.now + 20 * 60 * 1000);
+  const pulse = await f.write(
+    '/auth/session/page',
+    session.session,
+    session.csrf,
+    pageBody(3, 2),
+  );
+  assert.equal(pulse.statusCode, 200);
+  assert.equal(pulse.json().expiresAt, f.now + leaseMs);
+  assert.equal(
+    (
+      await f.write(
+        '/auth/session/page',
+        session.session,
+        session.csrf,
+        pageBody(1, 999),
+      )
+    ).statusCode,
+    409,
+  );
+  f.setNow(pulse.json().expiresAt);
+  assert.equal(
+    (
+      await f.write(
+        '/auth/session/page',
+        session.session,
+        session.csrf,
+        pageBody(4),
+      )
+    ).statusCode,
+    401,
   );
 });

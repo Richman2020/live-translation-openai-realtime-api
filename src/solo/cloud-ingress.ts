@@ -40,7 +40,7 @@ export const CLOUD_WEB_VERIFICATION_PUBLIC_PATHS = Object.freeze([
 export const CLOUD_WEB_WORKBENCH_PUBLIC_PATHS = Object.freeze([
   ...CLOUD_WEB_VERIFICATION_PUBLIC_PATHS,
   '/web-workbench.js',
-  '/session-activity.js',
+  '/session-page-lease.js',
   '/microphone-input.js',
   '/audio-output.js',
   '/conversation-model.js',
@@ -151,6 +151,7 @@ function validTarget(
   if (req.method === 'POST')
     return (
       (web ? webPostPaths : postPaths).has(path) ||
+      (mode === 'web-workbench' && path === '/auth/session/page') ||
       (!web &&
         /^\/api\/calls\/[A-Za-z0-9_-]{1,128}\/(?:hangup|voice)$/.test(path))
     );

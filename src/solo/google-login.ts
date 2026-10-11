@@ -26,6 +26,7 @@ export const GOOGLE_LOGIN_PATHS = Object.freeze({
   cancel: '/auth/google/cancel',
   logout: '/auth/logout',
   renew: '/auth/session/renew',
+  page: '/auth/session/page',
 });
 
 const failureReasons = Object.freeze([
@@ -62,7 +63,11 @@ const unknownParameterReasons = new Map<string, GoogleLoginFailureReason>([
 
 class GoogleLoginError extends Error {
   constructor(
-    readonly code: 'LOGIN_FAILED' | 'LOGIN_UNAVAILABLE' | 'FORBIDDEN',
+    readonly code:
+      | 'LOGIN_FAILED'
+      | 'LOGIN_UNAVAILABLE'
+      | 'FORBIDDEN'
+      | 'PAGE_LEASE_RETIRED',
     readonly statusCode: number,
   ) {
     super(code);
@@ -79,7 +84,15 @@ type LoginFlow = {
   consumed: boolean;
   previousSession?: { key: string; epoch: number };
 };
-type SessionRecord = CloudAuthSession & { credentialKey: string };
+type PageLease = { sequence: number; expiresAt: number; closed: boolean };
+type SessionRecord = CloudAuthSession & {
+  credentialKey: string;
+  pages?: Map<string, PageLease>;
+};
+const PAGE_LEASE_MS = 30 * 60 * 1000;
+const PAGE_CLOSE_GRACE_MS = 30 * 1000;
+const MAX_ACTIVE_PAGES = 32;
+const MAX_SEEN_PAGES = 1024;
 type PreparedLogin = Readonly<{ sessionCookie: string }>;
 const opaque = /^[A-Za-z0-9_-]{43}$/;
 const random = () => randomBytes(32).toString('base64url');
@@ -151,6 +164,8 @@ export class GoogleBrowserLogin {
 
   private readonly flowTimeout: number;
 
+  readonly pageLeaseEnabled: boolean;
+
   private readonly onFailure: GoogleLoginFailureObserver | undefined;
 
   private readonly bindings = new Map<string, Binding>();
@@ -183,10 +198,18 @@ export class GoogleBrowserLogin {
     idleTimeoutMs?: number;
     flowTimeoutMs?: number;
     onFailure?: GoogleLoginFailureObserver;
+    pageLease?: true;
   }) {
     this.now = nowOr(options.now);
-    this.absoluteTimeout = options.absoluteTimeoutMs ?? 8 * 60 * 60 * 1000;
-    this.idleTimeout = options.idleTimeoutMs ?? 15 * 60 * 1000;
+    if (options.pageLease !== undefined && options.pageLease !== true)
+      throw new GoogleLoginError('LOGIN_UNAVAILABLE', 503);
+    this.pageLeaseEnabled = options.pageLease === true;
+    this.absoluteTimeout = this.pageLeaseEnabled
+      ? PAGE_LEASE_MS
+      : (options.absoluteTimeoutMs ?? 8 * 60 * 60 * 1000);
+    this.idleTimeout = this.pageLeaseEnabled
+      ? PAGE_LEASE_MS
+      : (options.idleTimeoutMs ?? 15 * 60 * 1000);
     this.flowTimeout = options.flowTimeoutMs ?? 5 * 60 * 1000;
     this.onFailure = options.onFailure;
     for (const [timeout, maximum] of [
@@ -225,12 +248,15 @@ export class GoogleBrowserLogin {
   private resolveSession(credential: string): CloudAuthSession | undefined {
     if (this.closed || !canonical(credential)) return undefined;
     const record = this.sessions.get(keyOf(credential));
+    if (!record || record.revoked) return undefined;
     if (
-      !record ||
-      record.revoked ||
       this.now() >= Math.min(record.absoluteExpiresAt, record.idleExpiresAt)
-    )
+    ) {
+      // Once an observed page lease expires, even a clock correction cannot
+      // resurrect its cookie or any delayed heartbeat/authorization context.
+      if (this.pageLeaseEnabled) this.revokeRecord(record);
       return undefined;
+    }
     // A snapshot prevents callers from changing the current registry. The next
     // policy use always looks up the current record again; no Promise is cached.
     return {
@@ -550,6 +576,9 @@ export class GoogleBrowserLogin {
       const now = this.now();
       const record: SessionRecord = {
         credentialKey: keyOf(credential),
+        ...(this.pageLeaseEnabled
+          ? { pages: new Map<string, PageLease>() }
+          : {}),
         authSessionId: random(),
         principalId: keyOf(`${identity.issuer}\0${identity.subject}`),
         browserOwnerId: random(),
@@ -649,6 +678,7 @@ export class GoogleBrowserLogin {
   }
 
   private revokeRecord(record: SessionRecord): void {
+    record.pages?.clear();
     record.revoked = true;
     record.epoch += 1;
     record.csrfToken = random();
@@ -687,6 +717,9 @@ export class GoogleBrowserLogin {
 
   renew(request: FastifyRequest): void {
     this.assertRequest(request, 'write');
+    // Page presence is the only renewal signal in the daily workbench mode.
+    // Legacy renew/polling cannot keep a session alive after its pages leave.
+    if (this.pageLeaseEnabled) throw new GoogleLoginError('FORBIDDEN', 403);
     if (
       request.url.includes('?') ||
       (request.body !== undefined &&
@@ -706,6 +739,92 @@ export class GoogleBrowserLogin {
         record.absoluteExpiresAt,
         this.now() + this.idleTimeout,
       );
+    });
+  }
+
+  /** A server-selected page-presence mode; no request can enable it. Each page
+   * owns a fresh identifier and increasing sequence. Closed/expired identifiers
+   * remain tombstones for this session, so reordered network requests cannot
+   * restore a departed page. Maps are bounded without evicting that protection.
+   * Hidden pages may heartbeat. Network/freeze loss is limited to thirty minutes;
+   * this is a connectivity lease, not a user-input idle or eight-hour deadline. */
+  page(request: FastifyRequest): { ok: true; expiresAt: number } {
+    this.assertRequest(request, 'write');
+    const body = request.body;
+    if (
+      !this.pageLeaseEnabled ||
+      request.url.includes('?') ||
+      !body ||
+      typeof body !== 'object' ||
+      Array.isArray(body) ||
+      Object.keys(body).length !== 3 ||
+      !Object.keys(body).every((key) =>
+        ['pageId', 'sequence', 'state'].includes(key),
+      )
+    )
+      throw new GoogleLoginError('FORBIDDEN', 403);
+    const { pageId, sequence, state } = body as Record<string, unknown>;
+    if (
+      typeof pageId !== 'string' ||
+      !canonical(pageId) ||
+      !Number.isSafeInteger(sequence) ||
+      (sequence as number) <= 0 ||
+      (state !== 'open' && state !== 'close')
+    )
+      throw new GoogleLoginError('FORBIDDEN', 403);
+    const context = this.policy.authenticate(request.headers, 'mutate', {
+      surface: 'http',
+      method: request.method,
+    });
+    return this.policy.runAuthorizedSession(context, 'mutate', () => {
+      const record = this.currentRecord(context);
+      const pages = record.pages!;
+      const now = this.now();
+      // Recheck at the mutation boundary too: the finite deadline can pass
+      // between policy authentication and this synchronous clock sample.
+      if (now >= Math.min(record.absoluteExpiresAt, record.idleExpiresAt)) {
+        this.revokeRecord(record);
+        throw new CloudAccessError('UNAUTHORIZED');
+      }
+      for (const page of pages.values()) {
+        if (!page.closed && page.expiresAt <= now) page.closed = true;
+      }
+      const previous = pages.get(pageId);
+      // The session can still be alive through another tab. Tell a restored
+      // page to obtain a fresh identifier rather than pretending its retired
+      // identifier renewed presence. Session expiry is checked first (401).
+      if (previous?.closed && state === 'open')
+        throw new GoogleLoginError('PAGE_LEASE_RETIRED', 409);
+      if (
+        previous?.closed ||
+        (previous && (sequence as number) <= previous.sequence)
+      )
+        return { ok: true as const, expiresAt: record.idleExpiresAt };
+      if (!previous && pages.size >= MAX_SEEN_PAGES)
+        throw new GoogleLoginError('LOGIN_UNAVAILABLE', 503);
+      if (
+        !previous &&
+        state === 'open' &&
+        [...pages.values()].filter((page) => !page.closed).length >=
+          MAX_ACTIVE_PAGES
+      )
+        throw new GoogleLoginError('LOGIN_UNAVAILABLE', 503);
+      pages.set(pageId, {
+        sequence: sequence as number,
+        closed: state === 'close',
+        expiresAt: state === 'open' ? now + PAGE_LEASE_MS : now,
+      });
+      const activeDeadlines = [...pages.values()]
+        .filter((page) => !page.closed)
+        .map((page) => page.expiresAt);
+      const deadline = activeDeadlines.length
+        ? Math.max(...activeDeadlines)
+        : Math.min(record.idleExpiresAt, now + PAGE_CLOSE_GRACE_MS);
+      // Both existing policy fields stay finite and current. Initial login grants
+      // one lease to claim a page; subsequent extension requires an open page.
+      record.absoluteExpiresAt = deadline;
+      record.idleExpiresAt = deadline;
+      return { ok: true as const, expiresAt: deadline };
     });
   }
 
@@ -829,5 +948,10 @@ export function registerGoogleLoginRoutes(
       return { ok: true };
     }),
   );
+  if (login.pageLeaseEnabled)
+    app.post(
+      GOOGLE_LOGIN_PATHS.page,
+      respond((request) => login.page(request)),
+    );
   app.addHook('onClose', () => login.close());
 }

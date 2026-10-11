@@ -173,6 +173,7 @@ async function createCallsDisabledWebService(
     login = new GoogleBrowserLogin({
       publicOrigin: runtime.publicOrigin,
       now: checkedNow,
+      ...(mode === 'web-workbench' ? { pageLease: true as const } : {}),
       onFailure:
         options.onLoginFailure ||
         ((reason) => {
@@ -240,7 +241,9 @@ async function createCallsDisabledWebService(
           (request.method === 'GET' &&
             (readPaths.has(path) || publicPaths.has(path))) ||
           (request.method === 'HEAD' && publicPaths.has(path)) ||
-          (request.method === 'POST' && writePaths.has(path))
+          (request.method === 'POST' &&
+            (writePaths.has(path) ||
+              (mode === 'web-workbench' && path === '/auth/session/page')))
         )
       ) {
         reply.code(403).send({ error: 'CALLS_DISABLED' });
