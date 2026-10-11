@@ -103,7 +103,7 @@ const RAILWAY_HEALTH_AUTHORITY = 'healthcheck.railway.app';
 function validTarget(
   req: IncomingMessage,
   upgrade: boolean,
-  mode: 'phone' | 'web-verification',
+  mode: 'phone' | 'web-verification' | 'web-workbench',
 ): boolean {
   const target = req.url || '';
   if (
@@ -124,7 +124,7 @@ function validTarget(
     return (
       mode === 'phone' && req.method === 'GET' && target === '/voice/media'
     );
-  const web = mode === 'web-verification';
+  const web = mode !== 'phone';
   if (
     question !== -1 &&
     (web ? path !== '/auth/google/callback' : !queryPaths.has(path))
@@ -269,7 +269,7 @@ export function createCloudIngress(options: {
   runtime: CloudPhoneRuntime;
   upstreamPort: number;
   upstreamTimeoutMs?: number;
-  mode?: 'phone' | 'web-verification';
+  mode?: 'phone' | 'web-verification' | 'web-workbench';
 }) {
   const runtime = options?.runtime;
   let pinned: CloudPhoneRuntime;
@@ -286,7 +286,7 @@ export function createCloudIngress(options: {
   const timeoutMs = options.upstreamTimeoutMs ?? 30000;
   const mode = options.mode ?? 'phone';
   if (
-    !['phone', 'web-verification'].includes(mode) ||
+    !['phone', 'web-verification', 'web-workbench'].includes(mode) ||
     runtime.mode !== 'cloud' ||
     runtime.host !== pinned.host ||
     runtime.publicOrigin !== pinned.publicOrigin ||
@@ -341,7 +341,7 @@ export function createCloudIngress(options: {
     if (healthProbe) {
       const body = JSON.stringify({
         appId: 'ai-phone-solo',
-        ...(mode === 'web-verification' ? { mode, callsEnabled: false } : {}),
+        ...(mode !== 'phone' ? { mode, callsEnabled: false } : {}),
       });
       reply.writeHead(200, {
         'content-type': 'application/json',
@@ -431,7 +431,7 @@ export function createCloudIngress(options: {
   });
   server.on('upgrade', (req, external, head) => {
     const socket = external as Socket;
-    if (mode === 'web-verification') {
+    if (mode !== 'phone') {
       rejectUpgrade(socket, 403, 'CALLS_DISABLED', true);
       return;
     }

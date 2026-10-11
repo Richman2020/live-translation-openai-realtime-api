@@ -10,7 +10,10 @@ import {
   createCloudIngress,
 } from './cloud-ingress';
 import { parsePhoneRuntime, type CloudPhoneRuntime } from './cloud-runtime';
-import type { CloudWebVerificationConfig } from './cloud-web-verification-config';
+import type {
+  CloudWebVerificationConfig,
+  CloudWebWorkbenchConfig,
+} from './cloud-web-verification-config';
 import {
   GOOGLE_LOGIN_PATHS,
   GoogleBrowserLogin,
@@ -18,17 +21,6 @@ import {
 } from './google-login';
 import { GoogleOidcClient } from './google-oidc';
 
-const health = Object.freeze({
-  appId: 'ai-phone-solo',
-  mode: 'web-verification',
-  callsEnabled: false,
-});
-const status = Object.freeze({
-  mode: 'web-verification',
-  authenticated: true,
-  callsEnabled: false,
-  phoneStatus: 'disabled',
-});
 const readPaths = new Set<string>([
   '/api/health',
   '/api/status',
@@ -47,14 +39,25 @@ const publicPaths = new Set<string>(CLOUD_WEB_VERIFICATION_PUBLIC_PATHS);
 /** Identity and page verification only. There is no telephone resource,
  * journal, voice signer, controller, translation engine or provider instance.
  */
-export async function createCloudWebVerificationService(
-  config: CloudWebVerificationConfig,
-  options: {
-    now?: () => number;
-    googleFetch?: typeof fetch;
-    publicDir?: string;
-  } = {},
+type WebServiceOptions = {
+  now?: () => number;
+  googleFetch?: typeof fetch;
+  publicDir?: string;
+};
+
+async function createCallsDisabledWebService(
+  config: CloudWebVerificationConfig | CloudWebWorkbenchConfig,
+  mode: 'web-verification' | 'web-workbench',
+  options: WebServiceOptions,
 ) {
+  const configError =
+    mode === 'web-verification'
+      ? 'CLOUD_WEB_VERIFICATION_CONFIG_INVALID'
+      : 'CLOUD_WEB_WORKBENCH_CONFIG_INVALID';
+  const unavailable =
+    mode === 'web-verification'
+      ? 'CLOUD_TEST_EXPIRED'
+      : 'CLOUD_WEB_UNAVAILABLE';
   const clock = options.now || Date.now;
   const initialTime = clock();
   let runtime: CloudPhoneRuntime;
@@ -66,25 +69,38 @@ export async function createCloudWebVerificationService(
       CLOUD_WARM_INSTANCES: String(config?.runtime?.warmInstances),
     }) as CloudPhoneRuntime;
   } catch {
-    throw new Error('CLOUD_WEB_VERIFICATION_CONFIG_INVALID');
+    throw new Error(configError);
   }
   if (
-    config.mode !== 'web-verification' ||
+    config.mode !== mode ||
     config.runtime.mode !== runtime.mode ||
     config.runtime.host !== runtime.host ||
     config.runtime.publicOrigin !== runtime.publicOrigin ||
     config.runtime.mediaOrigin !== runtime.mediaOrigin ||
     !Number.isSafeInteger(initialTime) ||
     initialTime < 0 ||
-    !Number.isSafeInteger(config.testDeadline) ||
-    config.testDeadline <= initialTime ||
-    config.testDeadline - initialTime > 3600000 ||
+    (config.mode === 'web-verification' &&
+      (!Number.isSafeInteger(config.testDeadline) ||
+        config.testDeadline <= initialTime ||
+        config.testDeadline - initialTime > 3600000)) ||
     config.google?.redirectUri !==
       `${runtime.publicOrigin}${GOOGLE_LOGIN_PATHS.callback}`
   )
-    throw new Error('CLOUD_WEB_VERIFICATION_CONFIG_INVALID');
+    throw new Error(configError);
   runtime = Object.freeze(runtime);
-  const { testDeadline } = config;
+  const testDeadline =
+    config.mode === 'web-verification' ? config.testDeadline : undefined;
+  const health = Object.freeze({
+    appId: 'ai-phone-solo',
+    mode,
+    callsEnabled: false,
+  });
+  const status = Object.freeze({
+    mode,
+    authenticated: true,
+    callsEnabled: false,
+    phoneStatus: 'disabled',
+  });
   const authority = new URL(runtime.publicOrigin).host;
   let login: GoogleBrowserLogin | undefined;
   let app: FastifyInstance | undefined;
@@ -115,7 +131,11 @@ export async function createCloudWebVerificationService(
     } catch {
       time = NaN;
     }
-    if (!Number.isSafeInteger(time) || time < 0 || time >= testDeadline)
+    if (
+      !Number.isSafeInteger(time) ||
+      time < 0 ||
+      (testDeadline !== undefined && time >= testDeadline)
+    )
       expired = true;
     return expired ? close() : undefined;
   };
@@ -133,11 +153,11 @@ export async function createCloudWebVerificationService(
       expired ||
       !Number.isSafeInteger(time) ||
       time < 0 ||
-      time >= testDeadline
+      (testDeadline !== undefined && time >= testDeadline)
     ) {
       expired = true;
       close().catch(() => {});
-      throw new Error('CLOUD_TEST_EXPIRED');
+      throw new Error(unavailable);
     }
     return time;
   };
@@ -176,7 +196,7 @@ export async function createCloudWebVerificationService(
       try {
         checkedNow();
       } catch {
-        reply.code(503).send({ error: 'CLOUD_TEST_EXPIRED' });
+        reply.code(503).send({ error: unavailable });
         return;
       }
       const remote = request.raw.socket.remoteAddress || request.ip;
@@ -226,7 +246,7 @@ export async function createCloudWebVerificationService(
           .removeHeader('location')
           .removeHeader('content-length')
           .type('application/json');
-        done(null, JSON.stringify({ error: 'CLOUD_TEST_EXPIRED' }));
+        done(null, JSON.stringify({ error: unavailable }));
       }
     });
     app.setErrorHandler((error, _request, reply) => {
@@ -252,13 +272,15 @@ export async function createCloudWebVerificationService(
         transport.executeSessionHttp(request, (context) => ({
           authenticated: true,
           csrfToken: login.policy.currentCsrfToken(context),
-          expiresAt: Math.min(testDeadline, login.policy.expiresAt(context)),
+          expiresAt:
+            testDeadline === undefined
+              ? login.policy.expiresAt(context)
+              : Math.min(testDeadline, login.policy.expiresAt(context)),
         })),
     );
     const publicDir = resolve(options.publicDir || 'public');
     for (const path of CLOUD_WEB_VERIFICATION_PUBLIC_PATHS) {
-      const filename =
-        path === '/controlled' ? 'web-verification.html' : path.slice(1);
+      const filename = path === '/controlled' ? `${mode}.html` : path.slice(1);
       app.get(path, (_request, reply) => {
         reply.header(
           'content-security-policy',
@@ -308,7 +330,7 @@ export async function createCloudWebVerificationService(
     ingress = createCloudIngress({
       runtime,
       upstreamPort: address.port,
-      mode: 'web-verification',
+      mode,
     });
     await new Promise<void>((resolveStarted, reject) => {
       ingress.server.once('error', reject);
@@ -318,11 +340,40 @@ export async function createCloudWebVerificationService(
       });
     });
     checkedNow();
-    timer = setInterval(() => expireIfDue()?.catch(() => {}), 250);
-    timer.unref();
+    if (testDeadline !== undefined) {
+      timer = setInterval(() => expireIfDue()?.catch(() => {}), 250);
+      timer.unref();
+    }
     return Object.freeze({ app, ingress, login, deadline, close });
   } catch (error) {
     await close();
     throw error;
   }
+}
+
+export function createCloudWebVerificationService(
+  config: CloudWebVerificationConfig,
+  options: WebServiceOptions = {},
+) {
+  return createCallsDisabledWebService(config, 'web-verification', options);
+}
+
+/** Persistent availability is distinct from the bounded verification service.
+ * Authentication still expires; this service never constructs phone resources.
+ */
+export async function createCloudWebWorkbenchService(
+  config: CloudWebWorkbenchConfig,
+  options: WebServiceOptions = {},
+) {
+  const service = await createCallsDisabledWebService(
+    config,
+    'web-workbench',
+    options,
+  );
+  return Object.freeze({
+    app: service.app,
+    ingress: service.ingress,
+    login: service.login,
+    close: service.close,
+  });
 }

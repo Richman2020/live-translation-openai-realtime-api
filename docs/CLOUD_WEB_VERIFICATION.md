@@ -1,5 +1,7 @@
 # 限时网页与 Google 登录验证模式
 
+2026-10-11 新增独立[日常网页工作台](CLOUD_WEB_WORKBENCH.md)，须显式选择 `web-workbench`；本文件所述 `web-verification` 期限及保护全部保持。下面资源/暂存状态是 2026-10-10 实施时的历史：后续主线程曾限时部署原 `5159ce3`，并于 23:55–23:57 UTC 停止两个服务、保留 5 GB 卷。本次工作台代码没有更新平台源码或部署，持续托管预算另行协调。
+
 2026-10-10；新增显式 `CLOUD_SERVICE_MODE=web-verification`，用于先验收固定云网址、登录页及 Google 身份边界。未设置该变量时默认 `phone`，仍执行[电话模式](CLOUD_CONTINUOUS_TRIAL.md)全部供应商、controller、Voice、预算和持久化保护；缺少电话配置不会自动进入网页模式。
 
 网页模式固定 `callsEnabled:false`，独立构建网页与登录服务，不创建电话 SessionManager、OpenAI/Twilio provider、controller、Voice signer 或 budget journal，不读取或要求电话供应商秘密、目标号码、四项 `CONFIRMED` 标记、费率、通话预留或卷配置。它不通过占位付费凭据或虚假能力确认启动，也不提供通话、语音回调、媒体或任何 WebSocket 升级路径。页面显示的禁用状态和服务端拒绝共同约束此模式。

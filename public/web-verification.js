@@ -2,6 +2,11 @@
 // Session CSRF stays in this closure; it is never stored or rendered.
 export function startWebVerification() {
   const $ = id => document.getElementById(id);
+  // The server selects a fixed HTML surface. This value only narrows which
+  // calls-disabled status the page accepts; URLs and requests cannot select it.
+  const expectedMode = document.documentElement.dataset.serviceMode;
+  const validMode = expectedMode === 'web-verification' || expectedMode === 'web-workbench';
+  const dailyWorkbench = expectedMode === 'web-workbench';
   const state = { phase: 'checking', loginAvailable: false, authenticated: false,
     csrfToken: '', expiresAt: 0, error: '', message: '电话功能保持关闭。' };
   let generation = 0;
@@ -9,12 +14,12 @@ export function startWebVerification() {
   let disposed = false;
   const pending = () => Boolean(operation);
   const messages = {
-    checking: ['正在检查登录', '请稍候，正在读取会话状态。', '正在检查网页验收服务。'],
+    checking: ['正在检查登录', '请稍候，正在读取会话状态。', dailyWorkbench ? '正在检查工作台服务。' : '正在检查网页验收服务。'],
     'signed-out': ['尚未登录', '使用服务端允许的 Google 工作账号登录。', '网页登录尚未确认。'],
     authenticated: ['已登录', '服务端已验证本次 Google 登录。', '网页登录与会话状态已确认；电话功能关闭。'],
     expired: ['登录已失效', '本次会话已失效，请重新登录。', '会话失效；电话功能保持关闭。'],
     offline: ['登录状态待确认', '网络离线，恢复连接后请检查状态。', '网络离线；网页状态未确认。'],
-    unavailable: ['登录状态待确认', '当前无法确认登录，请刷新状态后重试。', '网页验收状态未确认。'],
+    unavailable: ['登录状态待确认', '当前无法确认登录，请刷新状态后重试。', dailyWorkbench ? '工作台状态未确认。' : '网页验收状态未确认。'],
     'login-pending': ['正在准备 Google 登录', '请等待登录跳转，也可以取消。', '登录尚未完成；电话功能关闭。'],
     cancelling: ['正在取消登录', '等待服务端确认取消。', '登录取消待确认；电话功能关闭。'],
     'logging-out': ['正在退出登录', '等待服务端确认退出。', '退出尚未确认；电话功能关闭。'],
@@ -39,13 +44,13 @@ export function startWebVerification() {
     $('google-login-cancel').disabled = state.phase === 'cancelling';
     $('renew-session').hidden = !state.authenticated;
     $('renew-session').disabled = pending() || !state.csrfToken || navigator.onLine === false;
-    $('refresh-status').disabled = pending();
+    $('refresh-status').disabled = pending() || !validMode;
     text('session-expiry', state.authenticated
       ? `当前有效期剩余约 ${Math.max(0, Math.ceil((state.expiresAt - Date.now()) / 60000))} 分钟。`
       : '尚未确认有效的登录会话。');
   }
   function begin(kind, phase) {
-    if (disposed || operation) return null;
+    if (disposed || operation || !validMode) return null;
     const current = { kind, generation: ++generation, controller: new AbortController(), timeout: null };
     operation = current; state.phase = phase; state.error = '';
     state.message = '电话功能保持关闭。'; render();
@@ -74,8 +79,11 @@ export function startWebVerification() {
     if (!currentOperation(current)) return false;
     if (status.status === 401) { clearSession(); state.phase = 'signed-out'; return false; }
     const value = status.value;
-    if (!status.ok || value?.mode !== 'web-verification' || value.authenticated !== true
-      || value.callsEnabled !== false || value.phoneStatus !== 'disabled') throw new Error('Unconfirmed service');
+    if (!status.ok || value?.mode !== expectedMode || value.authenticated !== true
+      || value.callsEnabled !== false || value.phoneStatus !== 'disabled') {
+      state.loginAvailable = false;
+      throw new Error('Unconfirmed service');
+    }
     const session = await request('/api/browser-session', current);
     if (!currentOperation(current)) return false;
     if (session.status === 401) { expired(); return false; }
@@ -196,7 +204,10 @@ export function startWebVerification() {
     document.documentElement.dataset.webVerificationReady = 'false';
   });
   window.addEventListener('pageshow', event => { if (event.persisted && disposed) window.location.reload(); });
-  render(); refresh();
+  if (!validMode) {
+    state.phase = 'unavailable'; state.error = '页面模式未能确认，请重新打开工作台。';
+    document.documentElement.dataset.webVerificationReady = 'true'; render();
+  } else { render(); refresh(); }
 }
 
 startWebVerification();

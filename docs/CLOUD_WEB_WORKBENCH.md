@@ -1,0 +1,44 @@
+# 日常网页工作台
+
+2026-10-11；显式 `CLOUD_SERVICE_MODE=web-workbench` 提供可持续运行的个人登录工作台，不要求、读取或应用 `CLOUD_TEST_DEADLINE`。继承过期的试验变量也不会让此模式按旧试验时间停止。服务本身没有一小时截止，并不代表获得持续托管或日常收费电话的预算授权。
+
+| 模式 | 服务期限 | 电话与 WebSocket |
+| --- | --- | --- |
+| 缺省 `phone` | 原最多一小时试验期限及完整电话配置/收费门槛 | 原受保护电话能力 |
+| 显式 `web-verification` | 原最多一小时验证期限 | 全部关闭 |
+| 显式 `web-workbench` | 没有试验服务截止时间 | 全部关闭 |
+
+模式只在启动时从运行配置选择；网页请求、URL 和后来修改的环境不能切换权限。`/controlled` 返回本模式固定的工作台页面，共享登录 JS 严格核验固定 HTML 模式与服务端状态。页面明确显示电话关闭和无通话记录，当前不能拨号、接收字幕或打开媒体流。
+
+## 最小独立配置
+
+```dotenv
+CLOUD_SERVICE_MODE=web-workbench
+AI_PHONE_RUNTIME_MODE=cloud
+PORT=8080
+CLOUD_WARM_INSTANCES=1
+CLOUD_PUBLIC_ORIGIN=https://ai-phone-test-staging.up.railway.app
+PUBLIC_BASE_URL=https://ai-phone-test-staging.up.railway.app
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+GOOGLE_ALLOWED_EMAIL=
+# 非 Gmail 配置至少一项已核实约束；省略未使用的变量，不能声明空值。
+# GOOGLE_HOSTED_DOMAIN=
+# GOOGLE_SUBJECT=
+```
+
+配置含真实秘密的值只保留在批准的运行环境，不能写 Git、示例或日志。精确 origin、Google redirect URI、已验证精确邮箱、预期 hosted domain 或已核实 subject 的校验与[限时网页模式](CLOUD_WEB_VERIFICATION.md)完全相同，不提供注册或身份猜测。此模式不读取或要求 OpenAI/Twilio 凭据、号码、四个电话确认标记、费率、通话预留或持久卷，也不创建 provider、controller、Voice signer、电话 manager、模型或 journal。
+
+现有 `check:cloud` / `start:cloud` 入口按上述显式模式分流。`--check` 输出固定 `serviceMode:web-workbench`、`callsEnabled:false`，仅证明配置检查通过，不执行 Google 交换、供应商请求或部署。
+
+## 登录期限与安全边界
+
+服务可持续运行，会话仍 **15 分钟空闲到期、最长 8 小时**。读取页面、状态或健康不续权；只有用户手动续期且通过当前 Origin/CSRF 校验才能更新空闲期限，不能超过绝对上限。退出、取消授权、关闭服务及迟到 OAuth 结果均不能复活旧权限。会话与登录流程只在有界内存中保存；进程重启后旧 cookie 无效，需要重新 Google 登录，没有新增持久身份或自动续权。
+
+保留 Google RS256 验签、issuer/audience、state/nonce/PKCE、verified email、cookie、Origin/CSRF 和发送最终响应前的授权复核。时钟非法或服务关闭时拒绝新权限。固定 HTTPS Host 与代理边界、单进程 loopback 上游及精确路径白名单保持；匿名仅允许登录壳、明确资产、健康与既有登录流程，状态和 session bootstrap 仍须认证。电话创建、controller、Voice、回调、媒体和全部 WebSocket 升级从入口及服务端拒绝。原本机 cloud 启动保护不变。
+
+## 交付与运行状态
+
+本轮仅实现代码并在云端 Linux 用虚拟时钟、离线假 Google 提供方和实际 Chromium 验证；不更新 Railway 源码来源、部署、变量、容量或卷，不访问付费 API 或拨号。上一轮主线程的限时部署已于 2026-10-10 23:55–23:57 UTC 停止，两服务 Offline，5 GB 卷保留；平台源码仍固定此前 `5159ce3`。持续托管的预算与启动由主线程另行决定，本模式取消应用试验截止不构成平台账单硬封顶。
+
+真实公网页面/Google 应用 OAuth、真实麦克风/手机、数字否定、长讲话积压、自然度和耳听延迟仍未通过本轮验收。离线假登录与健康不能代替这些证据。后续开启日常电话还需独立费用准入、每通生命周期及结算设计，本轮不将单通试验计数改成多通。

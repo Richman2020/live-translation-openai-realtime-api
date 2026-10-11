@@ -1,4 +1,4 @@
-/** Actual web-verification page and login-only cloud service, entirely offline.
+/** Actual fixed-mode web page and login-only cloud service, entirely offline.
  * Chrome's Google navigation is intercepted before network access. A synthetic
  * RSA provider validates PKCE during the real asynchronous token exchange.
  * No auth cookie is preinstalled, and no Google account, secret or call is used.
@@ -19,12 +19,19 @@ import WebSocket from 'ws';
 
 import { CLOUD_SESSION_COOKIE } from '../src/solo/cloud-access';
 import { GOOGLE_LOGIN_COOKIE } from '../src/solo/google-login';
-import { createCloudWebVerificationService } from '../src/solo/cloud-web-verification-service';
+import {
+  createCloudWebVerificationService,
+  createCloudWebWorkbenchService,
+} from '../src/solo/cloud-web-verification-service';
 import {
   parseCloudWebVerificationConfig,
+  parseCloudWebWorkbenchConfig,
   selectCloudServiceMode,
 } from '../src/solo/cloud-web-verification-config';
 
+const browserMode = process.env.CLOUD_WEB_BROWSER_MODE ?? 'web-verification';
+if (browserMode !== 'web-verification' && browserMode !== 'web-workbench')
+  throw new Error('CLOUD_WEB_BROWSER_MODE_INVALID');
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const executable =
   process.env.CHROME_BIN ||
@@ -35,7 +42,7 @@ const executable =
   ].find(existsSync);
 if (!executable)
   throw new Error('Set CHROME_BIN to an installed Chromium executable.');
-const directory = await mkdtemp(join(tmpdir(), 'web-verification-offline-'));
+const directory = await mkdtemp(join(tmpdir(), `${browserMode}-offline-`));
 const profile = join(directory, 'chrome');
 const pause = (ms: number) => new Promise<void>((done) => setTimeout(done, ms));
 const keys = generateKeyPairSync('rsa', { modulusLength: 2048 });
@@ -99,6 +106,7 @@ let signedOutScreenshot: string | undefined;
 let signedInScreenshot: string | undefined;
 let service:
   | Awaited<ReturnType<typeof createCloudWebVerificationService>>
+  | Awaited<ReturnType<typeof createCloudWebWorkbenchService>>
   | undefined;
 
 function check(actual: unknown, expected: unknown, label: string) {
@@ -555,7 +563,7 @@ try {
   origin = `https://phone.example.test:${address.port}`;
   const runtimePort = await reserveFreePort();
   const environment = {
-    CLOUD_SERVICE_MODE: 'web-verification',
+    CLOUD_SERVICE_MODE: browserMode,
     AI_PHONE_RUNTIME_MODE: 'cloud',
     PORT: String(runtimePort),
     CLOUD_PUBLIC_ORIGIN: origin,
@@ -564,7 +572,9 @@ try {
     GOOGLE_CLIENT_SECRET: syntheticSecret,
     GOOGLE_ALLOWED_EMAIL: syntheticEmail,
     GOOGLE_HOSTED_DOMAIN: 'workspace.example.test',
-    CLOUD_TEST_DEADLINE: new Date(clock() + 3600000).toISOString(),
+    ...(browserMode === 'web-verification'
+      ? { CLOUD_TEST_DEADLINE: new Date(clock() + 3600000).toISOString() }
+      : {}),
   };
   for (const name of [
     'TWILIO_AUTH_TOKEN',
@@ -579,10 +589,14 @@ try {
         );
       },
     });
-  const configuration = parseCloudWebVerificationConfig(environment, clock());
+  const parseConfiguration =
+    browserMode === 'web-workbench'
+      ? parseCloudWebWorkbenchConfig
+      : parseCloudWebVerificationConfig;
+  const configuration = parseConfiguration(environment, clock());
   check(
     configuration.mode,
-    'web-verification',
+    browserMode,
     'explicit web-only configuration selects the independent service',
   );
   for (const value of ['', 'web-verification ', 'PHONE', 'unknown'])
@@ -594,21 +608,21 @@ try {
     'empty or unknown mode cannot silently fall back to phone service',
   );
   assert.throws(
-    () =>
-      parseCloudWebVerificationConfig(
-        { ...environment, GOOGLE_CLIENT_ID: '' },
-        clock(),
-      ),
+    () => parseConfiguration({ ...environment, GOOGLE_CLIENT_ID: '' }, clock()),
     /CLOUD_CONFIG_INVALID:GOOGLE_CLIENT_ID/,
   );
   checks.push(
     'incomplete web login configuration fails instead of selecting phone',
   );
-  service = await createCloudWebVerificationService(configuration, {
+  const serviceOptions = {
     googleFetch: fakeProviderFetch,
     now: clock,
     publicDir: join(repo, 'public'),
-  });
+  };
+  service =
+    configuration.mode === 'web-workbench'
+      ? await createCloudWebWorkbenchService(configuration, serviceOptions)
+      : await createCloudWebVerificationService(configuration, serviceOptions);
   const backend = service.ingress.server.address();
   assert.ok(backend && typeof backend !== 'string');
   backendPort = backend.port;
@@ -685,6 +699,18 @@ try {
     false,
     'anonymous shell never claims verified login',
   );
+  if (browserMode === 'web-workbench') {
+    check(
+      await page.evaluate('document.documentElement.dataset.serviceMode'),
+      browserMode,
+      'workbench document declares its fixed server mode',
+    );
+    check(
+      Object.hasOwn(configuration, 'testDeadline'),
+      false,
+      'workbench configuration has no service-wide trial deadline',
+    );
+  }
   check(
     (await page.state()).callsDisabled,
     true,
@@ -811,7 +837,7 @@ try {
   check(
     status,
     {
-      mode: 'web-verification',
+      mode: browserMode,
       authenticated: true,
       callsEnabled: false,
       phoneStatus: 'disabled',
@@ -834,6 +860,54 @@ try {
       captureBeyondViewport: false,
     })
   ).data;
+  if (browserMode === 'web-workbench') {
+    const target = await (
+      await fetch(`http://127.0.0.1:${port}/json/new?about:blank`, {
+        method: 'PUT',
+      })
+    ).json();
+    const mismatchPage = new CdpPage(target.webSocketDebuggerUrl);
+    clients.push(mismatchPage);
+    await mismatchPage.ready();
+    await mismatchPage.send('Page.addScriptToEvaluateOnNewDocument', {
+      source: `new MutationObserver((records, observer) => {
+        if(document.documentElement) {
+          document.documentElement.dataset.serviceMode='web-verification';
+          observer.disconnect();
+        }
+      }).observe(document,{childList:true,subtree:true});`,
+    });
+    await mismatchPage.send('Page.navigate', { url: `${origin}/controlled` });
+    await eventually(
+      async () => (await mismatchPage.state()).ready === 'true',
+      'Mismatched fixed document mode fails closed',
+    );
+    check(
+      await mismatchPage.evaluate(
+        `fetch('/api/status').then(r=>r.json()).then(v=>({mode:v.mode,authenticated:v.authenticated}))`,
+      ),
+      { mode: browserMode, authenticated: true },
+      'mode mismatch uses the actual authenticated service response',
+    );
+    check(
+      {
+        phase: (await mismatchPage.state()).phase,
+        authenticated: (await mismatchPage.state()).authenticated,
+        callsDisabled: (await mismatchPage.state()).callsDisabled,
+      },
+      { phase: 'unavailable', authenticated: false, callsDisabled: true },
+      'a different fixed page mode cannot accept an authenticated response',
+    );
+    check(
+      await mismatchPage.evaluate(
+        `document.getElementById('google-login').disabled && document.getElementById('google-logout').hidden && document.getElementById('renew-session').hidden`,
+      ),
+      true,
+      'mode mismatch exposes no session action or login retry capability',
+    );
+    await fetch(`http://127.0.0.1:${port}/json/close/${target.id}`);
+    await page.send('Page.bringToFront');
+  }
   const prohibited = [
     ['POST', '/api/calls'],
     ['POST', '/api/controller/acquire'],
@@ -1115,6 +1189,13 @@ try {
     true,
     'expired login leaves no dial control',
   );
+  if (browserMode === 'web-workbench') {
+    check(
+      await page.evaluate(`fetch('/api/health').then(r=>r.status)`),
+      200,
+      'idle login expiry leaves the workbench service running',
+    );
+  }
   check(
     await page.evaluate('window.__webVerificationProbe'),
     { microphones: 0, devices: 0, webSockets: 0 },
@@ -1161,7 +1242,8 @@ try {
     },
     'private native status request uses real same-origin Fetch Metadata',
   );
-  const output = join(repo, '.runtime', 'web-verification-browser');
+  const artifactDirectory = `.runtime/${browserMode}-browser`;
+  const output = join(repo, artifactDirectory);
   await mkdir(output, { recursive: true });
   assert.ok(signedOutScreenshot && signedInScreenshot);
   await writeFile(
@@ -1182,6 +1264,7 @@ try {
   );
   const result = {
     passed: true,
+    mode: browserMode,
     checkCount: checks.length,
     checks,
     externalRequests: 0,
@@ -1191,9 +1274,9 @@ try {
     realSupplierCalls: supplierCalls,
     exceptions: faults,
     artifacts: [
-      '.runtime/web-verification-browser/signed-out.png',
-      '.runtime/web-verification-browser/signed-in.png',
-      '.runtime/web-verification-browser/expired.png',
+      `${artifactDirectory}/signed-out.png`,
+      `${artifactDirectory}/signed-in.png`,
+      `${artifactDirectory}/expired.png`,
     ],
     browser: await page.send('Browser.getVersion'),
   };

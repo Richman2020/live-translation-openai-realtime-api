@@ -10,8 +10,14 @@ import {
   parsePhoneRuntime,
   type CloudPhoneRuntime,
 } from '../src/solo/cloud-runtime';
-import type { CloudWebVerificationConfig } from '../src/solo/cloud-web-verification-config';
-import { createCloudWebVerificationService } from '../src/solo/cloud-web-verification-service';
+import type {
+  CloudWebVerificationConfig,
+  CloudWebWorkbenchConfig,
+} from '../src/solo/cloud-web-verification-config';
+import {
+  createCloudWebVerificationService,
+  createCloudWebWorkbenchService,
+} from '../src/solo/cloud-web-verification-service';
 import { GOOGLE_OIDC } from '../src/solo/google-oidc';
 
 const origin = 'https://phone.example.test';
@@ -82,7 +88,11 @@ function config(port: number): CloudWebVerificationConfig {
     testDeadline: initialTime + 3_600_000,
   };
 }
-async function fixture(t: TestContext, deadlineDurationMs = 3_600_000) {
+async function fixture(
+  t: TestContext,
+  deadlineDurationMs = 3_600_000,
+  mode: 'web-verification' | 'web-workbench' = 'web-verification',
+) {
   let now = initialTime;
   let fetches = 0;
   let tokenBarrier: ReturnType<typeof deferred> | undefined;
@@ -137,10 +147,19 @@ async function fixture(t: TestContext, deadlineDurationMs = 3_600_000) {
     ...settings,
     testDeadline: initialTime + deadlineDurationMs,
   };
-  const service = await createCloudWebVerificationService(boundedSettings, {
-    googleFetch: fakeFetch,
-    now: () => now,
-  });
+  const workbenchSettings: CloudWebWorkbenchConfig = {
+    mode: 'web-workbench',
+    runtime: settings.runtime,
+    google: settings.google,
+  };
+  const ports = { googleFetch: fakeFetch, now: () => now };
+  const trialService =
+    mode === 'web-verification'
+      ? await createCloudWebVerificationService(boundedSettings, ports)
+      : undefined;
+  const service =
+    trialService ||
+    (await createCloudWebWorkbenchService(workbenchSettings, ports));
   t.after(() => service.close());
   const inject = (
     url: string,
@@ -154,8 +173,12 @@ async function fixture(t: TestContext, deadlineDurationMs = 3_600_000) {
       remoteAddress: '127.0.0.1',
       ...(method === 'POST' ? { payload: {} } : {}),
     });
-  const start = async () => {
-    const result = await inject('/auth/google/start', writeHeaders(), 'POST');
+  const start = async (cookie?: string) => {
+    const result = await inject(
+      '/auth/google/start',
+      writeHeaders(cookie),
+      'POST',
+    );
     assert.equal(result.statusCode, 200, result.body);
     const url = new URL(result.json().authorizationUrl);
     const code = `offline-code-${codes.size}`;
@@ -185,7 +208,10 @@ async function fixture(t: TestContext, deadlineDurationMs = 3_600_000) {
   };
   return {
     service,
+    deadline: trialService?.deadline,
     settings: boundedSettings,
+    restartWorkbench: () =>
+      createCloudWebWorkbenchService(workbenchSettings, ports),
     inject,
     start,
     finish,
@@ -194,6 +220,9 @@ async function fixture(t: TestContext, deadlineDurationMs = 3_600_000) {
     fetches: () => fetches,
     advance: (milliseconds: number) => {
       now += milliseconds;
+    },
+    invalidateClock: () => {
+      now = NaN;
     },
     blockToken: () => {
       tokenBarrier = deferred();
@@ -233,6 +262,266 @@ function send(
     request.end();
   });
 }
+
+test('continuous workbench stays available beyond one hour and reports its actual calls-disabled mode', async (t) => {
+  const f = await fixture(t, undefined, 'web-workbench');
+  assert.equal(Object.hasOwn(f.service, 'deadline'), false);
+  assert.equal(f.fetches(), 0);
+  f.advance(2 * 60 * 60 * 1000);
+  const health = await f.inject('/api/health');
+  assert.deepEqual(health.json(), {
+    appId: 'ai-phone-solo',
+    mode: 'web-workbench',
+    callsEnabled: false,
+  });
+  assert.equal((await f.inject('/controlled')).statusCode, 200);
+  const account = await f.signIn();
+  assert.equal(
+    account.expiresAt,
+    initialTime + 2 * 60 * 60 * 1000 + 15 * 60 * 1000,
+  );
+  assert.deepEqual(
+    (await f.inject('/api/status', readHeaders(account.cookie))).json(),
+    {
+      mode: 'web-workbench',
+      authenticated: true,
+      callsEnabled: false,
+      phoneStatus: 'disabled',
+    },
+  );
+  assert.equal(f.service.ingress.server.listening, true);
+  assert.equal(f.service.app.server.listening, true);
+});
+
+test('workbench preserves idle and absolute session expiry without passive renewal', async (t) => {
+  const f = await fixture(t, undefined, 'web-workbench');
+  const idleAccount = await f.signIn();
+  f.advance(14 * 60 * 1000);
+  assert.equal(
+    (await f.inject('/api/status', readHeaders(idleAccount.cookie))).statusCode,
+    200,
+  );
+  f.advance(60 * 1000);
+  assert.equal(
+    (await f.inject('/api/status', readHeaders(idleAccount.cookie))).statusCode,
+    401,
+  );
+  const account = await f.signIn();
+  const signedInAt = initialTime + 15 * 60 * 1000;
+  for (let elapsed = 10; elapsed <= 470; elapsed += 10) {
+    f.advance(10 * 60 * 1000);
+    const renewed = await f.inject(
+      '/auth/session/renew',
+      writeHeaders(account.cookie, account.csrf),
+      'POST',
+    );
+    assert.equal(renewed.statusCode, 200, renewed.body);
+  }
+  const lastRead = await f.inject(
+    '/api/browser-session',
+    readHeaders(account.cookie),
+  );
+  assert.equal(lastRead.json().expiresAt, signedInAt + 8 * 60 * 60 * 1000);
+  f.advance(10 * 60 * 1000);
+  assert.equal(
+    (await f.inject('/api/status', readHeaders(account.cookie))).statusCode,
+    401,
+  );
+  assert.equal(
+    (
+      await f.inject(
+        '/auth/session/renew',
+        writeHeaders(account.cookie, account.csrf),
+        'POST',
+      )
+    ).statusCode,
+    401,
+  );
+  assert.equal((await f.inject('/api/health')).statusCode, 200);
+});
+
+test('workbench logout revokes a pending re-login and prevents its late cookie commit', async (t) => {
+  const f = await fixture(t, undefined, 'web-workbench');
+  const account = await f.signIn();
+  const flow = await f.start(account.cookie);
+  const gate = f.blockToken();
+  const pending = f.finish(flow);
+  await gate.entered;
+  const loggedOut = await f.inject(
+    '/auth/logout',
+    writeHeaders(`${account.cookie}; ${flow.cookie}`, account.csrf),
+    'POST',
+  );
+  assert.equal(loggedOut.statusCode, 200, loggedOut.body);
+  gate.release();
+  const callback = await pending;
+  assert.equal(callback.statusCode, 401);
+  assert.equal(callback.headers['set-cookie'], undefined);
+  assert.equal(
+    (await f.inject('/api/status', readHeaders(account.cookie))).statusCode,
+    401,
+  );
+});
+
+test('workbench restart rejects old opaque sessions and does not restore an authenticated owner', async (t) => {
+  const f = await fixture(t, undefined, 'web-workbench');
+  const account = await f.signIn();
+  const context = f.service.login.policy.authenticate(
+    readHeaders(account.cookie),
+    'read',
+    { surface: 'http', method: 'GET' },
+  );
+  await f.service.close();
+  assert.throws(
+    () => f.service.login.policy.revalidate(context, 'read'),
+    /UNAUTHORIZED/,
+  );
+  const restarted = await f.restartWorkbench();
+  t.after(() => restarted.close());
+  const response = await restarted.app.inject({
+    method: 'GET',
+    url: '/api/status',
+    headers: readHeaders(account.cookie),
+    remoteAddress: '127.0.0.1',
+  });
+  assert.equal(response.statusCode, 401);
+  assert.equal(
+    (
+      await restarted.app.inject({
+        method: 'GET',
+        url: '/api/health',
+        headers: readHeaders(),
+        remoteAddress: '127.0.0.1',
+      })
+    ).statusCode,
+    200,
+  );
+});
+
+test('workbench preserves strict CSRF and fails closed on invalid runtime clock', async (t) => {
+  const f = await fixture(t, undefined, 'web-workbench');
+  const account = await f.signIn();
+  assert.equal(
+    (
+      await f.inject(
+        '/auth/session/renew',
+        writeHeaders(account.cookie),
+        'POST',
+      )
+    ).statusCode,
+    403,
+  );
+  assert.equal(
+    (
+      await f.inject('/api/status', {
+        ...readHeaders(account.cookie),
+        origin: 'https://other.example.test',
+      })
+    ).statusCode,
+    403,
+  );
+  f.invalidateClock();
+  const result = await f.inject('/api/status', readHeaders(account.cookie));
+  assert.equal(result.statusCode, 503);
+  assert.deepEqual(result.json(), { error: 'CLOUD_WEB_UNAVAILABLE' });
+  await f.service.close();
+  assert.equal(f.service.ingress.server.listening, false);
+});
+
+test('workbench rejects phone HTTP and every WS through the same exact ingress allowlist', async (t) => {
+  const f = await fixture(t, undefined, 'web-workbench');
+  const account = await f.signIn();
+  for (const path of [
+    '/api/calls',
+    '/api/controller/acquire',
+    '/api/token',
+    '/api/presence',
+    '/api/settings',
+    '/api/events',
+    '/voice/client',
+    '/voice/connect',
+    '/voice/status',
+    '/voice/media',
+    '/app.js',
+    '/vendor/twilio.min.js',
+  ]) {
+    assert.equal(
+      (await f.inject(path, writeHeaders(account.cookie, account.csrf), 'POST'))
+        .statusCode,
+      403,
+      path,
+    );
+    for (const method of ['GET', 'POST', 'HEAD'])
+      assert.equal(
+        (await send(f.settings.runtime.port, path, method)).status,
+        404,
+        `${method} ${path}`,
+      );
+  }
+  for (const path of ['/voice/media', '/api/status', '/controlled']) {
+    const socket = createConnection({
+      host: '127.0.0.1',
+      port: f.settings.runtime.port,
+    });
+    const result = new Promise<string>((resolve, reject) => {
+      socket.once('error', reject);
+      socket.once('data', (chunk) => resolve(chunk.toString()));
+    });
+    socket.once('connect', () =>
+      socket.write(
+        `GET ${path} HTTP/1.1\r\nHost: ${authority}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n`,
+      ),
+    );
+    assert.match(await result, /403 Rejected/);
+    socket.destroy();
+  }
+  const probe = await send(f.settings.runtime.port, '/api/health', 'GET', {
+    host: 'healthcheck.railway.app',
+  });
+  assert.deepEqual(JSON.parse(probe.body), {
+    appId: 'ai-phone-solo',
+    mode: 'web-workbench',
+    callsEnabled: false,
+  });
+});
+
+test('web factories reject mode reinterpretation before creating resources and never read workbench deadline', async () => {
+  const trial = config(await reservePort());
+  const workbench: CloudWebWorkbenchConfig = {
+    mode: 'web-workbench',
+    runtime: trial.runtime,
+    google: trial.google,
+  };
+  await assert.rejects(
+    createCloudWebVerificationService(
+      workbench as unknown as CloudWebVerificationConfig,
+      { now: () => initialTime },
+    ),
+    /CLOUD_WEB_VERIFICATION_CONFIG_INVALID/,
+  );
+  await assert.rejects(
+    createCloudWebWorkbenchService(
+      trial as unknown as CloudWebWorkbenchConfig,
+      { now: () => initialTime },
+    ),
+    /CLOUD_WEB_WORKBENCH_CONFIG_INVALID/,
+  );
+  const guarded = new Proxy(workbench, {
+    get(target, name, receiver) {
+      if (
+        name === 'testDeadline' ||
+        (typeof name === 'string' &&
+          /^(TWILIO_|OPENAI_|CLOUD_TEST_)/.test(name))
+      )
+        throw new Error('Unrelated field read');
+      return Reflect.get(target, name, receiver);
+    },
+  });
+  const service = await createCloudWebWorkbenchService(guarded, {
+    now: () => initialTime,
+  });
+  await service.close();
+});
 
 test('web service starts without provider traffic, exposes only public shell and anonymous metadata', async (t) => {
   const f = await fixture(t);
@@ -407,7 +696,8 @@ test('expiry during awaited OIDC exchange cannot commit a cookie and clock rollb
   assert.equal(result.headers.location, undefined);
   await f.service.close();
   f.advance(-3_600_000);
-  assert.throws(() => f.service.deadline.assertCurrent(), /CLOUD_TEST_EXPIRED/);
+  assert.ok(f.deadline);
+  assert.throws(() => f.deadline.assertCurrent(), /CLOUD_TEST_EXPIRED/);
   assert.equal(f.service.ingress.server.listening, false);
   assert.equal(f.service.app.server.listening, false);
   assert.equal(f.service.close(), f.service.close());
@@ -439,7 +729,8 @@ test('deadline revokes existing identity and closes both listeners, including ha
   );
   assert.match(await response, /403 Forbidden/);
   f.advance(3_600_000);
-  await f.service.deadline.expireIfDue();
+  assert.ok(f.deadline);
+  await f.deadline.expireIfDue();
   assert.throws(
     () => f.service.login.policy.revalidate(context, 'read'),
     /UNAUTHORIZED/,
@@ -471,7 +762,7 @@ test('deadline shutdown destroys a private unfinished HTTP request without waiti
   let timeout: ReturnType<typeof setTimeout>;
   try {
     await Promise.race([
-      f.service.deadline.expireIfDue(),
+      f.deadline!.expireIfDue(),
       new Promise<never>((_resolve, reject) => {
         timeout = setTimeout(
           () => reject(new Error('Private incomplete body blocked shutdown')),

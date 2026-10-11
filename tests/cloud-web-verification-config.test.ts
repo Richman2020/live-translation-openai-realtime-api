@@ -7,7 +7,9 @@ import {
   parseCloudServiceConfig,
 } from '../src/solo/cloud-service-config';
 import {
+  CLOUD_WEB_WORKBENCH_REQUIRED_ENV,
   parseCloudWebVerificationConfig,
+  parseCloudWebWorkbenchConfig,
   selectCloudServiceMode,
 } from '../src/solo/cloud-web-verification-config';
 
@@ -104,6 +106,84 @@ test('web verification parses without provider, target, rates or volume', () => 
     'https://phone.example.com/auth/google/callback',
   );
   assert.equal(config.testDeadline, now + 3_600_000);
+});
+
+test('continuous workbench is explicit, parses without a deadline and cannot select phone or verification', () => {
+  const env: Environment = {
+    ...webFixture(),
+    CLOUD_SERVICE_MODE: 'web-workbench',
+  };
+  delete env.CLOUD_TEST_DEADLINE;
+  assert.equal(selectCloudServiceMode(env), 'web-workbench');
+  const config = parseCloudWebWorkbenchConfig(env, now);
+  assert.deepEqual(Object.keys(config).sort(), ['google', 'mode', 'runtime']);
+  assert.equal(config.mode, 'web-workbench');
+  assert.ok(Object.isFrozen(config));
+  assert.ok(Object.isFrozen(config.google));
+  assert.ok(Object.isFrozen(config.runtime));
+  assert.throws(
+    () => parseCloudWebVerificationConfig(env, now),
+    /CLOUD_WEB_MODE_REQUIRED/,
+  );
+  assert.throws(
+    () => parseCloudServiceConfig(env, now),
+    /CLOUD_PHONE_MODE_REQUIRED/,
+  );
+  for (const mode of [undefined, 'phone', 'web-verification'])
+    assert.throws(
+      () =>
+        parseCloudWebWorkbenchConfig({ ...env, CLOUD_SERVICE_MODE: mode }, now),
+      /CLOUD_WEB_MODE_REQUIRED/,
+    );
+});
+
+test('workbench never reads deadline or paid fields, even when property access throws', () => {
+  const env = { ...webFixture(), CLOUD_SERVICE_MODE: 'web-workbench' };
+  const guarded = new Proxy(env, {
+    get(target, name, receiver) {
+      if (
+        name === 'CLOUD_TEST_DEADLINE' ||
+        (typeof name === 'string' &&
+          (/^(TWILIO_|OPENAI_)/.test(name) || paidFieldNames.has(name)))
+      )
+        throw new Error('Unrelated configuration must not be read');
+      return Reflect.get(target, name, receiver);
+    },
+  });
+  const config = parseCloudWebWorkbenchConfig(guarded, now);
+  assert.equal(config.mode, 'web-workbench');
+  assert.equal(Object.hasOwn(config, 'testDeadline'), false);
+  assert.equal(
+    CLOUD_WEB_WORKBENCH_REQUIRED_ENV.includes('CLOUD_TEST_DEADLINE' as never),
+    false,
+  );
+});
+
+test('workbench still requires canonical runtime and strict approved Google identity', () => {
+  const env = { ...webFixture(), CLOUD_SERVICE_MODE: 'web-workbench' };
+  for (const field of CLOUD_WEB_WORKBENCH_REQUIRED_ENV)
+    assert.throws(
+      () => parseCloudWebWorkbenchConfig({ ...env, [field]: undefined }, now),
+      Error,
+      field,
+    );
+  for (const patch of [
+    { AI_PHONE_RUNTIME_MODE: 'local' },
+    { CLOUD_WARM_INSTANCES: '2' },
+    { PORT: '0' },
+    { CLOUD_PUBLIC_ORIGIN: 'http://phone.example.com' },
+    { PUBLIC_BASE_URL: 'https://other.example.com' },
+    { GOOGLE_SUBJECT: undefined, GOOGLE_HOSTED_DOMAIN: undefined },
+    { GOOGLE_HOSTED_DOMAIN: 'https://example.com' },
+  ])
+    assert.throws(() =>
+      parseCloudWebWorkbenchConfig({ ...env, ...patch }, now),
+    );
+  for (const time of [NaN, -1, Infinity, now + 0.5])
+    assert.throws(
+      () => parseCloudWebWorkbenchConfig(env, time),
+      /CLOUD_CLOCK_INVALID/,
+    );
 });
 
 test('web verification does not require paid operator attestations', () => {

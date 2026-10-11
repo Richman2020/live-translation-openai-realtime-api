@@ -3,13 +3,21 @@ import { GoogleOidcClient } from './google-oidc';
 import { GOOGLE_LOGIN_PATHS } from './google-login';
 
 type Environment = Readonly<Record<string, string | undefined>>;
-export type CloudServiceMode = 'phone' | 'web-verification';
+export type CloudServiceMode = 'phone' | 'web-verification' | 'web-workbench';
+type WebIdentityConfig = Readonly<{
+  runtime: CloudPhoneRuntime;
+  google: Readonly<ConstructorParameters<typeof GoogleOidcClient>[0]>;
+}>;
 export type CloudWebVerificationConfig = Readonly<{
   mode: 'web-verification';
   runtime: CloudPhoneRuntime;
   google: Readonly<ConstructorParameters<typeof GoogleOidcClient>[0]>;
   testDeadline: number;
 }>;
+export type CloudWebWorkbenchConfig = WebIdentityConfig &
+  Readonly<{
+    mode: 'web-workbench';
+  }>;
 
 export const CLOUD_WEB_VERIFICATION_REQUIRED_ENV = Object.freeze([
   'CLOUD_SERVICE_MODE',
@@ -22,6 +30,11 @@ export const CLOUD_WEB_VERIFICATION_REQUIRED_ENV = Object.freeze([
   'GOOGLE_ALLOWED_EMAIL',
   'CLOUD_TEST_DEADLINE',
 ] as const);
+export const CLOUD_WEB_WORKBENCH_REQUIRED_ENV = Object.freeze(
+  CLOUD_WEB_VERIFICATION_REQUIRED_ENV.filter(
+    (name) => name !== 'CLOUD_TEST_DEADLINE',
+  ),
+);
 
 /** Only an absent setting selects the protected phone default. An empty or
  * unknown setting cannot silently select either service or grant calls.
@@ -29,7 +42,7 @@ export const CLOUD_WEB_VERIFICATION_REQUIRED_ENV = Object.freeze([
 export function selectCloudServiceMode(env: Environment): CloudServiceMode {
   const mode = env.CLOUD_SERVICE_MODE;
   if (mode === undefined || mode === 'phone') return 'phone';
-  if (mode === 'web-verification') return mode;
+  if (mode === 'web-verification' || mode === 'web-workbench') return mode;
   throw new Error('CLOUD_SERVICE_MODE_INVALID');
 }
 
@@ -49,13 +62,14 @@ function required(env: Environment, name: string, maximum = 4096): string {
 /** No provider, budget, target or volume field is read here. The web service
  * cannot turn those values or operator confirmations into a call capability.
  */
-export function parseCloudWebVerificationConfig(
+function parseWebIdentityConfig(
   env: Environment,
-  now = Date.now(),
-): CloudWebVerificationConfig {
+  mode: 'web-verification' | 'web-workbench',
+  now: number,
+): WebIdentityConfig {
   if (!Number.isSafeInteger(now) || now < 0)
     throw new Error('CLOUD_CLOCK_INVALID');
-  if (selectCloudServiceMode(env) !== 'web-verification')
+  if (selectCloudServiceMode(env) !== mode)
     throw new Error('CLOUD_WEB_MODE_REQUIRED');
   if (env.AI_PHONE_RUNTIME_MODE !== 'cloud')
     throw new Error('CLOUD_RUNTIME_REQUIRED');
@@ -81,6 +95,14 @@ export function parseCloudWebVerificationConfig(
   });
   // eslint-disable-next-line no-new -- Validate the identity policy without contacting Google.
   new GoogleOidcClient(google);
+  return Object.freeze({ runtime: Object.freeze(runtime), google });
+}
+
+export function parseCloudWebVerificationConfig(
+  env: Environment,
+  now = Date.now(),
+): CloudWebVerificationConfig {
+  const identity = parseWebIdentityConfig(env, 'web-verification', now);
   const rawDeadline = required(env, 'CLOUD_TEST_DEADLINE', 32);
   const testDeadline = Date.parse(rawDeadline);
   if (
@@ -93,8 +115,18 @@ export function parseCloudWebVerificationConfig(
 
   return Object.freeze({
     mode: 'web-verification',
-    runtime: Object.freeze(runtime),
-    google,
+    ...identity,
     testDeadline,
   });
+}
+
+/** Continuous availability never grants a call or changes a login lifetime.
+ * Test deadline and all paid/provider fields are deliberately not read.
+ */
+export function parseCloudWebWorkbenchConfig(
+  env: Environment,
+  now = Date.now(),
+): CloudWebWorkbenchConfig {
+  const identity = parseWebIdentityConfig(env, 'web-workbench', now);
+  return Object.freeze({ mode: 'web-workbench', ...identity });
 }

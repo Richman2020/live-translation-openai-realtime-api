@@ -4,7 +4,19 @@
 
 需求见 [PROJECT_BRIEF.md](PROJECT_BRIEF.md)，工作规则见 [AGENTS.md](AGENTS.md)，运行步骤见 [LOCAL_SETUP.md](LOCAL_SETUP.md)，后续执行入口见 [LOCAL_CODEX_HANDOFF.md](LOCAL_CODEX_HANDOFF.md)。
 
-## 最新实施：独立网页验收与电话入口隔离（2026-10-10）
+## 最新实施：可持续服务的日常网页工作台（2026-10-11）
+
+- 从真实远端、干净工作区 `5159ce3564768a6943855fd3f0786364a3226554` 继续，仍为 `codex/cloud-phone-conversation-20261009` / [草稿 PR #3](https://github.com/Richman2020/live-translation-openai-realtime-api/pull/3)，base 保持 `codex/local-phone-workbench` / `df3c447`。用户最新批准日常登录工作台，原一小时演示不能代表日常使用。
+- 新显式 `CLOUD_SERVICE_MODE=web-workbench` 复用 calls-disabled 网页与严格 Google 单身份服务，没有临时服务 deadline，不读取继承的过期 `CLOUD_TEST_DEADLINE` 或任何电话付费字段。固定 `/controlled` 返回个人工作台，HTML 模式与真实服务状态精确核验；电话、controller、Voice、回调、模型、账本及所有 WebSocket 均关闭。缺省 `phone` 与 `web-verification` 仍要求原截止及保护，严格 parser/factory 互斥，没有请求升级模式。
+- 只取消服务整体试验截止：会话仍 15 分钟空闲到期、8 小时绝对上限，手动 CSRF 续期；读取不续权，退出/取消/迟到 OAuth/关闭不能复活权限，进程重启使旧 cookie 失效。没有持久身份、自动续权或日常多通电话/结算重构。新页面明确说明这些限制、电话关闭与无字幕空态。
+- 云端 Linux、Node24.19.0/npm11.9.0；完整回归 **1132 项：1127 通过、5 个既有 Windows 专属跳过、0 失败**（36.54 秒）。受影响重点回归 102/102 含于全量：新增配置 3 项、服务 7 项覆盖 >2 小时仍可网页/新登录、正常 idle/absolute 到期、退出时迟到 re-login 无 cookie、旧 cookie 重启拒绝、CSRF/坏时钟及 HTTP/WS 电话拒绝。独立只读审查无阻塞，旧 Google/电话实现没有改动。
+- 完整源码/测试 typecheck、生产 build、全部修改源码 ESLint、public JS 语法、浏览器脚本独立 typecheck、YAML/shell/JSON、原电话配置一致性、未变锁文件与 diff 通过。全仓 lint 仍是未修改旧 `src/services/AudioInterceptor.ts` 的三项既有错误（134/135/340 行），未扩展修复范围。
+- 实际 Chrome151.0.7922.173：原网页 48/48、新工作台 54/54；既有对话 16/16、Pocket 54/54、连续配对 60/60、不配对 57/57、Google 24/24，共 **313 项**。外部请求、真实供应商调用、异常均 0。真实 DOM/原生 Fetch/本地 RSA 假 Google 提供方验收，未伪造 API 状态；登录前后及过期截图已实际查看，分别保留在忽略的 `.runtime/web-verification-browser/`、`.runtime/web-workbench-browser/` 与既有浏览器目录。
+- 生产编译入口以仅 synthetic Google/来源配置实际启动：无 deadline 与继承过期 deadline 的 `--check` 均成功，旧限时模式对同一过期值仍拒绝；实际 health、固定日常页面、匿名状态拒绝、电话路径拒绝及 SIGTERM 退出通过，无 Google/供应商联网。CI 加入第七组日常浏览器、镜像日常页面与两种网页模式的 `--network none` 配置检查；精确推送 head 与远端结果在同一草稿 PR 回读，不将源码交付说成部署。
+- 运行配置见 [日常工作台](docs/CLOUD_WEB_WORKBENCH.md)。本轮不更新 Railway 源码/部署/变量/资源或卷。主线程上一轮限时部署原 `5159ce3` 后，于 2026-10-10 23:55–23:57 UTC 停止两 staging 服务；最后核验 Offline、无 active/pending deployments，已 provision 的 5 GB 卷保留，平台源码仍旧 SHA。下方暂存/未 provision 为当时历史。持续托管预算与启动由主线程确认，取消应用 deadline 不构成平台费用封顶。
+- 真实公网页面及应用 Google OAuth 仍未通过：上一轮云端验收工具遇出站 CONNECT/隧道/客户端策略拒绝，不能据此断言应用故障，也未绕过限制或实际登录。本轮没有真实麦克风/手机、模型资格、数字否定、积压、自然度或耳听延迟验收，未改 Twilio 回调、访问付费 API、合并或生产发布。
+
+## 此前实施：独立网页验收与电话入口隔离（2026-10-10）
 
 - 从真实远端 `004f7ee62c2960db296880bfa987bdac9d57b0aa`、干净工作区继续，沿用 `codex/cloud-phone-conversation-20261009` / [草稿 PR #3](https://github.com/Richman2020/live-translation-openai-realtime-api/pull/3)。用户今晚离线期间先做网页/健康/严格 Google 登录验收，不拨号。代码任务不部署或修改生产，既有 staging 暂存源码仍固定旧提交，升级与两服务统一资源窗口由主线程安排。
 - 显式 `CLOUD_SERVICE_MODE=web-verification` 新增独立配置、服务与工作台登录壳；仅固定 HTTPS 来源、PORT、single warm 实例、严格 Google 身份配置和最多一小时截止即可检查。网页模式不读取电话/模型凭据、四个确认开关、号码、费率、预算或卷参数，不装配 provider/manager/bridge/signer/journal。`--check` 只输出固定模式与电话关闭状态，不能称 Google/供应商已连通。

@@ -1,5 +1,6 @@
 import {
   parseCloudWebVerificationConfig,
+  parseCloudWebWorkbenchConfig,
   selectCloudServiceMode,
 } from './cloud-web-verification-config';
 
@@ -11,15 +12,18 @@ async function main(): Promise<void> {
   if (args.length > 1 || (args.length === 1 && args[0] !== '--check'))
     throw new Error('CLOUD_START_ARGUMENTS_INVALID');
   const mode = selectCloudServiceMode(process.env);
-  if (mode === 'web-verification') {
-    const config = parseCloudWebVerificationConfig(process.env);
+  if (mode === 'web-verification' || mode === 'web-workbench') {
+    const config =
+      mode === 'web-verification'
+        ? parseCloudWebVerificationConfig(process.env)
+        : parseCloudWebWorkbenchConfig(process.env);
     if (args[0] === '--check') {
       // eslint-disable-next-line no-console -- Fixed metadata, no identity or credentials.
       console.log(
         JSON.stringify({
           ok: true,
           mode: 'cloud',
-          serviceMode: 'web-verification',
+          serviceMode: mode,
           configOnly: true,
           externalProvidersContacted: false,
           callsEnabled: false,
@@ -30,10 +34,14 @@ async function main(): Promise<void> {
       );
       return;
     }
-    const { createCloudWebVerificationService } = await import(
-      './cloud-web-verification-service'
-    );
-    const service = await createCloudWebVerificationService(config);
+    const {
+      createCloudWebVerificationService,
+      createCloudWebWorkbenchService,
+    } = await import('./cloud-web-verification-service');
+    const service =
+      config.mode === 'web-verification'
+        ? await createCloudWebVerificationService(config)
+        : await createCloudWebWorkbenchService(config);
     const stop = () => {
       service
         .close()
@@ -49,7 +57,11 @@ async function main(): Promise<void> {
     process.on('SIGINT', stop);
     process.on('SIGTERM', stop);
     // eslint-disable-next-line no-console -- Fixed mode status, no supplier readiness claim.
-    console.log('CLOUD_WEB_VERIFICATION_STARTED_CALLS_DISABLED');
+    console.log(
+      mode === 'web-verification'
+        ? 'CLOUD_WEB_VERIFICATION_STARTED_CALLS_DISABLED'
+        : 'CLOUD_WEB_WORKBENCH_STARTED_CALLS_DISABLED',
+    );
     return;
   }
   const { parseCloudServiceConfig } = await import('./cloud-service-config');

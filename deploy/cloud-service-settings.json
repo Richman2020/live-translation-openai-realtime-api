@@ -58,6 +58,28 @@
         "WebSocket upgrades"
       ],
       "documentation": "docs/CLOUD_WEB_VERIFICATION.md"
+    },
+    "webWorkbench": {
+      "explicitValue": "web-workbench",
+      "callsEnabled": false,
+      "requiresServiceTestDeadline": false,
+      "ignoresInheritedTestDeadline": true,
+      "retainsFiniteInMemorySessions": true,
+      "automaticSessionRenewal": false,
+      "requiresPersistentIdentity": false,
+      "requiresProviderSecretsOrTarget": false,
+      "requiresPaidCapabilityConfirmationsOrRates": false,
+      "createsProviderJournalOrVoiceComponents": false,
+      "requiresPersistentVolume": false,
+      "publicLoginShell": "/controlled",
+      "authenticatedFixedStatus": "/api/status",
+      "disabledSurfaces": [
+        "call-control",
+        "voice",
+        "media",
+        "WebSocket upgrades"
+      ],
+      "documentation": "docs/CLOUD_WEB_WORKBENCH.md"
     }
   },
   "phaseNotes": {
@@ -84,6 +106,18 @@
       "webVerificationRequiresVolume": false
     },
     "actualGoogleLoginVerified": false,
-    "actualPhoneCallVerified": false
+    "actualPhoneCallVerified": false,
+    "dailyWebWorkbench": {
+      "dateUtc": "2026-10-11",
+      "previousPhaseNotesAreHistorical": true,
+      "previousTrialSourceCommit": "5159ce3564768a6943855fd3f0786364a3226554",
+      "previousTrialStoppedUtc": "2026-10-10T23:57:00.000Z",
+      "previousTrialServicesOffline": true,
+      "persistentVolumeRetained": true,
+      "newCodeAppliedToRailway": false,
+      "deploymentPerformed": false,
+      "continuousHostingBudgetCoordinatedByParentTask": true,
+      "callsEnabled": false
+    }
   }
 }
