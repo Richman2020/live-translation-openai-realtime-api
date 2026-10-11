@@ -2,13 +2,12 @@ import twilio from 'twilio';
 import type { FastifyInstance } from 'fastify';
 
 import type { CloudServiceConfig } from './cloud-service-config';
-import { CloudBudgetJournal } from './cloud-budget-journal';
-import { validCloudCallCostBound } from './cloud-call-cost-bound';
 import { ConfigStore, SETTING_NAMES } from './config';
 import { CloudControllerLeases } from './controller-lease';
 import {
   CloudVoiceJoin,
   type CloudVoiceGrant,
+  type CloudVoiceAdmission,
   type CloudVoiceSigner,
 } from './cloud-voice-join';
 import { CloudPhoneAccess } from './cloud-phone-access';
@@ -69,7 +68,7 @@ export function createCloudVoiceSigner(
 ): CloudVoiceSigner {
   return async (grant: CloudVoiceGrant) => {
     const time = now();
-    const expiry = Math.min(grant?.expiresAt, config.testDeadline);
+    const expiry = grant?.expiresAt;
     if (
       !Number.isSafeInteger(time) ||
       time < 0 ||
@@ -209,7 +208,39 @@ export function createCloudTestDeadline(options: {
   });
 }
 
-/** All components share one process, policy and persistent admission instance.
+/** Personal call occupancy only: no money, duration, storage or provider request.
+ * VoiceJoin independently revalidates login, controller, nonce and app binding.
+ * Releasing occupancy still requires confirmed cleanup of this call's legs.
+ */
+export function createPersonalVoiceAdmission(
+  manager: SessionManager,
+): CloudVoiceAdmission {
+  return Object.freeze({
+    reserve: async (grant: CloudVoiceGrant) => {
+      let released = false;
+      const assertCurrent = () => {
+        const call = manager.activeSession;
+        if (
+          released ||
+          call?.id !== grant.callId ||
+          ['ending', 'completed', 'failed'].includes(call.status)
+        )
+          throw new Error('CALL_AUTHORIZATION_REVOKED');
+      };
+      assertCurrent();
+      return Object.freeze({
+        assertCurrent,
+        release: async () => {
+          if (!manager.isCleanupConfirmed(grant.callId))
+            throw new Error('CALL_CLEANUP_UNCONFIRMED');
+          released = true;
+        },
+      });
+    },
+  });
+}
+
+/** All components share one process and authenticated personal call admission.
  * Optional transport factories are explicit offline test ports, never env or
  * HTTP switches and never production defaults. Startup contacts no provider.
  */
@@ -227,38 +258,22 @@ export async function createCloudService(
   } = {},
 ) {
   const now = options.now || Date.now;
-  const bound = config.budget.costBound;
-  if (
-    !validCloudCallCostBound(bound) ||
-    bound.outgoingPairedCaptions !== config.outgoingPairedCaptions ||
-    bound.admissionDeadline + bound.cleanupSeconds * 1000 > config.testDeadline
-  )
-    throw new Error('CLOUD_CALL_COST_BOUND_REQUIRED');
-  if (config.testDeadline <= now()) throw new Error('CLOUD_TEST_EXPIRED');
-  const journal = CloudBudgetJournal.open({
-    directory: config.journalDirectory,
-    policy: config.budget,
-    now,
-  });
   let login: GoogleBrowserLogin | undefined;
   let manager: SessionManager | undefined;
   let control: CloudPhoneAccess | undefined;
-  let deadline: ReturnType<typeof createCloudTestDeadline> | undefined;
   let app: FastifyInstance | undefined;
   let ingress: ReturnType<typeof createCloudIngress> | undefined;
   let closeTask: Promise<void> | undefined;
-  const close = (manual = true): Promise<void> => {
-    if (manual) deadline?.cancel();
+  const close = (): Promise<void> => {
     login?.close();
     if (closeTask) return closeTask;
     closeTask = (async () => {
-      // A rejection preserves callback transport and journal; never claim all
-      // lines ended or steal the process lock after uncertain provider cleanup.
+      // A rejection preserves callback transport; keep uncertain provider
+      // cleanup retryable and never report an unconfirmed leg as ended.
       await manager?.close();
       await control?.close();
       await ingress?.close();
       await app?.close();
-      journal.close();
     })();
     closeTask.catch(() => {
       closeTask = undefined;
@@ -266,7 +281,6 @@ export async function createCloudService(
     return closeTask;
   };
   try {
-    if (journal.cleanupRequired) throw new Error('CLOUD_RECOVERY_REQUIRED');
     login = new GoogleBrowserLogin({
       client: new GoogleOidcClient({
         ...config.google,
@@ -282,39 +296,21 @@ export async function createCloudService(
         (options.bridgeFactory || createSessionBridge)({
           ...settings,
           outgoingCaptions: config.outgoingPairedCaptions,
+          captionFailureEndsCall: true,
         }),
       now,
-      maxCallMs: config.budget.maxWallClockMs,
-      callJournal: journal,
-      providerUsage: {
-        reservationUsdMicros: config.budget.worstCaseCallUsdMicros,
-        outgoingPairedCaptions: config.outgoingPairedCaptions,
-        maxWallClockMs: config.budget.maxWallClockMs,
-      },
+      maxCallMs: null,
+      allowedTarget: config.allowedTarget,
     });
     const leases = new CloudControllerLeases({ policy: login.policy, now });
     const voice = new CloudVoiceJoin({
       policy: login.policy,
       outgoingApplicationSid: config.providers.TWILIO_TWIML_APP_SID,
       now,
-      maxCalls: 1,
       signer: createCloudVoiceSigner(config, now),
-      admission: {
-        reserve: async (grant) => {
-          const reservation = await journal.reserve(grant);
-          try {
-            manager.enforceCallDeadline(grant.callId);
-            journal.beginCreate(grant.callId, 'local');
-            return reservation;
-          } catch (error) {
-            await reservation.release();
-            throw error;
-          }
-        },
-      },
+      admission: createPersonalVoiceAdmission(manager),
     });
     const assertSnapshot = (settings: CloudServiceConfig['providers']) => {
-      deadline.assertCurrent();
       if (
         SETTING_NAMES.some((name) => settings[name] !== config.providers[name])
       )
@@ -325,12 +321,10 @@ export async function createCloudService(
       manager,
       controllerLeases: leases,
       voiceJoin: voice,
-      maxCalls: 1,
       allowedTranslationEngines: ['continuous-captions'],
       defaultTranslationEngine: 'continuous-captions',
       outgoingPairedCaptions: config.outgoingPairedCaptions,
       publicReadinessChecker: async (settings) => {
-        deadline.assertCurrent();
         if (settings.PUBLIC_BASE_URL !== config.runtime.publicOrigin)
           throw new Error('CLOUD_CONFIG_CHANGED');
         return { status: 'ready', code: 'PUBLIC_CALLBACK_READY' };
@@ -340,21 +334,15 @@ export async function createCloudService(
         if (engine !== 'continuous-captions')
           throw new Error('CLOUD_TRANSLATION_ENGINE_DENIED');
         return {
-          name: 'operatorCapabilityConfirmation',
+          name: 'personalTestConfiguration',
           status: 'passed',
-          code: 'OPERATOR_CONFIRMED_NO_STARTUP_PROBE',
+          code: 'CONFIGURED_FOR_PERSONAL_TEST_NOT_LIVE_VERIFIED',
         };
       },
     });
     const store = new ConfigStore({
       values: config.providers,
       generateToken: false,
-    });
-    deadline = createCloudTestDeadline({
-      deadline: config.testDeadline,
-      now,
-      cleanup: () => close(false),
-      onCleanupFailure: options.onCleanupFailure,
     });
     app = await buildCloudControlledServer({
       runtime: config.runtime,
@@ -379,15 +367,12 @@ export async function createCloudService(
         resolveStarted();
       });
     });
-    deadline.assertCurrent();
     return Object.freeze({
       app,
       ingress,
-      journal,
       manager,
       control,
       login,
-      deadline,
       close: () => close(),
     });
   } catch (error) {

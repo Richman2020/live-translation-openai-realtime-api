@@ -12,7 +12,7 @@ const messages = {
   REQUEST_TIMEOUT: '操作超时，结果仍待服务端确认。请刷新状态，不要重复拨号。',
   REQUEST_FAILED: '无法完成操作。请检查连接并刷新状态。',
   INVALID_RESPONSE: '服务返回无法使用的许可，已停止本次操作。',
-  VOICE_CONNECTION_NOT_READY: '电话连接许可尚未就绪；生产预算与恢复材料仍需完成。',
+  VOICE_CONNECTION_NOT_READY: '电话连接许可尚未就绪；请确认当前登录和控制权后重试。',
   LOGOUT_UNCONFIRMED: '本页已停止控制，服务器退出尚未确认。请检查连接后重新登录。',
   INVALID_TRANSLATION_ENGINE: '请选择此服务允许的翻译策略。',
 };

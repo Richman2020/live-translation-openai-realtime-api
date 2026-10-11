@@ -67,6 +67,8 @@ export type BridgeOptions = ConstructorParameters<
   translationEngine?: TranslationEngine;
   /** Explicit server choice: this adds two separately metered caption streams. */
   outgoingCaptions?: boolean;
+  /** Trusted cloud policy: caption model failure also terminates the call. */
+  captionFailureEndsCall?: boolean;
   admitAudio?: (event: ContinuousBridgeAudioAdmission) => boolean;
   admitProviderUsage?: (event: CloudProviderAdmission) => boolean;
   onOutgoingCaptionState?: (event: {
@@ -262,7 +264,9 @@ export class SessionManager extends EventEmitter {
 
   private readonly setupTimeoutMs: number;
 
-  private readonly maxCallMs: number;
+  private readonly maxCallMs: number | null;
+
+  private readonly allowedTarget?: string;
 
   private readonly explicitControlDependencies: boolean;
 
@@ -280,7 +284,9 @@ export class SessionManager extends EventEmitter {
       bridgeFactory?: (options: BridgeOptions) => BridgeLike;
       now?: () => number;
       setupTimeoutMs?: number;
-      maxCallMs?: number;
+      /** null removes only the application duration timer; providers retain theirs. */
+      maxCallMs?: number | null;
+      allowedTarget?: string;
       callJournal?: CallJournalPort;
       providerUsage?: Parameters<typeof createCloudCallUsageBudget>[0];
     } = {},
@@ -293,11 +299,21 @@ export class SessionManager extends EventEmitter {
     this.providerFactory = options.providerFactory || twilioProvider;
     this.bridgeFactory = options.bridgeFactory || createSessionBridge;
     this.setupTimeoutMs = options.setupTimeoutMs ?? 75000;
-    this.maxCallMs = options.maxCallMs ?? 60 * 60 * 1000;
+    this.maxCallMs =
+      options.maxCallMs === undefined ? 60 * 60 * 1000 : options.maxCallMs;
+    this.allowedTarget = options.allowedTarget;
+    if (
+      (this.maxCallMs !== null &&
+        (!Number.isSafeInteger(this.maxCallMs) || this.maxCallMs < 1)) ||
+      (this.allowedTarget !== undefined &&
+        !/^\+1[2-9]\d{2}[2-9]\d{6}$/.test(this.allowedTarget))
+    )
+      throw new SessionError('INVALID_CALL_POLICY', 503);
     this.callJournal = options.callJournal;
     if (
       this.callJournal &&
-      (!this.explicitControlDependencies ||
+      (this.maxCallMs === null ||
+        !this.explicitControlDependencies ||
         ![
           'assertTarget',
           'assertCallCurrent',
@@ -385,6 +401,7 @@ export class SessionManager extends EventEmitter {
       !Number.isSafeInteger(limits.deadline) ||
       !Number.isSafeInteger(limits.remainingWallClockMs) ||
       limits.remainingWallClockMs < 1 ||
+      this.maxCallMs === null ||
       limits.remainingWallClockMs > this.maxCallMs ||
       (session.callDeadline !== undefined &&
         session.callDeadline !== limits.deadline)
@@ -409,6 +426,7 @@ export class SessionManager extends EventEmitter {
     if (
       !Number.isSafeInteger(limits.deadline) ||
       !Number.isSafeInteger(limits.remainingWallClockMs) ||
+      this.maxCallMs === null ||
       limits.remainingWallClockMs > this.maxCallMs ||
       limits.deadline - this.now() < 1000 ||
       !Number.isSafeInteger(seconds) ||
@@ -549,6 +567,12 @@ export class SessionManager extends EventEmitter {
   ): Session {
     if (this.closing) throw new SessionError('SHUTTING_DOWN', 503);
     if (this.journalFault) throw new SessionError('BUDGET_NOT_READY', 503);
+    if (this.allowedTarget !== undefined) {
+      if (direction !== 'outbound' || admission?.deferBrowserJoin !== true)
+        throw new SessionError('CONTROLLED_CALL_REQUIRED', 403);
+      if (to !== this.allowedTarget)
+        throw new SessionError('CALL_TARGET_NOT_ALLOWED', 403);
+    }
     if (this.callJournal) {
       if (direction !== 'outbound' || admission?.deferBrowserJoin !== true)
         throw new SessionError('CONTROLLED_CALL_REQUIRED', 403);
@@ -1059,16 +1083,20 @@ export class SessionManager extends EventEmitter {
           transcriptionModel: session.config.OPENAI_TRANSCRIPTION_MODEL,
           proxyUrl: session.config.OPENAI_PROXY_URL,
           translationEngine: session.view.translationEngine,
-          ...(session.providerUsage
+          ...(session.providerUsage || session.admission
             ? {
                 admitProviderUsage: (event: CloudProviderAdmission) =>
-                  this.admitProviderUsage(session, event),
+                  session.providerUsage
+                    ? this.admitProviderUsage(session, event)
+                    : this.liveAdmission(session),
               }
             : {}),
-          ...(this.callJournal
+          ...(this.callJournal || session.admission
             ? {
                 admitAudio: (event: ContinuousBridgeAudioAdmission) =>
-                  this.admitAudio(session, event),
+                  this.callJournal
+                    ? this.admitAudio(session, event)
+                    : this.liveAdmission(session),
               }
             : {}),
           onTranscript: (transcript) => {
@@ -1224,15 +1252,14 @@ export class SessionManager extends EventEmitter {
         clearTimeout(session.timer);
         session.view.status = 'active';
         this.publish(session);
-        session.timer = setTimeout(
-          () => {
+        const duration = usesPocketVoice(session.view.translationEngine)
+          ? Math.min(this.maxCallMs ?? 5 * 60 * 1000, 5 * 60 * 1000)
+          : this.maxCallMs;
+        if (duration !== null)
+          session.timer = setTimeout(() => {
             this.end(session.view.id, 'CALL_DURATION_LIMIT');
-          },
-          usesPocketVoice(session.view.translationEngine)
-            ? Math.min(this.maxCallMs, 5 * 60 * 1000)
-            : this.maxCallMs,
-        );
-        session.timer.unref?.();
+          }, duration);
+        session.timer?.unref?.();
       } else if (
         (session.view.direction === 'outbound' && role === 'local') ||
         (session.view.direction === 'inbound' && role === 'remote')
@@ -1339,14 +1366,15 @@ export class SessionManager extends EventEmitter {
       // accepted it: keep the callback nonce alive and refuse a safe shutdown
       // until a signed callback reveals and terminates that call.
       if (!session.callSids[role]) {
-        const definitive = this.callJournal
-          ? error instanceof ProviderRestException &&
-            Number.isInteger(status) &&
-            status >= 400 &&
-            status < 500 &&
-            status !== 408 &&
-            status !== 429
-          : status >= 400 && status < 500 && status !== 408;
+        const definitive =
+          this.callJournal || session.admission
+            ? error instanceof ProviderRestException &&
+              Number.isInteger(status) &&
+              status >= 400 &&
+              status < 500 &&
+              status !== 408 &&
+              status !== 429
+            : status >= 400 && status < 500 && status !== 408;
         if (!definitive) session.uncertainRoles.add(role);
         if (this.callJournal) {
           try {

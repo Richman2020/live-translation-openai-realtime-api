@@ -1,11 +1,7 @@
-import { isAbsolute, resolve } from 'node:path';
-
 import { parsePhoneRuntime, type CloudPhoneRuntime } from './cloud-runtime';
 import { checkConfig, type SoloConfig } from './config';
 import { GoogleOidcClient } from './google-oidc';
 import { GOOGLE_LOGIN_PATHS } from './google-login';
-import type { CloudTrialBudgetPolicy } from './cloud-budget-journal';
-import { deriveCloudCallCostBound } from './cloud-call-cost-bound';
 import { selectCloudServiceMode } from './cloud-web-verification-config';
 
 type Environment = Readonly<Record<string, string | undefined>>;
@@ -13,9 +9,7 @@ export type CloudServiceConfig = Readonly<{
   runtime: CloudPhoneRuntime;
   providers: SoloConfig;
   google: Readonly<ConstructorParameters<typeof GoogleOidcClient>[0]>;
-  testDeadline: number;
-  journalDirectory: string;
-  budget: CloudTrialBudgetPolicy;
+  allowedTarget: string;
   outgoingPairedCaptions: boolean;
 }>;
 
@@ -35,17 +29,8 @@ export const CLOUD_SERVICE_REQUIRED_ENV = Object.freeze([
   'GOOGLE_CLIENT_ID',
   'GOOGLE_CLIENT_SECRET',
   'GOOGLE_ALLOWED_EMAIL',
-  'CLOUD_TRANSLATION_CAPABILITY_CONFIRMED',
   'CLOUD_PUBLIC_CALLBACK_CONFIRMED',
-  'CLOUD_TEST_DEADLINE',
   'CLOUD_TEST_TARGET_NUMBER',
-  'CLOUD_JOURNAL_DIRECTORY',
-  'CLOUD_JOURNAL_VOLUME_CONFIRMED',
-  'CLOUD_CALL_RESERVATION_USD_MICROS',
-  'CLOUD_CALL_COST_BOUND_JSON',
-  'CLOUD_RATE_CHECKED_AT',
-  'CLOUD_RATE_VALID_UNTIL',
-  'CLOUD_TRIAL_RATE_BOUND_CONFIRMED',
 ] as const);
 
 function required(env: Environment, name: string, maximum = 4096): string {
@@ -64,19 +49,12 @@ function confirmed(env: Environment, name: string): void {
   if (required(env, name) !== 'true')
     throw new Error(`CLOUD_CONFIG_UNCONFIRMED:${name}`);
 }
-function instant(env: Environment, name: string): number {
-  const value = required(env, name, 32);
-  const parsed = Date.parse(value);
-  if (!Number.isSafeInteger(parsed) || new Date(parsed).toISOString() !== value)
-    throw new Error(`CLOUD_CONFIG_INVALID:${name}`);
-  return parsed;
-}
-
-/** An explicitly configured, one-hour, single-call trial. Confirmation flags
- * are operator attestations, never API probes or evidence of a real call.
+/** Personal service with one active call. Callback confirmation is an operator
+ * attestation; model availability is tested by the actual connection handshake,
+ * not by a pre-filled claim that a first test has already succeeded.
  * The default THREE OpenAI sockets use gpt-realtime-translate, gpt-4o-transcribe
  * and gpt-realtime-1.5. Explicit outgoing paired captions add gpt-live-transcribe
- * and a second gpt-realtime-1.5 session. Confirmation covers the selected mode,
+ * and a second gpt-realtime-1.5 session. Configuration covers the selected mode,
  * including its separate subtitle charges. whisper-1 remains the locked
  * SoloConfig default; these caption clients use their own models.
  */
@@ -144,82 +122,15 @@ export function parseCloudServiceConfig(
   // Construction validates one configured identity and performs no HTTP call.
   // eslint-disable-next-line no-new -- Validate without creating a login registry.
   new GoogleOidcClient(google);
-  confirmed(env, 'CLOUD_TRANSLATION_CAPABILITY_CONFIRMED');
   confirmed(env, 'CLOUD_PUBLIC_CALLBACK_CONFIRMED');
-  confirmed(env, 'CLOUD_TRIAL_RATE_BOUND_CONFIRMED');
-  confirmed(env, 'CLOUD_JOURNAL_VOLUME_CONFIRMED');
-  const testDeadline = instant(env, 'CLOUD_TEST_DEADLINE');
-  if (testDeadline <= now || testDeadline - now > 3600000)
-    throw new Error('CLOUD_TEST_DEADLINE_INVALID');
-  const checkedAt = instant(env, 'CLOUD_RATE_CHECKED_AT');
-  const validUntil = instant(env, 'CLOUD_RATE_VALID_UNTIL');
-  if (checkedAt > now || validUntil <= now || validUntil - checkedAt > 86400000)
-    throw new Error('CLOUD_RATE_EVIDENCE_EXPIRED');
-  const journalDirectory = required(env, 'CLOUD_JOURNAL_DIRECTORY');
-  if (
-    !isAbsolute(journalDirectory) ||
-    resolve(journalDirectory) !== journalDirectory ||
-    journalDirectory === '/' ||
-    journalDirectory === '/tmp' ||
-    journalDirectory.startsWith('/tmp/')
-  )
-    throw new Error('CLOUD_PERSISTENT_VOLUME_REQUIRED');
   const allowedTarget = required(env, 'CLOUD_TEST_TARGET_NUMBER', 12);
   if (!/^\+1[2-9]\d{2}[2-9]\d{6}$/.test(allowedTarget))
     throw new Error('CLOUD_CONFIG_INVALID:CLOUD_TEST_TARGET_NUMBER');
-  const charge = required(env, 'CLOUD_CALL_RESERVATION_USD_MICROS', 7);
-  const worstCaseCallUsdMicros = Number(charge);
-  if (
-    !/^[1-9]\d*$/.test(charge) ||
-    !Number.isSafeInteger(worstCaseCallUsdMicros) ||
-    worstCaseCallUsdMicros <= 2_000_000 ||
-    worstCaseCallUsdMicros > 5_000_000
-  )
-    throw new Error('CLOUD_CONFIG_INVALID:CLOUD_CALL_RESERVATION_USD_MICROS');
-  let evidence: unknown;
-  try {
-    evidence = JSON.parse(required(env, 'CLOUD_CALL_COST_BOUND_JSON', 32768));
-  } catch {
-    throw new Error('CLOUD_CALL_COST_BOUND_REQUIRED');
-  }
-  const costBound = deriveCloudCallCostBound({
-    evidence,
-    accountSid: providers.TWILIO_ACCOUNT_SID,
-    applicationSid: providers.TWILIO_TWIML_APP_SID,
-    target: allowedTarget,
-    outgoingPairedCaptions,
-    reservationUsdMicros: worstCaseCallUsdMicros,
-    checkedAt,
-    validUntil,
-    serviceDeadline: testDeadline,
-    now,
-  });
-  const budget: CloudTrialBudgetPolicy = Object.freeze({
-    allowedTarget,
-    accountSid: providers.TWILIO_ACCOUNT_SID,
-    applicationSid: providers.TWILIO_TWIML_APP_SID,
-    budgetUsdMicros: 5_000_000,
-    worstCaseCallUsdMicros,
-    maxCalls: 1,
-    maxWallClockMs: costBound.maxCallSeconds * 1000,
-    maxInputBytes: costBound.aggregateInputBytes,
-    maxOutputBytes: costBound.aggregateOutputBytes,
-    costBound,
-    lateCallbackWindowMs: 60000,
-    rates: Object.freeze({
-      twilioReference: 'https://www.twilio.com/en-us/voice/pricing/us',
-      openaiReference: 'https://openai.com/api/pricing/',
-      checkedAt,
-      validUntil,
-    }),
-  });
   return Object.freeze({
     runtime: Object.freeze(runtime),
     providers: Object.freeze(providers),
     google,
-    testDeadline,
-    journalDirectory,
-    budget,
+    allowedTarget,
     outgoingPairedCaptions,
   });
 }

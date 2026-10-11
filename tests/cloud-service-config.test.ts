@@ -1,4 +1,3 @@
-import { syntheticCostEvidence } from './fixtures/cloud-cost-evidence';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { test } from 'node:test';
@@ -9,7 +8,7 @@ import {
 } from '../src/solo/cloud-service-config';
 
 const now = 1780000000000;
-function fixture(time = now) {
+function fixture(_time = now) {
   return {
     AI_PHONE_RUNTIME_MODE: 'cloud',
     PORT: '8080',
@@ -28,19 +27,11 @@ function fixture(time = now) {
     GOOGLE_SUBJECT: 'fixture-pinned-google-subject',
     CLOUD_TRANSLATION_CAPABILITY_CONFIRMED: 'true',
     CLOUD_PUBLIC_CALLBACK_CONFIRMED: 'true',
-    CLOUD_TEST_DEADLINE: new Date(time + 3600000).toISOString(),
     CLOUD_TEST_TARGET_NUMBER: '+12025550101',
-    CLOUD_JOURNAL_DIRECTORY: '/data/ai-phone',
-    CLOUD_JOURNAL_VOLUME_CONFIRMED: 'true',
-    CLOUD_CALL_RESERVATION_USD_MICROS: '5000000',
-    CLOUD_CALL_COST_BOUND_JSON: JSON.stringify(syntheticCostEvidence()),
-    CLOUD_RATE_CHECKED_AT: new Date(time - 1000).toISOString(),
-    CLOUD_RATE_VALID_UNTIL: new Date(time + 3600000).toISOString(),
-    CLOUD_TRIAL_RATE_BOUND_CONFIRMED: 'true',
   };
 }
 
-test('cloud trial config pins one instance, one bounded call and exact callback without a local token', () => {
+test('personal cloud config pins one instance and exact callback without budget or local token', () => {
   const config = parseCloudServiceConfig(fixture(), now);
   assert.equal(config.runtime.host, '0.0.0.0');
   assert.equal(config.runtime.mediaOrigin, 'wss://phone.example.com');
@@ -51,14 +42,8 @@ test('cloud trial config pins one instance, one bounded call and exact callback 
   );
   assert.equal(config.providers.LOCAL_ACCESS_TOKEN, '');
   assert.equal(config.providers.OPENAI_REALTIME_MODEL, 'gpt-realtime-1.5');
-  assert.equal(config.budget.maxCalls, 1);
-  assert.equal(config.budget.maxWallClockMs, 600000);
-  assert.equal(config.budget.budgetUsdMicros, 5_000_000);
-  assert.equal(config.budget.worstCaseCallUsdMicros, 5_000_000);
-  assert.equal(config.budget.rates.validUntil, config.testDeadline);
   assert.equal(config.outgoingPairedCaptions, false);
   assert.equal(Object.isFrozen(config.providers), true);
-  assert.equal(Object.isFrozen(config.budget.rates), true);
   assert.equal(
     CLOUD_SERVICE_REQUIRED_ENV.includes('LOCAL_ACCESS_TOKEN' as never),
     false,
@@ -83,13 +68,8 @@ test('every missing deployment requirement fails closed with field/code only', (
   }
 });
 
-test('unconfirmed capabilities, callback reachability, cost bounds and volume never become ready by URL format', () => {
-  for (const name of [
-    'CLOUD_TRANSLATION_CAPABILITY_CONFIRMED',
-    'CLOUD_PUBLIC_CALLBACK_CONFIRMED',
-    'CLOUD_TRIAL_RATE_BOUND_CONFIRMED',
-    'CLOUD_JOURNAL_VOLUME_CONFIRMED',
-  ])
+test('callback confirmation is still required independently of the removed budget', () => {
+  for (const name of ['CLOUD_PUBLIC_CALLBACK_CONFIRMED'])
     for (const value of ['false', '1', 'TRUE'])
       assert.throws(
         () => parseCloudServiceConfig({ ...fixture(), [name]: value }, now),
@@ -97,25 +77,10 @@ test('unconfirmed capabilities, callback reachability, cost bounds and volume ne
       );
 });
 
-test('trial rejects expired/extended deadlines, unsupported regions of target, cost overflow and temporary storage', () => {
+test('personal cloud rejects unsupported targets and altered routing or instance count', () => {
   const invalid = [
-    { CLOUD_TEST_DEADLINE: new Date(now).toISOString() },
-    { CLOUD_TEST_DEADLINE: new Date(now + 3600001).toISOString() },
-    { CLOUD_TEST_DEADLINE: '2026-05-28T00:00:00Z' },
-    { CLOUD_RATE_CHECKED_AT: new Date(now + 1).toISOString() },
-    { CLOUD_RATE_VALID_UNTIL: new Date(now).toISOString() },
-    { CLOUD_RATE_CHECKED_AT: new Date(now - 86400000).toISOString() },
     { CLOUD_TEST_TARGET_NUMBER: '+442071838750' },
     { CLOUD_TEST_TARGET_NUMBER: '+12021110101' },
-    { CLOUD_JOURNAL_DIRECTORY: '/tmp/private-phone-volume' },
-    { CLOUD_JOURNAL_DIRECTORY: 'relative-volume' },
-    { CLOUD_JOURNAL_DIRECTORY: '/data/../data/private' },
-    { CLOUD_JOURNAL_DIRECTORY: '/' },
-    { CLOUD_CALL_RESERVATION_USD_MICROS: '5000001' },
-    { CLOUD_CALL_RESERVATION_USD_MICROS: '2000000' },
-    { CLOUD_CALL_RESERVATION_USD_MICROS: '1999999' },
-    { CLOUD_CALL_RESERVATION_USD_MICROS: '0' },
-    { CLOUD_CALL_RESERVATION_USD_MICROS: '1.5' },
     { CLOUD_WARM_INSTANCES: '2' },
     { PUBLIC_BASE_URL: 'https://other.example.com' },
     { PUBLIC_BASE_URL: 'https://phone.example.com/' },
@@ -168,6 +133,7 @@ test('config-only executable terminates promptly and never contacts suppliers or
     configOnly: true,
     externalProvidersContacted: false,
     translationEngine: 'continuous-captions',
+    translationCapabilityVerified: false,
     openaiSocketsPerCall: 3,
     optionalOutgoingCaptionSockets: 0,
     outgoingPairedCaptions: false,
@@ -176,8 +142,10 @@ test('config-only executable terminates promptly and never contacts suppliers or
       'gpt-4o-transcribe',
       'gpt-realtime-1.5',
     ],
-    maxCalls: 1,
-    maxCallSeconds: 600,
+    maxConcurrentCalls: 1,
+    applicationBudgetEnabled: false,
+    phoneJournalRequired: false,
+    applicationCallDurationLimitSeconds: null,
     singleInstance: true,
   });
   assert.equal(result.stderr, '');
@@ -187,7 +155,6 @@ test('paired outgoing captions require an explicit flag and metadata exposes the
   const values = {
     ...fixture(Date.now()),
     CLOUD_OUTGOING_PAIRED_CAPTIONS_ENABLED: 'true',
-    CLOUD_CALL_COST_BOUND_JSON: JSON.stringify(syntheticCostEvidence(true)),
   };
   assert.equal(parseCloudServiceConfig(values).outgoingPairedCaptions, true);
   const result = spawnSync(
@@ -211,4 +178,29 @@ test('paired outgoing captions require an explicit flag and metadata exposes the
     'gpt-realtime-1.5',
     'gpt-live-transcribe',
   ]);
+});
+
+test('removed budget, journal and trial deadline variables are never read or required', () => {
+  const values = fixture() as Record<string, string>;
+  const removed = [
+    'CLOUD_TRANSLATION_CAPABILITY_CONFIRMED',
+    'CLOUD_TEST_DEADLINE',
+    'CLOUD_JOURNAL_DIRECTORY',
+    'CLOUD_JOURNAL_VOLUME_CONFIRMED',
+    'CLOUD_CALL_RESERVATION_USD_MICROS',
+    'CLOUD_CALL_COST_BOUND_JSON',
+    'CLOUD_RATE_CHECKED_AT',
+    'CLOUD_RATE_VALID_UNTIL',
+    'CLOUD_TRIAL_RATE_BOUND_CONFIRMED',
+  ];
+  for (const name of removed)
+    Object.defineProperty(values, name, {
+      get: () => {
+        throw new Error('REMOVED_FIELD_READ');
+      },
+    });
+  const config = parseCloudServiceConfig(values, now);
+  assert.equal(config.allowedTarget, '+12025550101');
+  for (const name of ['budget', 'testDeadline', 'journalDirectory'])
+    assert.equal(Object.hasOwn(config, name), false);
 });

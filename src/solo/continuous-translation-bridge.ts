@@ -65,6 +65,8 @@ export type ContinuousTranslationBridgeOptions = TranslationBridgeOptions & {
   createCaptionClient?: (options: RemoteCaptionOptions) => RemoteCaptionClient;
   /** Independent paired text captions; never gate or replace native speech. */
   outgoingCaptions?: boolean;
+  /** Personal cloud calls end both legs when any required model fails. */
+  captionFailureEndsCall?: boolean;
   onOutgoingCaptionState?: (event: {
     role: 'local';
     state: 'connecting' | 'ready' | 'failed';
@@ -712,6 +714,10 @@ export class ContinuousTranslationBridge {
 
   private failCaptions(): void {
     if (this.closed || this.captionFailed) return;
+    if (this.options.captionFailureEndsCall) {
+      this.shutdown('continuous_provider_failed:remote');
+      return;
+    }
     this.captionFailed = true;
     this.captionReady = false;
     this.captionPending = [];
@@ -921,6 +927,10 @@ export class ContinuousTranslationBridge {
 
   private failOutgoingCaptions(): void {
     if (this.closed || this.outgoingCaptionFailed) return;
+    if (this.options.captionFailureEndsCall) {
+      this.shutdown('continuous_provider_failed:local');
+      return;
+    }
     this.outgoingCaptionFailed = true;
     this.outgoingCaptionReady = false;
     this.outgoingCaptionPending = [];

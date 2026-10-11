@@ -43,7 +43,7 @@ export type CloudVoiceGrant = Readonly<{
   outgoing: Readonly<{ callId: string; identity: string }>;
 }>;
 export type CloudVoiceReservation = Readonly<{
-  /** Synchronous CURRENT budget/intent reservation validation, never a boolean. */
+  /** Synchronous current call-admission validation, never a boolean. */
   assertCurrent: () => void;
   /** Confirm safe rollback/line cleanup and release current admission occupancy.
    * This is not a refund or permission to erase the durable journal: a future
@@ -52,9 +52,9 @@ export type CloudVoiceReservation = Readonly<{
    */
   release: () => Promise<void>;
 }>;
-/** A future durable implementation must persist budget and creation/cleanup
- * intent before returning a reservation. This module implements no persistence
- * or recovery, and provides no default approval. Tests inject explicit fakes.
+/** Explicit server call admission. Personal service holds live call occupancy;
+ * legacy budget integrations may additionally persist their own intent. This
+ * module provides no default approval, persistence or provider recovery.
  */
 export type CloudVoiceAdmission = Readonly<{
   reserve: (grant: CloudVoiceGrant) => Promise<CloudVoiceReservation>;
@@ -485,7 +485,7 @@ export class CloudVoiceJoin {
     } catch (error) {
       if (held) {
         // Retain a failed rollback for explicit safety cleanup retry. Never
-        // reserve a second budget or issue a token while rollback is uncertain.
+        // acquire another admission or issue a token while rollback is uncertain.
         record.reservation = held;
         try {
           await this.releaseRecord(record);
@@ -536,7 +536,7 @@ export class CloudVoiceJoin {
     );
   }
 
-  /** Joined calls use current lease/budget authority, not the initial token's
+  /** Joined calls use current lease/admission authority, not the initial token's
    * join deadline. Renewal may keep a joined call live; it never renews a ticket.
    */
   assertJoinedCurrent(id: string): void {

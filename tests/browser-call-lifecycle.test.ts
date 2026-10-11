@@ -2229,3 +2229,17 @@ test('closing a desktop page during automatic token acquisition prevents a late 
   assert.equal(f.requestBodies.filter(v=>v.path==='/api/presence' && v.body.available===true).length,0,'no late online heartbeat');
   assert.equal(f.currentDevice(),undefined);
 });
+
+test('model failure shows a clear manual-retry message without claiming a metadata 403 or asking for budget evidence', async () => {
+  const f = await pageFixture(async () => streamFixture().stream);
+  await f.element('start-call').events.click();
+  f.callEvent({ status: 'failed', error: 'continuous_provider_failed:local' });
+  assert.match(
+    f.element('app-error').textContent,
+    /实时翻译模型连接或处理失败.*已请求结束.*确认线路关闭后再手动重试/,
+  );
+  assert.doesNotMatch(
+    f.element('app-error').textContent,
+    /403|五美元|预算|continuous_provider_failed/,
+  );
+});

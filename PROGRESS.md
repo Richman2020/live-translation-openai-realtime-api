@@ -4,6 +4,15 @@
 
 需求见 [PROJECT_BRIEF.md](PROJECT_BRIEF.md)，工作规则见 [AGENTS.md](AGENTS.md)，运行步骤见 [LOCAL_SETUP.md](LOCAL_SETUP.md)，后续执行入口见 [LOCAL_CODEX_HANDOFF.md](LOCAL_CODEX_HANDOFF.md)。
 
+## 最新：个人电话取消应用内预算，本地交付（2026-10-11）
+
+- 依据12:58:08 UTC用户明确修订，从 `cc21d647aff25587e1db3c82222ab41fc35c1814` 最小解绑个人phone的五美元额度、费率/完整费用证据、预留、预算journal和派生时长；旧试验服务deadline不再作为phone前置。无新的替代预算、无固定五分钟、无默认一小时应用通话计时器。供应商技术限制、鉴权/目标/单活动通话与双腿清理继续，网页登录模式不改。
+- 个人服务不打开/初始化/修改旧journal，旧预算模块仅留历史兼容；内存通话准入释放仍以真实清理确认为准，实际send继续复核身份/controller。并发、挂断失败、迟到SID和真实创建结果未知仍有对应处理，正常服务退出等待清理并允许重试。
+- 父线程13:00:27 UTC运行只读事实：AppSID匹配，固定Railway `/voice/client` POST、无query、origin正确；Twilio queued/ringing/in-progress各0，三者hasMore=false。预算目录不存在，不作为占线或费用责任的推断；未删除号码/App/记录。当前线上仍原网页部署与电话关闭。
+- 移除预先填写模型已通过的声明门槛；准备检查明确仅配置齐备、实际能力未验证。个人云电话的五个可能模型会话任一失败均清理两腿，native首次握手失败不拨远端、不自动重连，页面显示明确错误及手动重试。父线程13:04:58 UTC模型目录GET返回403且未留响应详情，不能据此判断所有模型不可用；真实权限与WebSocket/听感在首次本人测试验收，不要求先有成功通话才允许测试。
+- 最终Node24.19.0/npm11.9.0全套 **1244总/1239pass/5既有Windows skip/0fail**，新增个人通话路径14项全过；浏览器生命周期134项全过。build/typecheck通过；本轮Chrome151日常网页 **82/82**、默认continuous电话工作台 **57/57**，外部请求/真实供应商调用/异常均0。修改源码lint除continuous bridge既有3条外均通过，3条与精确父提交基线一致；git diff --check通过，未称全仓lint通过。
+- 本地交付分支 `codex/cloud-phone-personal-no-budget-20261011`，父提交 `cc21d647aff25587e1db3c82222ab41fc35c1814`。新提交精确SHA及补丁/bundle由交付答复记录；**未推送、未建PR、未部署、未拨号、未付费握手**，因此没有新提交的远端CI。父线程核权限后同步并核该SHA，再仅更新既有AI服务。最小配置、10月12日早晨入口及用户短步骤见 [个人模式](docs/CLOUD_PERSONAL_NO_BUDGET.md)。下方费用上界/预算必需段落为撤销前记录，不再是当前验收前置。
+
 ## 最新开发交付：预算驱动时长与原发布结果（2026-10-11）
 
 - 原唯一patch的一次发布调用最终返回committed/triggered；deployment `27330903-d42c-49e3-aae7-747988ab458a` 于12:19:45.626 UTC SUCCESS，平台health 1/1，启动明确calls-disabled。未重试或新建patch，当前无挂起确认；Portal与资源不变。服务pin7b598f1、部署metadata a3ab2ec不同，两候选104项应用构建输入完全相同；实际checkout仍缺证明。详细证据见 [运行记录](docs/CLOUD_RELEASE_RESULT_2026-10-11.md)，下方恢复时“仍STAGED/待停止确认”已被本节更新。

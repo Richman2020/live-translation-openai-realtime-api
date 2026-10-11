@@ -1,8 +1,14 @@
-import { syntheticCostEvidence } from './fixtures/cloud-cost-evidence';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { mkdtempSync, rmSync, existsSync, readFileSync } from 'node:fs';
+import {
+  mkdtempSync,
+  rmSync,
+  existsSync,
+  readFileSync,
+  writeFileSync,
+  readdirSync,
+} from 'node:fs';
 import { request, createServer, type IncomingHttpHeaders } from 'node:http';
 import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
@@ -40,15 +46,8 @@ function configuration(
       GOOGLE_SUBJECT: 'fixture-pinned-google-subject',
       CLOUD_TRANSLATION_CAPABILITY_CONFIRMED: 'true',
       CLOUD_PUBLIC_CALLBACK_CONFIRMED: 'true',
-      CLOUD_TEST_DEADLINE: new Date(time + 60000).toISOString(),
       CLOUD_TEST_TARGET_NUMBER: '+12025550101',
       CLOUD_JOURNAL_DIRECTORY: directory,
-      CLOUD_JOURNAL_VOLUME_CONFIRMED: 'true',
-      CLOUD_CALL_RESERVATION_USD_MICROS: '5000000',
-      CLOUD_CALL_COST_BOUND_JSON: JSON.stringify(syntheticCostEvidence()),
-      CLOUD_RATE_CHECKED_AT: new Date(time - 1000).toISOString(),
-      CLOUD_RATE_VALID_UNTIL: new Date(time + 60000).toISOString(),
-      CLOUD_TRIAL_RATE_BOUND_CONFIRMED: 'true',
     },
     time,
   );
@@ -81,19 +80,6 @@ async function unusedPort(): Promise<number> {
   return address.port;
 }
 
-test('cloud service rejects missing or mismatched cost evidence before touching the journal', async () => {
-  const now = 1780000000000;
-  const config = configuration(now);
-  for (const changed of [
-    { ...config, budget: { ...config.budget, costBound: undefined } },
-    { ...config, outgoingPairedCaptions: true },
-    { ...config, testDeadline: config.testDeadline - 1000 },
-  ]) {
-    await assert.rejects(createCloudService(changed, { now: () => now }), {
-      message: 'CLOUD_CALL_COST_BOUND_REQUIRED',
-    });
-  }
-});
 function httpCall(
   port: number,
   path: string,
@@ -142,7 +128,11 @@ async function serviceFixture(t: TestContext) {
     rmSync(directory, { recursive: true, force: true });
   });
   let time = Date.now();
-  const config = configuration(time, directory, await unusedPort());
+  const config = configuration(
+    time,
+    join(directory, 'absent-budget'),
+    await unusedPort(),
+  );
   const count = { provider: 0, bridge: 0, google: 0 };
   service = await createCloudService(config, {
     now: () => time,
@@ -172,7 +162,7 @@ async function serviceFixture(t: TestContext) {
     count,
     directory,
     advance: () => {
-      time = config.testDeadline;
+      time += 2 * 60 * 60 * 1000;
     },
   };
 }
@@ -194,7 +184,6 @@ test('real locked Twilio signer scopes the outgoing app and identity, disables i
   );
   assert.equal(payload.grants.voice.incoming?.allow ?? false, false);
   assert.ok(payload.exp * 1000 <= voice.expiresAt);
-  assert.ok(payload.exp * 1000 <= config.testDeadline);
   assert.deepEqual(Object.keys(payload.grants).sort(), ['identity', 'voice']);
 });
 
@@ -351,83 +340,66 @@ test(
   },
 );
 
-test(
-  'second single-instance cloud factory cannot acquire the first journal or silently fall back',
-  { timeout: 10000 },
-  async (t) => {
-    const f = await serviceFixture(t);
-    await assert.rejects(createCloudService(f.config), /BUDGET_LOCKED/);
+test('personal factory ignores an absent legacy journal directory and old trial time', async (t) => {
+  const f = await serviceFixture(t);
+  assert.deepEqual(readdirSync(f.directory), []);
+  f.advance();
+  assert.equal(
+    (await httpCall(f.config.runtime.port, '/api/health')).status,
+    200,
+  );
+  assert.equal(Object.hasOwn(f.service, 'journal'), false);
+  assert.equal(Object.hasOwn(f.service, 'deadline'), false);
+  assert.deepEqual(f.count, { provider: 0, bridge: 0, google: 0 });
+});
+
+test('personal startup and shutdown do not touch any existing legacy journal, lock or sentinel', async (t) => {
+  const directory = mkdtempSync(join(process.cwd(), 'cloud-legacy-untouched-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const files = [
+    'trial-budget.json',
+    'trial-budget.lock',
+    'trial-budget.initialized',
+  ];
+  for (const file of files)
+    writeFileSync(join(directory, file), 'OFFLINE_EXISTING_PRIVATE_CONTENT');
+  const config = configuration(Date.now(), directory, await unusedPort());
+  const service = await createCloudService(config);
+  await service.close();
+  for (const file of files)
     assert.equal(
-      (await httpCall(f.config.runtime.port, '/api/health')).status,
-      200,
+      readFileSync(join(directory, file), 'utf8'),
+      'OFFLINE_EXISTING_PRIVATE_CONTENT',
     );
-    assert.deepEqual(f.count, { provider: 0, bridge: 0, google: 0 });
-  },
-);
+});
 
-test(
-  'absolute trial deadline closes real listeners and private journal after confirmed idle cleanup',
-  { timeout: 10000 },
-  async (t) => {
-    const f = await serviceFixture(t);
-    f.advance();
-    await f.service.deadline.expireIfDue();
-    assert.equal(f.service.app.server.listening, false);
-    assert.equal(f.service.ingress.server.listening, false);
-    assert.equal(existsSync(join(f.directory, 'trial-budget.lock')), false);
-    assert.deepEqual(f.count, { provider: 0, bridge: 0, google: 0 });
-  },
-);
+test('constructor failure creates no budget journal or lock', async (t) => {
+  const directory = mkdtempSync(join(process.cwd(), 'cloud-constructor-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const config = configuration(Date.now(), directory, await unusedPort());
+  await assert.rejects(
+    createCloudService(config, {
+      googleFetch: 'invalid-offline-transport' as unknown as typeof fetch,
+    }),
+    /GOOGLE_OIDC_CONFIG_INVALID/,
+  );
+  assert.deepEqual(readdirSync(directory), []);
+});
 
-test(
-  'constructor failure after durable journal acquisition releases its startup lock',
-  { timeout: 10000 },
-  async (t) => {
-    const directory = mkdtempSync(
-      join(process.cwd(), 'cloud-entry-constructor-'),
-    );
-    t.after(() => rmSync(directory, { recursive: true, force: true }));
-    const config = configuration(Date.now(), directory, await unusedPort());
-    await assert.rejects(
-      createCloudService(config, {
-        googleFetch: 'invalid-offline-transport' as unknown as typeof fetch,
-      }),
-      /GOOGLE_OIDC_CONFIG_INVALID/,
-    );
-    assert.equal(existsSync(join(directory, 'trial-budget.lock')), false);
-    const service = await createCloudService(config);
-    await service.close();
-  },
-);
-
-test(
-  'deadline transient cleanup failure keeps real callback listeners and journal for its bounded retry',
-  { timeout: 10000 },
-  async (t) => {
-    const f = await serviceFixture(t);
-    const original = f.service.manager.close.bind(f.service.manager);
-    let attempts = 0;
-    f.service.manager.close = async () => {
-      attempts += 1;
-      if (attempts === 1)
-        throw new Error('offline cleanup temporarily unknown');
-      await original();
-    };
-    f.advance();
-    const cleanup = f.service.deadline.expireIfDue();
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    assert.equal(attempts, 1);
-    assert.equal(f.service.ingress.server.listening, true);
-    assert.equal(f.service.app.server.listening, true);
-    assert.equal(existsSync(join(f.directory, 'trial-budget.lock')), true);
-    assert.throws(
-      () => f.service.deadline.assertCurrent(),
-      /CLOUD_TEST_EXPIRED/,
-    );
-    await cleanup;
-    assert.ok(attempts >= 2 && attempts <= 3);
-    assert.equal(f.service.ingress.server.listening, false);
-    assert.equal(f.service.app.server.listening, false);
-    assert.equal(existsSync(join(f.directory, 'trial-budget.lock')), false);
-  },
-);
+test('failed shutdown preserves real callback listeners and retries cleanup without a budget journal', async (t) => {
+  const f = await serviceFixture(t);
+  const original = f.service.manager.close.bind(f.service.manager);
+  let attempts = 0;
+  f.service.manager.close = async () => {
+    attempts++;
+    if (attempts === 1) throw new Error('OFFLINE_CLEANUP_UNCONFIRMED');
+    await original();
+  };
+  await assert.rejects(f.service.close(), /OFFLINE_CLEANUP_UNCONFIRMED/);
+  assert.equal(f.service.ingress.server.listening, true);
+  assert.equal(f.service.app.server.listening, true);
+  assert.deepEqual(readdirSync(f.directory), []);
+  await f.service.close();
+  assert.equal(f.service.ingress.server.listening, false);
+  assert.equal(f.service.app.server.listening, false);
+});

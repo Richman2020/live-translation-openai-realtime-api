@@ -281,19 +281,18 @@ test('web and phone parsers cannot reinterpret each other or use missing mode', 
   assert.throws(() => parseCloudServiceConfig(implicitPhone, now));
 });
 
-test('default phone mode retains all existing required gates and four confirmations', () => {
+test('default phone mode retains identity/provider gates without a budget requirement', () => {
   const env = phoneFixture();
   delete env.CLOUD_SERVICE_MODE;
   const config = parseCloudServiceConfig(env, now);
-  assert.equal(config.budget.maxCalls, 1);
-  assert.equal(config.budget.maxWallClockMs, 600_000);
-  assert.equal(config.budget.budgetUsdMicros, 5_000_000);
+  assert.equal(Object.hasOwn(config, 'budget'), false);
+  assert.equal(config.allowedTarget, '+12025550101');
   for (const field of CLOUD_SERVICE_REQUIRED_ENV) {
     const missing = { ...env };
     delete missing[field];
     assert.throws(() => parseCloudServiceConfig(missing, now), Error, field);
   }
-  for (const field of paidFlags)
+  for (const field of ['CLOUD_PUBLIC_CALLBACK_CONFIRMED'])
     for (const value of ['false', '', '1', 'TRUE']) {
       const unconfirmed = { ...env, [field]: value };
       assert.throws(

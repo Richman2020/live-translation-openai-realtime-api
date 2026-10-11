@@ -32,6 +32,7 @@
     PRIVATE_BOOTSTRAP_SETTING: '本机访问保护只能通过桌面启动器设置。',
     INVALID_PRESENCE: '电话在线状态更新失败，请重新开启通话。',
     INVALID_DESTINATION: '请输入有效的美国电话号码（+1 加十位号码）。',
+    CALL_TARGET_NOT_ALLOWED: '本次只允许拨打已配置的本人测试号码。',
     INVALID_TRANSLATION_ENGINE: '翻译版本无效，请刷新页面后重新选择。',
     TRANSLATION_ENGINE_UNAVAILABLE: '所选翻译版本暂不可用，请选择当前版本，或在连接设置中重新验证。',
     CANNOT_DIAL_OWN_NUMBER: '不能拨打自己的 Twilio 号码，请填写对方的测试号码。',
@@ -206,6 +207,7 @@
       return '翻译准备或恢复耗时过长，输入声音已无法完整保留，通话已请求结束。请重新拨打，并等翻译就绪后再说话。';
     }
     if (/^continuous_[a-z_]+(?::(?:local|remote))?$/i.test(value)) {
+      if (/^continuous_provider_failed(?::(?:local|remote))?$/.test(value)) return '实时翻译模型连接或处理失败，已请求结束本次通话。请检查模型访问权限和网络，确认线路关闭后再手动重试。';
       if (/timeout|closed|connection|socket/i.test(value)) return '连续翻译连接未完成或已中断，请检查网络后重新验证该版本。';
       if (/overflow|backpressure|queue/i.test(value)) return '连续翻译声音积压过多，通话已请求结束。请稍后重试或选择当前版本。';
       if (/rejected|mismatch|session|auth|model/i.test(value)) return '连续翻译会话未通过检查，请在连接设置中验证连续翻译实验版。';
