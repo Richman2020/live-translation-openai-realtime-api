@@ -1,8 +1,17 @@
 # 项目进度与交接
 
-更新日期：2026-10-10。共享仓库：<https://github.com/Richman2020/live-translation-openai-realtime-api>。
+更新日期：2026-10-11。共享仓库：<https://github.com/Richman2020/live-translation-openai-realtime-api>。
 
 需求见 [PROJECT_BRIEF.md](PROJECT_BRIEF.md)，工作规则见 [AGENTS.md](AGENTS.md)，运行步骤见 [LOCAL_SETUP.md](LOCAL_SETUP.md)，后续执行入口见 [LOCAL_CODEX_HANDOFF.md](LOCAL_CODEX_HANDOFF.md)。
+
+## 最新：真实 Google 登录失败的安全诊断（2026-10-11）
+
+- 从真实远端 `1215a0ecb5f489c283223928661500c0a719d684` 与干净工作区继续，原分支/草稿PR保持；主线程明确授权固定失败枚举代码、回归及仅部署AI服务，实际浏览器重现后继续最小修复，不停在建议。两服务资源4美元/3美元提醒、Hobby不升级继续由主线程监控，不触发电话/模型或更新Portal。
+- 旧AI部署 `af306eb3-dce9-4861-acc5-09449168052f` 持续1/1Online、无重启/暂存；02:06:24.633 UTC start200，02:06:33.891 UTC callback401/5ms。平台HTTP日志没有查询参数，应用原始异常被合并，无足够证据证明具体失败；当前daily模式不受旧deadline影响，不能猜账号hd或cookie根因。
+- 新增server-only observer和11项运行时白名单，web服务仅输出固定event/reason JSON，保持请求日志关闭，绝不输出URL、认证参数、code/token/cookie、身份或异常文本。日志同步throw/异步reject不改变授权结果，原HTTP body/status、state/nonce/PKCE/identity/JWT及最后cookiecommit完全保持；[诊断分类与限制](docs/CLOUD_WEB_WORKBENCH.md)。
+- Google官方未知响应参数兼容规则已核对，但本次尚无真实query证据，原严格拒绝保持。新增回归涵盖所有11enum、日志故障隔离、runtime非法reason阻断、unknowniss/session_state/重复known参数401且token交换0、成功无诊断，两个web模式实际接线及身份拒绝。
+- 云端实际Chrome离线Google 24/24、日常webworkbench54/54通过，外部请求/真实供应商调用/异常均0；固定日志已在浏览器假提供方失败场景实见，未含秘密。产物仍在忽略的 `.runtime/google-login-browser/`、`.runtime/web-workbench-browser/`。真实本应用Google登录、麦克风/手机/听感均尚未通过，后续实际登录由主线程协调。
+- 完整回归 **1140项：1135通过、5个既有Windows专属跳过、0失败**（31.60秒）；Google登录24/24、web服务20/20及OIDC24/24含在全量。源码/全部测试typecheck、生产build、两修改源码ESLint、diff检查通过，锁文件/原OIDC/入口/配置/UI均未修改。独立只读diff审计确认日志privacy与原鉴权行为无阻塞。固定源码提交推送后仅更新AI服务，部署结果与真实重现另记录；本行不是已修复实际Google登录的声明。
 
 ## 最新运行：恢复日常网页工作台（2026-10-11 01:58 UTC）
 

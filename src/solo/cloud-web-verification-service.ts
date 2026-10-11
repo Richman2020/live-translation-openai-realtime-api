@@ -18,6 +18,7 @@ import {
   GOOGLE_LOGIN_PATHS,
   GoogleBrowserLogin,
   registerGoogleLoginRoutes,
+  type GoogleLoginFailureObserver,
 } from './google-login';
 import { GoogleOidcClient } from './google-oidc';
 
@@ -43,6 +44,7 @@ type WebServiceOptions = {
   now?: () => number;
   googleFetch?: typeof fetch;
   publicDir?: string;
+  onLoginFailure?: GoogleLoginFailureObserver;
 };
 
 async function createCallsDisabledWebService(
@@ -167,6 +169,13 @@ async function createCallsDisabledWebService(
     login = new GoogleBrowserLogin({
       publicOrigin: runtime.publicOrigin,
       now: checkedNow,
+      onFailure:
+        options.onLoginFailure ||
+        ((reason) => {
+          process.stderr.write(
+            `${JSON.stringify({ event: 'GOOGLE_LOGIN_FAILURE', reason })}\n`,
+          );
+        }),
       client: new GoogleOidcClient({
         clientId: google.clientId,
         clientSecret: google.clientSecret,

@@ -10,7 +10,11 @@ import {
   type CloudAccessContext,
   type CloudAuthSession,
 } from './cloud-access';
-import { GoogleOidcClient, type VerifiedGoogleIdentity } from './google-oidc';
+import {
+  GoogleOidcClient,
+  GoogleOidcError,
+  type VerifiedGoogleIdentity,
+} from './google-oidc';
 
 export const GOOGLE_LOGIN_COOKIE = '__Host-ai-phone-login';
 export const GOOGLE_LOGIN_HEADER = 'x-phone-login';
@@ -22,6 +26,25 @@ export const GOOGLE_LOGIN_PATHS = Object.freeze({
   logout: '/auth/logout',
   renew: '/auth/session/renew',
 });
+
+const failureReasons = Object.freeze([
+  'CALLBACK_INPUT_REJECTED',
+  'BINDING_MISSING',
+  'FLOW_MISSING',
+  'FLOW_INVALID_OR_EXPIRED',
+  'CALLBACK_PARAMS_REJECTED',
+  'GOOGLE_PROVIDER_UNAVAILABLE',
+  'GOOGLE_AUTH_BUSY',
+  'GOOGLE_TOKEN_INVALID',
+  'GOOGLE_IDENTITY_REJECTED',
+  'POST_EXCHANGE_REJECTED',
+  'FINAL_COMMIT_REJECTED',
+] as const);
+export type GoogleLoginFailureReason = (typeof failureReasons)[number];
+export type GoogleLoginFailureObserver = (
+  reason: GoogleLoginFailureReason,
+) => unknown;
+const allowedFailureReasons = new Set<string>(failureReasons);
 
 class GoogleLoginError extends Error {
   constructor(
@@ -114,6 +137,8 @@ export class GoogleBrowserLogin {
 
   private readonly flowTimeout: number;
 
+  private readonly onFailure: GoogleLoginFailureObserver | undefined;
+
   private readonly bindings = new Map<string, Binding>();
 
   private readonly flows = new Map<string, LoginFlow>();
@@ -143,11 +168,13 @@ export class GoogleBrowserLogin {
     absoluteTimeoutMs?: number;
     idleTimeoutMs?: number;
     flowTimeoutMs?: number;
+    onFailure?: GoogleLoginFailureObserver;
   }) {
     this.now = nowOr(options.now);
     this.absoluteTimeout = options.absoluteTimeoutMs ?? 8 * 60 * 60 * 1000;
     this.idleTimeout = options.idleTimeoutMs ?? 15 * 60 * 1000;
     this.flowTimeout = options.flowTimeoutMs ?? 5 * 60 * 1000;
+    this.onFailure = options.onFailure;
     for (const [timeout, maximum] of [
       [this.absoluteTimeout, 24 * 60 * 60 * 1000],
       [this.idleTimeout, this.absoluteTimeout],
@@ -168,6 +195,17 @@ export class GoogleBrowserLogin {
       this.client.redirectUri !== `${this.origin}${GOOGLE_LOGIN_PATHS.callback}`
     )
       throw new GoogleLoginError('LOGIN_UNAVAILABLE', 503);
+  }
+
+  /** Server-only diagnostics accept a fixed enum, never request/error data.
+   * A failed observer cannot change the authorization result or delay it. */
+  reportFailure(reason: GoogleLoginFailureReason): void {
+    if (!allowedFailureReasons.has(reason)) return;
+    try {
+      Promise.resolve(this.onFailure?.(reason)).catch(() => {});
+    } catch {
+      // Diagnostics do not participate in authentication.
+    }
   }
 
   private resolveSession(credential: string): CloudAuthSession | undefined {
@@ -399,25 +437,31 @@ export class GoogleBrowserLogin {
     const params = url.searchParams;
     const state = params.get('state');
     const browser = cookie(request, GOOGLE_LOGIN_COOKIE);
-    if (
-      !state ||
-      !canonical(state) ||
-      !browser ||
-      params.getAll('state').length !== 1
-    )
+    if (!state || !canonical(state) || params.getAll('state').length !== 1) {
+      this.reportFailure('CALLBACK_INPUT_REJECTED');
       throw new GoogleLoginError('LOGIN_FAILED', 401);
+    }
+    if (!browser) {
+      this.reportFailure('BINDING_MISSING');
+      throw new GoogleLoginError('LOGIN_FAILED', 401);
+    }
     const stateKey = keyOf(state);
     const flow = this.flows.get(stateKey);
     const binding = this.bindings.get(keyOf(browser));
+    if (!flow) {
+      this.reportFailure('FLOW_MISSING');
+      throw new GoogleLoginError('LOGIN_FAILED', 401);
+    }
     if (
-      !flow ||
       flow.consumed ||
       !binding ||
       !equal(flow.bindingKey, keyOf(browser)) ||
       flow.generation !== binding.generation ||
       this.now() >= flow.expiresAt
-    )
+    ) {
+      this.reportFailure('FLOW_INVALID_OR_EXPIRED');
       throw new GoogleLoginError('LOGIN_FAILED', 401);
+    }
     // Consume before token exchange. Provider failure/error/duplicate callback
     // cannot replay this transaction; cancellation can still retire its record.
     flow.consumed = true;
@@ -444,6 +488,7 @@ export class GoogleBrowserLogin {
       /[\r\n\0]/.test(code)
     ) {
       this.flows.delete(stateKey);
+      this.reportFailure('CALLBACK_PARAMS_REJECTED');
       throw new GoogleLoginError('LOGIN_FAILED', 401);
     }
     try {
@@ -505,8 +550,22 @@ export class GoogleBrowserLogin {
         committed: false,
       });
       return prepared;
-    } catch {
+    } catch (error) {
       this.flows.delete(stateKey);
+      let reason: GoogleLoginFailureReason = 'POST_EXCHANGE_REJECTED';
+      if (error instanceof GoogleOidcError) {
+        switch (error.code) {
+          case 'GOOGLE_PROVIDER_UNAVAILABLE':
+          case 'GOOGLE_AUTH_BUSY':
+          case 'GOOGLE_TOKEN_INVALID':
+          case 'GOOGLE_IDENTITY_REJECTED':
+            reason = error.code;
+            break;
+          default:
+            break;
+        }
+      }
+      this.reportFailure(reason);
       throw new GoogleLoginError('LOGIN_FAILED', 401);
     }
   }
@@ -695,6 +754,7 @@ export function registerGoogleLoginRoutes(
           ]);
           return done(null, payload);
         } catch {
+          login.reportFailure('FINAL_COMMIT_REJECTED');
           reply
             .code(401)
             .removeHeader('set-cookie')

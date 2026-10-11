@@ -8,6 +8,7 @@ import { createCloudAccessTransport } from '../src/solo/cloud-access-transport';
 import {
   GOOGLE_LOGIN_COOKIE,
   GoogleBrowserLogin,
+  type GoogleLoginFailureReason,
   registerGoogleLoginRoutes,
 } from '../src/solo/google-login';
 import { GOOGLE_OIDC, GoogleOidcClient } from '../src/solo/google-oidc';
@@ -68,6 +69,7 @@ async function fixture(
     flowTimeoutMs?: number;
     idleTimeoutMs?: number;
     absoluteTimeoutMs?: number;
+    onFailure?: (reason: GoogleLoginFailureReason) => void;
   } = {},
 ) {
   let now = 1_800_000_000_000;
@@ -78,6 +80,9 @@ async function fixture(
   let sendBarrier: ReturnType<typeof deferred> | null = null;
   let enteredToken = deferred();
   let enteredSend = deferred();
+  const failures: GoogleLoginFailureReason[] = [];
+  const claims: Record<string, unknown> = {};
+  const tokenCounts = new Map<number, ReturnType<typeof deferred>>();
   const requests: { code: string; verifier: string }[] = [];
   const fakeFetch: typeof fetch = async (input, init) => {
     const url = String(input);
@@ -94,6 +99,7 @@ async function fixture(
       'Only fixed official endpoints are used with the explicit offline port',
     );
     tokenRequests += 1;
+    tokenCounts.get(tokenRequests)?.resolve();
     const params = new URLSearchParams(String(init?.body));
     assert.equal(params.get('grant_type'), 'authorization_code');
     assert.equal(params.get('redirect_uri'), `${origin}/auth/google/callback`);
@@ -118,6 +124,7 @@ async function fixture(
         email,
         email_verified: true,
         hd: domain,
+        ...claims,
       }),
     ).toString('base64url');
     const data = `${header}.${payload}`;
@@ -147,6 +154,7 @@ async function fixture(
     client,
     publicOrigin: origin,
     now: () => now,
+    onFailure: (reason) => failures.push(reason),
     ...options,
   });
   const app = fastify({ logger: false });
@@ -240,6 +248,14 @@ async function fixture(
     signIn,
     write,
     requests,
+    failures,
+    claims,
+    waitForTokenCount(count: number) {
+      if (tokenRequests >= count) return Promise.resolve();
+      const pending = deferred();
+      tokenCounts.set(count, pending);
+      return pending.promise;
+    },
     get tokenRequests() {
       return tokenRequests;
     },
@@ -325,6 +341,11 @@ test('server-generated independent state nonce and PKCE produce a verified opaqu
   assert.equal(login.result.headers.location, undefined);
   assert.match(login.principal, /^[a-f0-9]{64}$/);
   assert.equal((await f.current()).statusCode, 401);
+  assert.deepEqual(
+    f.failures,
+    [],
+    'Success and ordinary session reads produce no failure diagnostics',
+  );
 });
 
 test('state is bound to this browser and consumed before async exchange', async (t) => {
@@ -369,6 +390,7 @@ for (const retirement of [
     const response = await pending;
     assert.equal(response.statusCode, 401);
     assert.equal(response.headers['set-cookie'], undefined);
+    assert.deepEqual(f.failures, ['POST_EXCHANGE_REJECTED']);
   });
 }
 
@@ -397,6 +419,7 @@ for (const retirement of ['cancel', 'new-login', 'logout'] as const) {
     assert.equal(result.statusCode, 401);
     assert.equal(result.headers['set-cookie'], undefined);
     assert.equal(result.headers.location, undefined);
+    assert.deepEqual(f.failures, ['FINAL_COMMIT_REJECTED']);
     assert.equal(
       (await f.current(prior.session)).statusCode,
       retirement === 'logout' ? 401 : 200,
@@ -562,4 +585,185 @@ test('expired pending flows are bounded without making any provider request', as
   assert.equal(f.tokenRequests, 0);
   f.setNow(f.now + 300001);
   await f.start();
+});
+
+test('failure diagnostics distinguish callback input, missing binding, missing flow and expired flow before exchange', async (t) => {
+  for (const scenario of [
+    'input',
+    'binding',
+    'flow',
+    'expired',
+    'wrong-browser',
+  ] as const) {
+    const f = await fixture(t);
+    const flow = await f.start();
+    let result;
+    let expected: GoogleLoginFailureReason;
+    if (scenario === 'input') {
+      result = await f.callback({ ...flow, state: 'sensitive-state-canary' });
+      expected = 'CALLBACK_INPUT_REJECTED';
+    } else if (scenario === 'binding') {
+      result = await f.callback(flow, '');
+      expected = 'BINDING_MISSING';
+    } else if (scenario === 'flow') {
+      result = await f.callback({ ...flow, state: 'A'.repeat(43) });
+      expected = 'FLOW_MISSING';
+    } else {
+      if (scenario === 'expired') f.setNow(f.now + 300001);
+      const browser =
+        scenario === 'wrong-browser' ? (await f.start()).cookie : flow.cookie;
+      result = await f.callback(flow, browser);
+      expected = 'FLOW_INVALID_OR_EXPIRED';
+    }
+    assert.equal(result.statusCode, 401, scenario);
+    assert.deepEqual(result.json(), { error: 'LOGIN_FAILED' });
+    assert.equal(result.headers['set-cookie'], undefined);
+    assert.equal(f.tokenRequests, 0);
+    assert.deepEqual(f.failures, [expected]);
+    assert.doesNotMatch(JSON.stringify(f.failures), /sensitive-state-canary/);
+  }
+});
+
+test('unknown iss or session_state and duplicate callback parameters still fail before any exchange', async (t) => {
+  const canary = 'synthetic-private-query-canary';
+  for (const extra of [
+    `&iss=${canary}`,
+    `&session_state=${canary}`,
+    `&code=${canary}`,
+    `&scope=openid&scope=${canary}`,
+    `&authuser=0&authuser=${canary}`,
+    `&error=${canary}`,
+    `&unexpected_${canary}=anything`,
+  ]) {
+    const f = await fixture(t);
+    const flow = await f.start();
+    const result = await f.callback(flow, flow.cookie, extra);
+    assert.equal(result.statusCode, 401);
+    assert.deepEqual(result.json(), { error: 'LOGIN_FAILED' });
+    assert.equal(result.headers['set-cookie'], undefined);
+    assert.equal(f.tokenRequests, 0);
+    assert.deepEqual(f.failures, ['CALLBACK_PARAMS_REJECTED']);
+    for (const sensitive of [
+      canary,
+      flow.code,
+      flow.state,
+      flow.nonce,
+      flow.cookie,
+      origin,
+    ])
+      assert.equal(JSON.stringify(f.failures).includes(sensitive), false);
+  }
+});
+
+test('provider, token and identity failures report only existing fixed OIDC reasons', async (t) => {
+  for (const failure of ['provider', 'token', 'identity'] as const) {
+    const f = await fixture(t);
+    const flow = await f.start();
+    if (failure === 'provider') f.failProvider();
+    if (failure === 'token') f.claims.aud = 'sensitive-audience-canary';
+    if (failure === 'identity') {
+      f.claims.email = 'sensitive-owner-canary@example.test';
+      f.claims.sub = 'sensitive-subject-canary';
+      f.claims.hd = 'sensitive-domain-canary.example.test';
+    }
+    const result = await f.callback(flow);
+    assert.equal(result.statusCode, 401);
+    assert.deepEqual(result.json(), { error: 'LOGIN_FAILED' });
+    assert.equal(result.headers['set-cookie'], undefined);
+    assert.equal(f.tokenRequests, 1);
+    const expected = {
+      provider: 'GOOGLE_PROVIDER_UNAVAILABLE',
+      token: 'GOOGLE_TOKEN_INVALID',
+      identity: 'GOOGLE_IDENTITY_REJECTED',
+    }[failure];
+    assert.deepEqual(f.failures, [expected]);
+    for (const sensitive of [
+      flow.code,
+      flow.state,
+      flow.nonce,
+      flow.cookie,
+      origin,
+      email,
+      domain,
+      'sensitive-audience-canary',
+      'sensitive-owner-canary@example.test',
+      'sensitive-subject-canary',
+      'sensitive-domain-canary.example.test',
+      'offline provider unavailable; never expose this detail',
+      'offline-unused-access-token',
+      'offline-not-a-secret',
+    ])
+      assert.equal(JSON.stringify(f.failures).includes(sensitive), false);
+  }
+});
+
+test('bounded simultaneous exchanges report GOOGLE_AUTH_BUSY without another token request', async (t) => {
+  const f = await fixture(t);
+  const flows: Flow[] = [];
+  for (let index = 0; index < 5; index += 1) flows.push(await f.start());
+  const gate = f.blockToken();
+  const inFlight = flows
+    .slice(0, 4)
+    .map((flow) => f.callback(flow).then((result) => result));
+  try {
+    await f.waitForTokenCount(4);
+    const result = await f.callback(flows[4]);
+    assert.equal(result.statusCode, 401);
+    assert.deepEqual(result.json(), { error: 'LOGIN_FAILED' });
+    assert.equal(result.headers['set-cookie'], undefined);
+    assert.equal(f.tokenRequests, 4);
+    assert.deepEqual(f.failures, ['GOOGLE_AUTH_BUSY']);
+  } finally {
+    gate.release();
+    const completed = await Promise.all(inFlight);
+    for (const result of completed) assert.equal(result.statusCode, 200);
+  }
+});
+
+for (const failure of ['throws', 'rejects'] as const) {
+  test(`a diagnostic observer that ${failure} cannot change the failure response or emit an unhandled rejection`, async (t) => {
+    const observed: unknown[][] = [];
+    const f = await fixture(t, {
+      onFailure: (...arguments_) => {
+        observed.push(arguments_);
+        const error = new Error('sensitive-observer-error-canary');
+        if (failure === 'throws') throw error;
+        return Promise.reject(error);
+      },
+    });
+    const result = await f.app.inject({
+      method: 'GET',
+      url: '/auth/google/callback?code=synthetic-private-code-canary',
+      headers: callbackHeaders(''),
+      remoteAddress: '127.0.0.1',
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(result.statusCode, 401);
+    assert.deepEqual(result.json(), { error: 'LOGIN_FAILED' });
+    assert.equal(result.headers['set-cookie'], undefined);
+    assert.deepEqual(observed, [['CALLBACK_INPUT_REJECTED']]);
+    assert.equal(f.tokenRequests, 0);
+    await f.signIn();
+    assert.deepEqual(
+      observed,
+      [['CALLBACK_INPUT_REJECTED']],
+      'Successful login does not invoke the observer',
+    );
+  });
+}
+
+test('runtime-invalid diagnostic reasons cannot pass arbitrary strings or objects to the observer', async (t) => {
+  const f = await fixture(t);
+  for (const value of [
+    'sensitive-non-enum-canary',
+    new Error('sensitive-error-canary'),
+    { reason: 'GOOGLE_TOKEN_INVALID', token: 'sensitive-token-canary' },
+    undefined,
+    null,
+    ['CALLBACK_INPUT_REJECTED'],
+  ])
+    f.login.reportFailure(value as unknown as GoogleLoginFailureReason);
+  assert.deepEqual(f.failures, []);
+  f.login.reportFailure('GOOGLE_TOKEN_INVALID');
+  assert.deepEqual(f.failures, ['GOOGLE_TOKEN_INVALID']);
 });

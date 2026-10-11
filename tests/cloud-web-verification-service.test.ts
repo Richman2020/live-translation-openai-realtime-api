@@ -18,6 +18,7 @@ import {
   createCloudWebVerificationService,
   createCloudWebWorkbenchService,
 } from '../src/solo/cloud-web-verification-service';
+import type { GoogleLoginFailureReason } from '../src/solo/google-login';
 import { GOOGLE_OIDC } from '../src/solo/google-oidc';
 
 const origin = 'https://phone.example.test';
@@ -99,6 +100,7 @@ async function fixture(
   const enteredToken = deferred();
   const codes = new Map<string, string>();
   const claims: Record<string, unknown> = {};
+  const failures: GoogleLoginFailureReason[] = [];
   const fakeFetch: typeof fetch = async (input, init) => {
     fetches += 1;
     const url = String(input);
@@ -152,7 +154,11 @@ async function fixture(
     runtime: settings.runtime,
     google: settings.google,
   };
-  const ports = { googleFetch: fakeFetch, now: () => now };
+  const ports = {
+    googleFetch: fakeFetch,
+    now: () => now,
+    onLoginFailure: (reason: GoogleLoginFailureReason) => failures.push(reason),
+  };
   const trialService =
     mode === 'web-verification'
       ? await createCloudWebVerificationService(boundedSettings, ports)
@@ -217,6 +223,7 @@ async function fixture(
     finish,
     signIn,
     claims,
+    failures,
     fetches: () => fetches,
     advance: (milliseconds: number) => {
       now += milliseconds;
@@ -644,6 +651,30 @@ test('missing hosted-domain signed claim fails real callback without session coo
   assert.equal(result.statusCode, 401);
   assert.deepEqual(result.json(), { error: 'LOGIN_FAILED' });
   assert.equal(result.headers['set-cookie'], undefined);
+  assert.deepEqual(f.failures, ['GOOGLE_IDENTITY_REJECTED']);
+});
+
+test('both calls-disabled services wire only fixed login failures without granting a session', async (t) => {
+  for (const mode of ['web-verification', 'web-workbench'] as const) {
+    const f = await fixture(t, undefined, mode);
+    const flow = await f.start();
+    const result = await f.inject(flow.url, {
+      ...callbackHeaders(flow.cookie),
+      cookie: '',
+    });
+    assert.equal(result.statusCode, 401);
+    assert.deepEqual(result.json(), { error: 'LOGIN_FAILED' });
+    assert.equal(result.headers['set-cookie'], undefined);
+    assert.equal(f.fetches(), 0);
+    assert.deepEqual(f.failures, ['BINDING_MISSING']);
+    assert.equal((await f.inject('/api/status')).statusCode, 401);
+    const signedIn = await f.signIn();
+    assert.equal(
+      (await f.inject('/api/status', readHeaders(signedIn.cookie))).statusCode,
+      200,
+    );
+    assert.deepEqual(f.failures, ['BINDING_MISSING']);
+  }
 });
 
 test('session idle expiry revokes authenticated metadata within the test deadline', async (t) => {
