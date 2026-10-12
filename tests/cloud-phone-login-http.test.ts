@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { createHash, generateKeyPairSync, sign } from 'node:crypto';
 import { createServer, request, type IncomingHttpHeaders } from 'node:http';
 import { test, type TestContext } from 'node:test';
+import twilio from 'twilio';
+import { createControllerClient } from '../public/controller-client.js';
 
 import { CLOUD_SESSION_COOKIE } from '../src/solo/cloud-access';
 import { parseCloudServiceConfig } from '../src/solo/cloud-service-config';
@@ -50,11 +52,16 @@ type HttpResult = {
 function httpCall(
   port: number,
   path: string,
-  headers: Record<string, string> = {},
+  headers: Record<string, string> | string[] = {},
   method = 'GET',
-  body?: Record<string, unknown>,
+  body?: Record<string, unknown> | string,
 ): Promise<HttpResult> {
-  const encoded = body === undefined ? undefined : JSON.stringify(body);
+  const encoded =
+    typeof body === 'string'
+      ? body
+      : body === undefined
+        ? undefined
+        : JSON.stringify(body);
   return new Promise((resolve, reject) => {
     const req = request(
       {
@@ -62,17 +69,19 @@ function httpCall(
         port,
         path,
         method,
-        headers: {
-          host: new URL(origin).host,
-          'x-forwarded-proto': 'https',
-          ...headers,
-          ...(encoded === undefined
-            ? {}
-            : {
-                'content-type': 'application/json',
-                'content-length': String(Buffer.byteLength(encoded)),
-              }),
-        },
+        headers: Array.isArray(headers)
+          ? {}
+          : {
+              host: new URL(origin).host,
+              'x-forwarded-proto': 'https',
+              ...(encoded === undefined
+                ? {}
+                : {
+                    'content-type': 'application/json',
+                    'content-length': String(Buffer.byteLength(encoded)),
+                  }),
+              ...headers,
+            },
       },
       (res) => {
         const chunks: Buffer[] = [];
@@ -87,6 +96,17 @@ function httpCall(
         );
       },
     );
+    if (Array.isArray(headers)) {
+      const values = new Map<string, string[]>();
+      for (let index = 0; index < headers.length; index += 2) {
+        const name = headers[index];
+        const repeated = values.get(name) || [];
+        repeated.push(headers[index + 1]);
+        values.set(name, repeated);
+      }
+      for (const [name, repeated] of values)
+        req.setHeader(name, repeated.length === 1 ? repeated[0] : repeated);
+    }
     req.on('error', reject);
     req.setTimeout(3000, () => req.destroy(new Error('offline HTTP timeout')));
     req.end(encoded);
@@ -126,22 +146,41 @@ function environment(port: number) {
     CLOUD_TEST_TARGET_NUMBER: '+12025550101',
   };
 }
-async function fixture(t: TestContext) {
-  let now = initialTime;
+async function fixture(t: TestContext, offlineVoice = false) {
+  // The production Twilio JWT signer uses the SDK's wall clock independently.
+  let now = offlineVoice ? Date.now() : initialTime;
   const port = await unusedPort();
   const config = parseCloudServiceConfig(environment(port), initialTime);
-  const calls = { provider: 0, bridge: 0, token: 0, jwks: 0 };
+  const calls = {
+    provider: 0,
+    bridge: 0,
+    token: 0,
+    jwks: 0,
+    fakeCreates: 0,
+    fakeHangups: [] as string[],
+  };
   const codes = new Map<string, string>();
   const exchanges: { code: string; verifier: string }[] = [];
   let codeId = 0;
   const service = await createCloudService(config, {
-    now: () => now,
+    now: () => (offlineVoice ? Date.now() : now),
     providerFactory: () => {
       calls.provider += 1;
+      if (offlineVoice)
+        return {
+          create: async () => {
+            calls.fakeCreates += 1;
+            return { sid: `CA${'7'.repeat(32)}` };
+          },
+          hangup: async (sid) => {
+            calls.fakeHangups.push(sid);
+          },
+        };
       throw new Error('offline phone provider MUST NOT be created');
     },
     bridgeFactory: () => {
       calls.bridge += 1;
+      if (offlineVoice) return { attach() {}, close() {} };
       throw new Error('offline model bridge MUST NOT be opened');
     },
     // This explicit dependency is tests-only. It never performs network I/O.
@@ -199,8 +238,15 @@ async function fixture(t: TestContext) {
   });
   t.after(async () => {
     await service.close();
-    assert.equal(calls.provider, 0);
-    assert.equal(calls.bridge, 0);
+    if (!offlineVoice) {
+      assert.equal(calls.provider, 0);
+      assert.equal(calls.bridge, 0);
+    }
+    assert.equal(
+      calls.fakeCreates,
+      0,
+      'No real or fake PSTN leg is created by this callback-only fixture',
+    );
   });
   const read = (path: string, cookie?: string) =>
     httpCall(port, path, readHeaders(cookie));
@@ -780,4 +826,292 @@ test('authenticated real HTTP ingress still rejects local management, configurat
   }
   assert.equal(f.calls.provider, 0);
   assert.equal(f.calls.bridge, 0);
+});
+
+// Standard Voice webhook fields and SDK-supplied per-call parameters traverse
+// the real production ingress; the official locked SDK signs the exact URL.
+test('production signed Twilio form passes real ingress and per-call Voice authorization and returns stream TwiML', async (t) => {
+  const f = await fixture(t, true);
+  const login = await f.signIn();
+  const requests: string[] = [];
+  let prepared: any;
+  const client = createControllerClient({
+    randomTabId: () => 'offline-voice-tab',
+    fetchImpl: async (path: string, options: any) => {
+      requests.push(`${options.method} ${path}`);
+      const result = await httpCall(
+        f.port,
+        path,
+        {
+          ...readHeaders(login.session),
+          ...(options.method === 'POST' ? { origin } : {}),
+          ...options.headers,
+        },
+        options.method,
+        options.body,
+      );
+      return {
+        ok: result.status >= 200 && result.status < 300,
+        status: result.status,
+        json: async () => JSON.parse(result.body),
+      };
+    },
+  });
+  t.after(() => client.dispose());
+  await client.boot();
+  client.setConnectionState(true);
+  assert.equal(client.state.canStart, false);
+  assert.equal(client.state.canDial, true);
+  assert.equal(requests.filter((value) => value.startsWith('POST ')).length, 0);
+  await client.dial('+12025550101', {
+    connectVoice: async (voice: any) => {
+      prepared = voice;
+      return { disconnect() {} };
+    },
+  });
+  const callId = client.state.call!.id;
+  assert.equal(
+    requests.filter((value) => value === 'POST /api/controller/acquire').length,
+    1,
+  );
+  assert.equal(
+    requests.filter((value) => value === 'POST /api/calls').length,
+    1,
+  );
+  assert.equal(prepared.params.sessionId, callId);
+  const fields = {
+    AccountSid: f.config.providers.TWILIO_ACCOUNT_SID,
+    ApiVersion: '2010-04-01',
+    ApplicationSid: f.config.providers.TWILIO_TWIML_APP_SID,
+    CallSid: `CA${'5'.repeat(32)}`,
+    CallStatus: 'ringing',
+    Caller: `client:${prepared.grant.identity}`,
+    From: `client:${prepared.grant.identity}`,
+    Direction: 'inbound',
+    Called: '',
+    To: '',
+    ...prepared.params,
+  };
+  const headers = {
+    'content-type': 'application/x-www-form-urlencoded; charset=UTF-8',
+    'user-agent': 'TwilioProxy/1.1',
+    'x-forwarded-for': '192.0.2.42',
+    'x-forwarded-host': new URL(origin).host,
+    'x-twilio-signature': twilio.getExpectedTwilioSignature(
+      f.config.providers.TWILIO_AUTH_TOKEN,
+      `${origin}/voice/client`,
+      fields,
+    ),
+  };
+  const result = await httpCall(
+    f.port,
+    '/voice/client',
+    headers,
+    'POST',
+    new URLSearchParams(fields).toString(),
+  );
+  assert.equal(result.status, 200, result.body);
+  assert.match(result.headers['content-type']!, /text\/xml/);
+  assert.match(result.body, /<Connect><Stream/);
+  assert.match(result.body, /wss:\/\/phone\.example\.test\/voice\/media/);
+  assert.equal(f.calls.fakeCreates, 0);
+  const replay = await httpCall(
+    f.port,
+    '/voice/client',
+    headers,
+    'POST',
+    new URLSearchParams(fields).toString(),
+  );
+  assert.equal(replay.status, 200, replay.body);
+  assert.equal(f.calls.fakeCreates, 0);
+  // These forwarded values are transport metadata, not Twilio identity or
+  // the signature URL. The pinned Host and backend signature still decide.
+  const proxyChain = await httpCall(
+    f.port,
+    '/voice/client',
+    {
+      ...headers,
+      forwarded: 'for="192.0.2.42:443";proto=https;host=internal-proxy',
+      'x-forwarded-for': '192.0.2.42:443, unknown',
+      'x-forwarded-host': 'internal-proxy',
+      'x-forwarded-proto': 'https, http',
+    },
+    'POST',
+    new URLSearchParams(fields).toString(),
+  );
+  assert.equal(proxyChain.status, 200, proxyChain.body);
+  const duplicateProxy = await httpCall(
+    f.port,
+    '/voice/client',
+    {
+      ...headers,
+      'x-forwarded-proto': ['https', 'http'] as unknown as string,
+      'x-forwarded-for': ['192.0.2.42:443', 'unknown'] as unknown as string,
+    },
+    'POST',
+    new URLSearchParams(fields).toString(),
+  );
+  assert.equal(duplicateProxy.status, 200, duplicateProxy.body);
+  const duplicateSignature = await httpCall(
+    f.port,
+    '/voice/client',
+    {
+      ...headers,
+      'x-twilio-signature': [
+        headers['x-twilio-signature'],
+        headers['x-twilio-signature'],
+      ] as unknown as string,
+    },
+    'POST',
+    new URLSearchParams(fields).toString(),
+  );
+  assert.equal(duplicateSignature.status, 403);
+  assert.deepEqual(JSON.parse(duplicateSignature.body), {
+    error: 'CLOUD_INGRESS_FORBIDDEN',
+  });
+  const encodedForm = new URLSearchParams(fields).toString();
+  const duplicateHost = await httpCall(
+    f.port,
+    '/voice/client',
+    [
+      'Host',
+      new URL(origin).host,
+      'Host',
+      new URL(origin).host,
+      'X-Forwarded-Proto',
+      'https',
+      'Content-Type',
+      headers['content-type'],
+      'X-Twilio-Signature',
+      headers['x-twilio-signature'],
+      'Content-Length',
+      String(Buffer.byteLength(encodedForm)),
+    ],
+    'POST',
+    encodedForm,
+  );
+  assert.equal(duplicateHost.status, 403);
+  const framing = await httpCall(
+    f.port,
+    '/voice/client',
+    {
+      ...headers,
+      'transfer-encoding': 'chunked',
+    },
+    'POST',
+    new URLSearchParams(fields).toString(),
+  );
+  assert.equal(framing.status, 400, framing.body);
+  const connection = await httpCall(
+    f.port,
+    '/voice/client',
+    {
+      ...headers,
+      connection: 'close, x-twilio-signature',
+    },
+    'POST',
+    new URLSearchParams(fields).toString(),
+  );
+  assert.equal(connection.status, 403);
+  const forgedProxy = await httpCall(
+    f.port,
+    '/voice/client',
+    {
+      ...headers,
+      forwarded: 'for=unknown;proto=http',
+      'x-forwarded-proto': 'http',
+      'x-twilio-signature': 'offline-forged-signature',
+    },
+    'POST',
+    new URLSearchParams(fields).toString(),
+  );
+  assert.equal(forgedProxy.status, 403);
+  assert.deepEqual(JSON.parse(forgedProxy.body), {
+    error: 'INVALID_TWILIO_SIGNATURE',
+  });
+  const signedRejected = async (
+    override: Record<string, string>,
+    code: string,
+  ) => {
+    const changedFields = { ...fields, ...override };
+    const rejected = await httpCall(
+      f.port,
+      '/voice/client',
+      {
+        ...headers,
+        'x-twilio-signature': twilio.getExpectedTwilioSignature(
+          f.config.providers.TWILIO_AUTH_TOKEN,
+          `${origin}/voice/client`,
+          changedFields,
+        ),
+      },
+      'POST',
+      new URLSearchParams(changedFields).toString(),
+    );
+    assert.equal(rejected.status, 403, rejected.body);
+    assert.deepEqual(JSON.parse(rejected.body), { error: code });
+  };
+  await signedRejected(
+    { AccountSid: `AC${'8'.repeat(32)}` },
+    'INVALID_TWILIO_SIGNATURE',
+  );
+  await signedRejected({ sessionId: 'unknown-call' }, 'INVALID_SESSION');
+  await signedRejected({ nonce: 'wrong-nonce' }, 'INVALID_SESSION');
+  await signedRejected(
+    { From: 'client:wrong-identity' },
+    'INVALID_BROWSER_CALL',
+  );
+  await signedRejected({ join: 'wrong-join' }, 'INVALID_VOICE_JOIN');
+  await signedRejected({ CallSid: `CA${'6'.repeat(32)}` }, 'CALL_SID_MISMATCH');
+  const wrongUrl = await httpCall(
+    f.port,
+    '/voice/client',
+    {
+      ...headers,
+      'x-twilio-signature': twilio.getExpectedTwilioSignature(
+        f.config.providers.TWILIO_AUTH_TOKEN,
+        'https://other.example.test/voice/client',
+        fields,
+      ),
+    },
+    'POST',
+    new URLSearchParams(fields).toString(),
+  );
+  assert.equal(wrongUrl.status, 403);
+  assert.deepEqual(JSON.parse(wrongUrl.body), {
+    error: 'INVALID_TWILIO_SIGNATURE',
+  });
+  const wrongIngress = await httpCall(
+    f.port,
+    '/voice/client',
+    {
+      ...headers,
+      host: 'other.example.test',
+    },
+    'POST',
+    new URLSearchParams(fields).toString(),
+  );
+  assert.equal(wrongIngress.status, 403);
+  assert.deepEqual(JSON.parse(wrongIngress.body), {
+    error: 'CLOUD_INGRESS_FORBIDDEN',
+  });
+  const changed = new URLSearchParams({
+    ...fields,
+    From: 'client:wrong-identity',
+  }).toString();
+  const tampered = await httpCall(
+    f.port,
+    '/voice/client',
+    headers,
+    'POST',
+    changed,
+  );
+  assert.equal(tampered.status, 403, tampered.body);
+  assert.deepEqual(JSON.parse(tampered.body), {
+    error: 'INVALID_TWILIO_SIGNATURE',
+  });
+  await client.cancel();
+  assert.equal(f.service.manager.isCleanupConfirmed(callId), true);
+  client.dispose();
+  assert.deepEqual(f.calls.fakeHangups, [fields.CallSid]);
 });

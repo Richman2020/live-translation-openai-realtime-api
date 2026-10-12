@@ -45,6 +45,8 @@ export function createControllerClient({
   let phase = 'loading', error = null, connected = false, visible = true, busy = true;
   let cleanupPending = false, cleanupRequests = 0, disposed = false, renewPaused = false, attempt = null;
   let generation = 0, readSequence = 0, pendingAcquire = false, pendingRenew = false, pendingLogout = false;
+  let appliedReadSequence = 0;
+  let pendingDial = null;
   let deadlineTimer = null, renewalTimer = null;
   let engines = [], defaultEngine = '';
   let outgoingPairedCaptions = false;
@@ -59,15 +61,16 @@ export function createControllerClient({
   const snapshot = () => {
     const holdsControl = liveLease();
     const canControl = holdsControl && readConfirmed && connected && visible && !cleanupPending;
+    const canAcquire = !disposed && authenticated && readConfirmed && connected && visible && controller?.mode === 'available' && !lease && !busy && !activeCall() && !attempt && !cleanupPending && !pendingAcquire;
+    const canStart = canControl && !activeCall() && !attempt && !busy;
     return Object.freeze({
       tabId, phase, authenticated, connection: connected ? 'connected' : 'disconnected', visible,
       controller, lease: holdsControl ? Object.freeze({ tabId: lease.tabId, epoch: lease.epoch, expiresAt: lease.expiresAt }) : null,
       call, error, cleanupPending, renewPaused, busy,
       translationEngines: Object.freeze([...engines]), defaultTranslationEngine: defaultEngine,
       outgoingPairedCaptions,
-      canAcquire: !disposed && authenticated && readConfirmed && connected && visible && controller?.mode === 'available' && !lease && !busy && !cleanupPending && !pendingAcquire,
-      canControl, canStart: canControl && !activeCall() && !attempt && !busy,
-      canHangup: holdsControl && cleanupRequests === 0 && Boolean(attempt || activeCall() || (cleanupPending && call)),
+      canAcquire, canControl, canStart, canDial: !pendingDial && (canStart || canAcquire), dialPending: Boolean(pendingDial),
+      canHangup: !disposed && authenticated && cleanupRequests === 0 && Boolean(pendingDial || (holdsControl && (attempt || activeCall() || (cleanupPending && call)))),
       canMute: holdsControl && readConfirmed && !cleanupPending && phase === 'active',
       canRenew: holdsControl && readConfirmed && connected && visible && !pendingRenew && !cleanupPending,
     });
@@ -207,6 +210,7 @@ export function createControllerClient({
       try {
         const value = await request(`/api/browser-session?tabId=${encodeURIComponent(tabId)}`);
         if (disposed || seq !== readSequence || before !== generation) return snapshot();
+        appliedReadSequence = seq;
         applyBootstrap(value);
       } catch (failure) {
         if (disposed || seq !== readSequence || before !== generation) return snapshot();
@@ -229,7 +233,7 @@ export function createControllerClient({
         const received = await request('/api/controller/acquire', { tabId }, {
           capturedCsrf, onLate: late => validLease(late) ? cleanupCaptured({ proof: proofOf(late), capturedCsrf }) : undefined,
         });
-        if (disposed || before !== generation) {
+        if (disposed || before !== generation || !authenticated || !readConfirmed || !connected || !visible || cleanupPending || busy || activeCall()) {
           if (validLease(received)) void cleanupCaptured({ proof: proofOf(received), capturedCsrf });
           throw fail('CALL_CANCELLED');
         }
@@ -267,6 +271,37 @@ export function createControllerClient({
         }
         throw failure;
       } finally { pendingRenew = false; if (!disposed) emit(); }
+    },
+    // Only an explicit dial action can enter this path. Reads and reconnects
+    // never acquire authority, and the original call admission remains below.
+    async dial(to, options = {}) {
+      if (!snapshot().canDial) throw fail(controller?.mode === 'held' && !liveLease() || busy || cleanupPending ? 'CONTROLLER_BUSY' : 'CONTROL_REQUIRED');
+      const selected = options.translationEngine ?? defaultEngine;
+      if (!engines.includes(selected)) throw fail('INVALID_TRANSLATION_ENGINE');
+      if (typeof options.connectVoice !== 'function' || (options.prepareMedia !== undefined && typeof options.prepareMedia !== 'function')) throw fail('INVALID_RESPONSE');
+      const item = { generation };
+      pendingDial = item; error = null; emit();
+      let acquired = false;
+      const isCurrent = () => !disposed && pendingDial === item && item.generation === generation && connected && visible;
+      try {
+        if (!snapshot().canStart) {
+          await client.acquire(); acquired = true;
+          if (!isCurrent()) throw fail('CALL_CANCELLED');
+          const expectedRead = readSequence + 1;
+          await client.refresh();
+          if (readSequence !== expectedRead) throw fail('CALL_CANCELLED');
+          if (appliedReadSequence !== expectedRead) throw fail(error?.code || 'CALL_CANCELLED');
+        }
+        if (!isCurrent()) throw fail('CALL_CANCELLED');
+        if (!snapshot().canStart) throw fail('CONTROL_REQUIRED');
+        // Synchronous handoff: startCall installs its attempt before yielding,
+        // so no second click can enter between this fence and call preparation.
+        pendingDial = null;
+        return await client.startCall(to, { ...options, translationEngine: selected });
+      } catch (failure) {
+        if (acquired && !disposed && item.generation === generation && !attempt && lease) await client.cancel(failure?.code || 'REQUEST_FAILED');
+        throw failure;
+      } finally { if (pendingDial === item) pendingDial = null; if (!disposed) emit(); }
     },
     async startCall(to, { prepareMedia, connectVoice, translationEngine = defaultEngine } = {}) {
       if (!snapshot().canStart) throw fail('CONTROL_REQUIRED');
@@ -355,7 +390,7 @@ export function createControllerClient({
       connected = value === true;
       if (!connected) {
         renewPaused = true; clearTimer(renewalTimer); if (lease) error = safeError(fail('CONTROL_PAUSED'));
-        if (attempt && phase !== 'active') void client.cancel('CONTROL_PAUSED');
+        if (pendingAcquire || pendingDial || (attempt && phase !== 'active')) void client.cancel('CONTROL_PAUSED');
       }
       // An SSE reconnect is read-only. It never calls renew or restarts auto-renew.
       if (lease && now() >= lease.expiresAt) expire();
@@ -366,7 +401,7 @@ export function createControllerClient({
       visible = value === true;
       if (!visible) {
         renewPaused = true; clearTimer(renewalTimer);
-        if (attempt && phase !== 'active') void client.cancel('CONTROL_PAUSED');
+        if (pendingAcquire || pendingDial || (attempt && phase !== 'active')) void client.cancel('CONTROL_PAUSED');
       }
       if (lease && now() >= lease.expiresAt) expire();
       emit();

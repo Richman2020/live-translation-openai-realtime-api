@@ -662,6 +662,7 @@ try {
     return page;
   }
   const page = await openPage();
+  await eventually(async () => (await page.state()).acquire, 'Idle authenticated page connected');
   check(
     await page.evaluate(`document.documentElement.dataset.phoneSurface`),
     'controlled',
@@ -669,9 +670,10 @@ try {
   );
   check(
     (await page.state()).start,
-    false,
-    'initial page has read access and no dialing controls',
+    true,
+    'initial idle page offers direct dialing without acquiring on boot',
   );
+  check(apiRequests.filter(item => item.path === '/api/controller/acquire').length, 0, 'boot and SSE reads do not acquire control');
   check(
     (await page.state()).engine,
     translationEngine,
@@ -692,42 +694,10 @@ try {
     true,
     outgoingPairedCaptions ? 'continuous captions distinguish native text from reference translation and playback confirmation' : 'default captions include native English and paired remote Chinese without local pairing',
   );
-  await page.click('enable-device');
-  await eventually(
-    async () => (await page.state()).start,
-    'Controller acquired',
-  );
-  const observer = await openPage();
-  check(
-    (await observer.state()).start,
-    false,
-    'second real tab remains read-only while the first controls',
-  );
-  check(
-    (await observer.state()).acquire,
-    false,
-    'read-only tab cannot offer acquisition while another tab holds control',
-  );
   check(
     await page.evaluate('window.__offlineVoice.devices'),
     0,
-    'controller acquire creates no global Voice token or SDK registration',
-  );
-  const renewBefore = apiRequests.filter(
-    (item) => item.path === '/api/controller/renew',
-  ).length;
-  await page.click('renew-control');
-  await eventually(
-    () =>
-      apiRequests.filter((item) => item.path === '/api/controller/renew')
-        .length ===
-      renewBefore + 1,
-    'Explicit controller renew',
-  );
-  check(
-    await page.evaluate('window.__offlineVoice.registers'),
-    0,
-    'renew performs no global SDK registration',
+    'boot creates no Voice token or SDK registration',
   );
   async function dial(target = page) {
     await target.foreground();
@@ -760,6 +730,19 @@ try {
     async () => (await page.state()).mute,
     'Page accepts real call state',
   );
+  check(apiRequests.filter(item => item.path === '/api/controller/acquire').length, 1, 'first direct DOM dial safely acquires once');
+  const acquireIndex = apiRequests.findIndex(item => item.path === '/api/controller/acquire');
+  const recheckIndex = apiRequests.findIndex((item, index) => index > acquireIndex && item.path.startsWith('/api/browser-session'));
+  const createIndex = apiRequests.findIndex(item => item.path === '/api/calls' && item.method === 'POST');
+  check(acquireIndex >= 0 && recheckIndex > acquireIndex && createIndex > recheckIndex, true, 'first direct dial rechecks authority before the original call route');
+  const observer = await openPage();
+  check((await observer.state()).start, false, 'second real tab remains read-only while the first controls');
+  check((await observer.state()).acquire, false, 'read-only tab cannot offer acquisition while another tab holds control');
+  check(await observer.evaluate(`document.getElementById('readiness-title').textContent.includes('其他页面')`), true, 'observer has a clear multi-page control conflict message');
+  const renewBefore = apiRequests.filter(item => item.path === '/api/controller/renew').length;
+  await page.click('renew-control');
+  await eventually(() => apiRequests.filter(item => item.path === '/api/controller/renew').length === renewBefore + 1, 'Explicit controller renew');
+  check(await page.evaluate('window.__offlineVoice.registers'), 0, 'renew performs no global SDK registration');
   check(
     apiRequests.filter(
       (item) => item.path === '/api/calls' && item.method === 'POST',
@@ -1123,9 +1106,10 @@ try {
   const interrupted = await page.state();
   check(
     { start: interrupted.start, mute: interrupted.mute },
-    { start: false, mute: false },
-    'short read outage cannot revive pending SDK controls after reconnect',
+    { start: true, mute: false },
+    'after confirmed outage cleanup a new direct dial is offered while the old SDK stays retired',
   );
+  check(await page.evaluate('document.documentElement.dataset.controllerPhase'), 'readonly', 'read reconnect does not recover the retired controller proof');
   check(
     providerHangups.length - interruptedHangups,
     2,
@@ -1160,7 +1144,7 @@ try {
   );
   await page.foreground();
   await eventually(
-    async () => !(await page.state()).mute && !(await page.state()).start,
+    async () => !(await page.state()).mute && (await page.evaluate('document.documentElement.dataset.controllerPhase')) === 'readonly',
     'Hidden SDK disconnect controls retired',
   );
   check(
@@ -1240,7 +1224,7 @@ try {
   await dial();
   await eventually(
     async () =>
-      !(await page.state()).start && Boolean((await page.state()).error),
+      (await page.evaluate('document.documentElement.dataset.controllerPhase')) === 'readonly' && Boolean((await page.state()).error),
     'SDK failure reported',
   );
   await eventually(
@@ -1378,7 +1362,7 @@ try {
     );
     await eventually(
       async () =>
-        (await page.state()).title === '只读标签页 · 控制权在其他页面',
+        (await page.state()).title === '只读标签页 · 控制权在其他页面，请在该页面结束或释放',
       'New document reads the still-held old controller',
     );
     const heldState = await page.state();
@@ -1459,8 +1443,8 @@ try {
     'actual page reload requests cleanup for both live legs',
   );
   check(
-    (await page.state()).start,
-    false,
+    await page.evaluate('document.documentElement.dataset.controllerPhase'),
+    'readonly',
     'refresh cannot recover a controller capability from storage',
   );
   await page.click('refresh-controlled-state');
@@ -1473,8 +1457,8 @@ try {
       acquire: (await page.state()).acquire,
       start: (await page.state()).start,
     },
-    { acquire: true, start: false },
-    'confirmed revoke and actual state refresh enable only explicit controller acquisition',
+    { acquire: true, start: true },
+    'confirmed revoke and state refresh offer direct dialing without acquiring control',
   );
   await page.click('enable-device');
   await eventually(
@@ -1493,7 +1477,7 @@ try {
     'Control expiry two-leg cleanup',
   );
   await eventually(
-    async () => !(await page.state()).start && !(await page.state()).mute,
+    async () => (await page.evaluate('document.documentElement.dataset.controllerPhase')) === 'readonly' && !(await page.state()).mute,
     'Expired controller UI',
   );
   check(

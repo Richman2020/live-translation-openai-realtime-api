@@ -17,6 +17,7 @@ import {
   type CloudPhoneRuntime,
 } from './cloud-runtime';
 import { CLOUD_CONTROLLED_PUBLIC_PATHS } from './cloud-ingress';
+import { reportCloudVoiceClientRejection } from './cloud-voice-diagnostics';
 import { CloudAccessError, type CloudAccessContext } from './cloud-access';
 import { createCloudAccessTransport } from './cloud-access-transport';
 import { CloudPhoneAccess } from './cloud-phone-access';
@@ -412,8 +413,30 @@ async function buildPhoneApplication(
     if (!req.url.split('?')[0].startsWith('/voice/')) return undefined;
     const isMedia =
       req.method === 'GET' && req.url.split('?')[0] === '/voice/media';
-    if (!validTwilioRequest(req, configStore.value, isMedia))
+    if (!validTwilioRequest(req, configStore.value, isMedia)) {
+      if (
+        cloudRuntime &&
+        req.method === 'POST' &&
+        req.url === '/voice/client'
+      ) {
+        let reason = 'TWILIO_SIGNATURE_MISMATCH';
+        if (typeof req.headers['x-twilio-signature'] !== 'string')
+          reason = 'TWILIO_SIGNATURE_MISSING';
+        else if (
+          (req.body as Record<string, unknown>)?.AccountSid !==
+          configStore.value.TWILIO_ACCOUNT_SID
+        )
+          reason = 'TWILIO_ACCOUNT_MISMATCH';
+        else if (
+          !/^application\/x-www-form-urlencoded(?:;|$)/i.test(
+            req.headers['content-type'] || '',
+          )
+        )
+          reason = 'TWILIO_FORM_CONTENT_TYPE_INVALID';
+        reportCloudVoiceClientRejection(reason);
+      }
       return reply.code(403).send({ error: 'INVALID_TWILIO_SIGNATURE' });
+    }
     return undefined;
   });
   app.setErrorHandler((error, req, reply) => {
@@ -433,6 +456,13 @@ async function buildPhoneApplication(
       statusCode = error.statusCode;
     else if (error.statusCode && error.statusCode < 500)
       statusCode = error.statusCode;
+    if (
+      cloudRuntime &&
+      req.method === 'POST' &&
+      req.url === '/voice/client' &&
+      statusCode === 403
+    )
+      reportCloudVoiceClientRejection(code);
     reply.code(statusCode).send({
       error: code,
       ...(code === 'CONFIGURATION_REQUIRED' && !browserControl

@@ -82,13 +82,180 @@ function fixture({ translationEngines = ['pocket-prefix', 'pocket-captions'], de
   const client = makeClient();
   const ready = async () => { await client.boot(); client.setConnectionState(true); await client.acquire(); return client; };
   return { time, client, makeClient, ready, requests, overrides, csrf, capability, join,
-    setLease: (value: any) => { serverLease = value; }, lease: () => serverLease,
+    setLease: (value: any) => { serverLease = value; if (Number.isSafeInteger(value?.epoch)) epoch = Math.max(epoch, value.epoch); }, lease: () => serverLease,
     setCall: (value: any) => { active = value; }, setBusy: (value: boolean) => { busy = value; },
     async close() { for (const item of clients) item.dispose(); await flush(); },
   };
 }
 const posts = (f: ReturnType<typeof fixture>, suffix?: string) => f.requests.filter(entry => entry.options.method === 'POST' && (!suffix || entry.path.endsWith(suffix)));
 const callFixture = () => { let disconnected = 0; return { call: { disconnect: () => { disconnected += 1; } }, count: () => disconnected }; };
+
+test('an authenticated idle page offers direct dialing while boot and refresh remain read-only', async () => {
+  const f = fixture();
+  await f.client.boot(); f.client.setConnectionState(true); await f.client.refresh();
+  assert.equal(f.client.state.canAcquire, true);
+  assert.equal(f.client.state.canStart, false);
+  assert.equal(posts(f).length, 0);
+  assert.equal(f.client.state.canDial, true);
+  await f.close();
+});
+
+test('direct dialing acquires once, rechecks authoritative state and enters the original call path', async () => {
+  const f = fixture(); await f.client.boot(); f.client.setConnectionState(true);
+  const sdk = callFixture();
+  await f.client.dial('+15550000000', { connectVoice: async () => sdk.call });
+  const acquire = f.requests.findIndex(entry => entry.path === '/api/controller/acquire');
+  const read = f.requests.findIndex((entry, index) => index > acquire && entry.path.startsWith('/api/browser-session'));
+  const create = f.requests.findIndex(entry => entry.path === '/api/calls');
+  assert.ok(acquire >= 0 && read > acquire && create > read);
+  assert.equal(posts(f, '/api/controller/acquire').length, 1);
+  assert.equal(posts(f, '/api/calls').length, 1);
+  assert.equal(posts(f, '/voice').length, 1);
+  assert.equal(f.client.state.phase, 'connecting');
+  await f.close();
+});
+
+test('direct dialing with an existing valid controller does not acquire again', async () => {
+  const f = fixture(); await f.ready();
+  const count = posts(f, '/api/controller/acquire').length;
+  await f.client.dial('+15550000000', { connectVoice: async () => callFixture().call });
+  assert.equal(posts(f, '/api/controller/acquire').length, count);
+  assert.equal(posts(f, '/api/calls').length, 1); await f.close();
+});
+
+test('duplicate direct clicks during acquisition make one request and cannot prepare media early', async () => {
+  const f = fixture(); await f.client.boot(); f.client.setConnectionState(true);
+  const acquired = deferred();
+  f.overrides.set('/api/controller/acquire', async entry => {
+    const lease = { tabId: entry.body.tabId, leaseId: f.capability, epoch: 1, expiresAt: f.time.now() + 30000 };
+    f.setLease(lease); await acquired.promise; return response(lease);
+  });
+  let media = 0;
+  const options = { prepareMedia: async () => { media += 1; }, connectVoice: async () => callFixture().call };
+  const dialing = f.client.dial('+15550000000', options); await flush();
+  assert.equal(f.client.state.canDial, false); assert.equal(f.client.state.canHangup, true);
+  await assert.rejects(f.client.dial('+15550000000', options), { code: 'CONTROL_REQUIRED' });
+  assert.equal(media, 0); assert.equal(posts(f, '/api/calls').length, 0);
+  acquired.resolve(undefined); await dialing;
+  assert.equal(media, 1); assert.equal(posts(f, '/api/controller/acquire').length, 1);
+  assert.equal(posts(f, '/api/calls').length, 1); await f.close();
+});
+
+for (const retirement of ['cancel', 'navigation', 'hidden', 'disconnected', 'dispose', 'logout'] as const) {
+  test(`direct dial ${retirement} permanently retires a late acquisition and revokes its proof`, async () => {
+    const f = fixture(); await f.client.boot(); f.client.setConnectionState(true);
+    const acquired = deferred(); let media = 0, sdk = 0;
+    f.overrides.set('/api/controller/acquire', async entry => {
+      const lease = { tabId: entry.body.tabId, leaseId: f.capability, epoch: 1, expiresAt: f.time.now() + 30000 };
+      f.setLease(lease); await acquired.promise; return response(lease);
+    });
+    const dialing = f.client.dial('+15550000000', { prepareMedia: async () => { media += 1; }, connectVoice: async () => { sdk += 1; return callFixture().call; } });
+    const rejected = assert.rejects(dialing, { code: 'CALL_CANCELLED' }); await flush();
+    if (retirement === 'dispose') f.client.dispose();
+    else if (retirement === 'hidden') { f.client.setVisible(false); f.client.setVisible(true); }
+    else if (retirement === 'disconnected') { f.client.setConnectionState(false); f.client.setConnectionState(true); }
+    else if (retirement === 'logout') {
+      f.overrides.set('/auth/logout', () => response({ ok: true })); await f.client.logout();
+    }
+    else await f.client.cancel(); // Workbench navigation uses the same cancellation.
+    if (retirement === 'dispose' || retirement === 'logout') assert.equal(f.client.state.canHangup, false);
+    acquired.resolve(undefined); await rejected; await flush();
+    assert.equal(media, 0); assert.equal(sdk, 0); assert.equal(posts(f, '/api/calls').length, 0);
+    assert.equal(posts(f, '/api/controller/revoke').length, 1);
+    assert.equal(f.client.state.lease, null); await f.close();
+  });
+}
+
+test('a late acquisition error after cancellation cannot overwrite the retired dial or start media', async () => {
+  const f = fixture(); await f.client.boot(); f.client.setConnectionState(true);
+  const acquired = deferred(); let media = 0;
+  f.overrides.set('/api/controller/acquire', () => acquired.promise);
+  const dialing = f.client.dial('+15550000000', { prepareMedia: async () => { media += 1; }, connectVoice: async () => callFixture().call });
+  const rejected = assert.rejects(dialing, { code: 'CONTROLLER_BUSY' }); await flush();
+  await f.client.cancel(); acquired.resolve(response({ error: 'CONTROLLER_BUSY' }, 409));
+  await rejected; await flush();
+  assert.equal(f.client.state.error.code, 'CALL_CANCELLED');
+  assert.equal(media, 0); assert.equal(posts(f, '/api/calls').length, 0); await f.close();
+});
+
+test('direct dialing does not take another tab, active call or unconfirmed cleanup even when a busy hint is stale', async () => {
+  for (const state of ['held', 'active', 'cleanup'] as const) {
+    const f = fixture();
+    if (state === 'held') f.setLease({ tabId: 'other-tab', leaseId: f.capability, epoch: 1, expiresAt: f.time.now() + 30000 });
+    else f.setCall({ id: 'other-call', status: state === 'active' ? 'active' : 'completed', cleanupUnconfirmed: state === 'cleanup' });
+    await f.client.boot(); f.client.setConnectionState(true);
+    assert.equal(f.client.state.canDial, false);
+    await assert.rejects(f.client.dial('+15550000000', { connectVoice: async () => callFixture().call }));
+    assert.equal(posts(f).length, 0); await f.close();
+  }
+});
+
+test('a server acquisition conflict has a clear multi-page diagnosis and never starts a call', async () => {
+  const f = fixture(); await f.client.boot(); f.client.setConnectionState(true);
+  f.overrides.set('/api/controller/acquire', () => response({ error: 'CONTROLLER_BUSY' }, 409));
+  await assert.rejects(f.client.dial('+15550000000', { connectVoice: async () => callFixture().call }), { code: 'CONTROLLER_BUSY' });
+  assert.match(f.client.state.error.message, /另一标签页/);
+  assert.equal(posts(f, '/api/calls').length, 0); await f.close();
+});
+
+test('an unsuccessful post-acquire authoritative read revokes the new control without preparing a call', async () => {
+  const f = fixture(); await f.client.boot(); f.client.setConnectionState(true);
+  f.overrides.set('/api/browser-session', () => { throw new Error('offline'); });
+  let media = 0;
+  await assert.rejects(f.client.dial('+15550000000', { prepareMedia: async () => { media += 1; }, connectVoice: async () => callFixture().call }), { code: 'REQUEST_FAILED' });
+  assert.equal(media, 0); assert.equal(posts(f, '/api/calls').length, 0);
+  assert.equal(posts(f, '/api/controller/revoke').length, 1); assert.equal(f.client.state.lease, null); await f.close();
+});
+
+test('cancellation during the post-acquire recheck cannot enter call preparation after the read arrives', async () => {
+  const f = fixture(); await f.client.boot(); f.client.setConnectionState(true);
+  const read = deferred(); let media = 0;
+  f.overrides.set('/api/browser-session', () => read.promise);
+  const dialing = f.client.dial('+15550000000', { prepareMedia: async () => { media += 1; }, connectVoice: async () => callFixture().call });
+  const rejected = assert.rejects(dialing, { code: 'CALL_CANCELLED' }); await flush();
+  assert.equal(f.client.state.dialPending, true); assert.equal(f.client.state.canHangup, true);
+  const cancellation = f.client.cancel(); await flush();
+  read.resolve(response({ mode: 'controlled', csrfToken: f.csrf, controller: { mode: 'available', ownSession: false, tabMatches: false, epoch: 2, expiresAt: null }, activeSession: null, busy: false, translationEngines: ['pocket-prefix', 'pocket-captions'], defaultTranslationEngine: 'pocket-prefix', outgoingPairedCaptions: true }));
+  await cancellation; await rejected;
+  assert.equal(media, 0); assert.equal(posts(f, '/api/calls').length, 0);
+  assert.equal(posts(f, '/api/controller/revoke').length, 1); assert.equal(f.client.state.lease, null); await f.close();
+});
+
+test('a superseded post-acquire read cannot start media from a stale idle projection while the current read is pending', async () => {
+  const f = fixture(); await f.client.boot(); f.client.setConnectionState(true);
+  const dialRead = deferred(), currentRead = deferred(); let reads = 0, media = 0;
+  const projection = (busy = false) => response({ mode: 'controlled', csrfToken: f.csrf, controller: { mode: f.lease() ? 'held' : 'available', ownSession: !!f.lease(), tabMatches: !!f.lease(), epoch: f.lease()?.epoch ?? 2, expiresAt: f.lease()?.expiresAt ?? null }, activeSession: null, busy, translationEngines: ['pocket-prefix', 'pocket-captions'], defaultTranslationEngine: 'pocket-prefix', outgoingPairedCaptions: true });
+  f.overrides.set('/api/browser-session', () => ++reads === 1 ? dialRead.promise : reads === 2 ? currentRead.promise : projection());
+  const dialing = f.client.dial('+15550000000', { prepareMedia: async () => { media += 1; }, connectVoice: async () => callFixture().call });
+  const rejected = assert.rejects(dialing, { code: 'CALL_CANCELLED' }); await flush();
+  const newer = f.client.refresh(); await flush();
+  dialRead.resolve(projection(true)); await rejected; await flush();
+  assert.equal(media, 0); assert.equal(posts(f, '/api/calls').length, 0);
+  assert.equal(posts(f, '/api/controller/revoke').length, 1); assert.equal(f.client.state.lease, null);
+  currentRead.resolve(projection()); await newer; await flush();
+  assert.equal(media, 0); assert.equal(posts(f, '/api/calls').length, 0); await f.close();
+});
+
+test('unknown direct acquisition timeout never starts media or retries and cleans a late valid proof', async () => {
+  const f = fixture(); await f.client.boot(); f.client.setConnectionState(true);
+  const acquired = deferred(); let media = 0;
+  f.overrides.set('/api/controller/acquire', () => acquired.promise);
+  const dialing = f.client.dial('+15550000000', { prepareMedia: async () => { media += 1; }, connectVoice: async () => callFixture().call });
+  const rejected = assert.rejects(dialing, { code: 'REQUEST_TIMEOUT' }); await flush();
+  await f.time.advance(5000); await rejected;
+  assert.equal(f.client.state.canDial, false); assert.equal(media, 0);
+  assert.equal(posts(f, '/api/calls').length, 0); assert.equal(posts(f, '/api/controller/acquire').length, 1);
+  const lease = { tabId: f.client.tabId, leaseId: f.capability, epoch: 1, expiresAt: f.time.now() + 30000 };
+  f.setLease(lease); acquired.resolve(response(lease)); await flush();
+  assert.equal(posts(f, '/api/controller/revoke').length, 1); assert.equal(f.client.state.lease, null);
+  await f.client.refresh(); assert.equal(f.client.state.canDial, true); await f.close();
+});
+
+test('invalid direct dial strategy cannot acquire control or prompt for a microphone', async () => {
+  const f = fixture(); await f.client.boot(); f.client.setConnectionState(true); let media = 0;
+  await assert.rejects(f.client.dial('+15550000000', { translationEngine: 'not-advertised', prepareMedia: async () => { media += 1; }, connectVoice: async () => callFixture().call }), { code: 'INVALID_TRANSLATION_ENGINE' });
+  assert.equal(media, 0); assert.equal(posts(f).length, 0); assert.equal(f.client.state.canDial, true); await f.close();
+});
 
 test('boot uses same-origin cookie and keeps CSRF, proof and Voice capabilities out of public state', async () => {
   const f = fixture(); await f.ready();

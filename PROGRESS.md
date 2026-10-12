@@ -4,6 +4,15 @@
 
 需求见 [PROJECT_BRIEF.md](PROJECT_BRIEF.md)，工作规则见 [AGENTS.md](AGENTS.md)，运行步骤见 [LOCAL_SETUP.md](LOCAL_SETUP.md)，后续执行入口见 [LOCAL_CODEX_HANDOFF.md](LOCAL_CODEX_HANDOFF.md)。
 
+## 最新：首次拨号与固定 Voice 回调兼容候选，开发分支交付（2026-10-12）
+
+- 从已部署精确 `fd6ec0921d4551de03d3afe95306b3072b746369` 建立 `codex/cloud-phone-conversation-dial-fix-20261012`。父线程确认用户自行发布，deployment `94058041-e24c-4b58-8495-ca81d5b53915` 01:35:59 UTC SUCCESS；真实 Google callback/工作台/browser-session 200。两次 calls/voice 200 后 `/voice/client` 403，Request Inspector 固定响应 `CLOUD_INGRESS_FORBIDDEN`、11200，后续 hangup 200；拒绝已定位到 ingress，原请求头仍缺，不把标准 form 齐备当每项头已通过。
+- 前端确定阻断：原 canAcquire=true 但 canStart=false，首次拨号必先手动取得控制权。新增显式 dial→原 acquire→实际应用的最新 bootstrap→原 startCall，按钮使用 canDial；boot/refresh/SSE不取权。首次双点击只 acquire/create 一次，领取时可取消，其他页、忙线、清理未确认不接管；hidden/disconnect/导航/logout/dispose/迟到及被并发刷新覆盖均撤销旧许可，不进入媒体/电话创建。
+- 正式 SDK 签名完整 Twilio form 在原生产后端标准路径可返回200 Stream TwiML。代理链样本在原入口精确403 CLOUD_INGRESS_FORBIDDEN，候选兼容仅固定 POST `/voice/client` 表单：剥离不参与身份的四类代理元数据，不据UA授权；真实Host、消息边界、重复安全头、大小/超时、loopback、固定publicURL及原官方验签/account/nonce/身份/join/SID/会话/controller保持。浏览器API/本地管理/其他Voice路径不变。原实际是哪项头导致仍未证明，不能宣称真实403已恢复。
+- 新真实组合包含 createCloudService/parser、Google RSA/PKCE、实际 createControllerClient.dial、HTTP acquire/复核/calls/voice grant、完整标准form/URLSearchParams/正式SDK签名/公开ingress/TwiML成功；同SID重放和代理链/重复代理头200，重复Host/签名、CL-TE歧义、Connection提名、伪造签名/错误账户/nonce/From/join/SID仍拒绝。13组HTTP全过、fake PSTN create=0、model bridge=0，原挂断确认清理唯一fake本地腿。固定reason诊断不输出请求数据；未知值fallback及日志失败均有测试，新增诊断2/2。
+- 独立安全复审 ingress+HTTP+diagnostics+controller **90/90**；最终Node24.19.0/npm11.9.0全套 **1277总/1272pass/5既有Windows skip/0fail**，build/typecheck通过。Controller **60/60**（新增18），Chrome151 Pocket **59/59**、continuous配对 **65/65**、默认回程 **62/62**、生产phone Google **27/27**、daily **82/82**；外部请求/真实供应商调用/异常0。修改源码ESLint、格式检查、JS语法和git diff --check通过；未改lockfile、Google/验签核心、预算移除或SessionManager清理实现。测试期间修正冻结JWT fixture时钟与Node重复Host的raw header构造，不修改生产过期或安全期望来让测试通过。
+- 当前环境无Twilio凭据/读取工具、Railway仅变量名，未读原错误事件；Library截图下载失败，未见像素。可用固定reason日志/现有网关请求头进一步闭合；已有授权凭据可签明确不存在sessionId的非收费回调探针到INVALID_SESSION，不能建通话，本环境未执行。实际电话、模型握手、真人双向音频与原具体头仍待父线程；按父线程最新授权在完成检查后推送独立分支，精确SHA及远端核对由交付答复提供；不自动stage/deploy，不创建Railway patch、不实际拨号/付费调用、不改Twilio资源/凭据。patch/bundle同时保留，详见 [拨号修正记录](docs/CLOUD_PHONE_DIAL_FIX_2026-10-12.md)。
+
 ## 最新：cloud phone 公开工作台导航回归修复，本地交付（2026-10-12）
 
 - 从父线程已确认线上精确 `efb1443b89eeb0a22084e29f6cd28a8c88e1a5cf` 建立修复分支 `codex/cloud-phone-google-login-fix-20261012`。实际运行 phone/cloud/回调确认 true/单副本；父线程确认部署 `c90c8a93-d787-4c12-97fb-9221df043db5` 于00:27:50 UTC SUCCESS。本任务没有读取或修改 Railway 秘密、创建 patch 或重复旧发布。

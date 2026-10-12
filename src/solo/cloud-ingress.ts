@@ -9,6 +9,7 @@ import {
 import { isIP, type Socket } from 'node:net';
 
 import { parsePhoneRuntime, type CloudPhoneRuntime } from './cloud-runtime';
+import { reportCloudVoiceClientRejection } from './cloud-voice-diagnostics';
 
 /** Public source files only. Authentication and controller APIs are separate. */
 export const CLOUD_CONTROLLED_PUBLIC_PATHS = Object.freeze([
@@ -107,6 +108,12 @@ const droppedHeaders = new Set([
   'transfer-encoding',
   'upgrade',
 ]);
+const proxyMetadataHeaders = new Set([
+  'forwarded',
+  'x-forwarded-for',
+  'x-forwarded-host',
+  'x-forwarded-proto',
+]);
 const MAX_BODY_BYTES = 16 * 1024;
 const MAX_REQUEST_BYTES = 4096;
 const MAX_UPGRADE_HEAD_BYTES = 64 * 1024;
@@ -167,37 +174,64 @@ function headersForUpstream(
   upgrade: boolean,
   healthProbe = false,
 ): Record<string, string> | null {
+  // A signature header selects transport handling, never authentication. Only
+  // the fixed Voice form route may discard opaque proxy metadata; the backend
+  // still verifies the exact public HTTPS URL, account and full parsed form.
+  const voiceForm =
+    !upgrade &&
+    req.method === 'POST' &&
+    req.url === '/voice/client' &&
+    typeof req.headers['x-twilio-signature'] === 'string' &&
+    req.headers['x-twilio-signature'].length > 0 &&
+    /^application\/x-www-form-urlencoded(?:;|$)/i.test(
+      req.headers['content-type'] || '',
+    );
+  const reject = (reason: string): null => {
+    if (req.method === 'POST' && req.url === '/voice/client')
+      reportCloudVoiceClientRejection(reason);
+    return null;
+  };
   const headers: Record<string, string> = Object.create(null);
   const seen = new Set<string>();
   const raw = req.rawHeaders;
-  if (raw.length % 2) return null;
+  if (raw.length % 2) return reject('INGRESS_HEADER_SHAPE');
+  for (let index = 0; index < raw.length; index += 2) {
+    const name = raw[index].toLowerCase();
+    if (!voiceForm || !proxyMetadataHeaders.has(name)) {
+      if (seen.has(name)) return reject('INGRESS_DUPLICATE_HEADER');
+      seen.add(name);
+    }
+  }
   for (let index = 0; index < raw.length; index += 2) {
     const name = raw[index].toLowerCase();
     const value = raw[index + 1];
-    // Reject duplicates rather than letting Node join security-sensitive values.
-    if (seen.has(name) || req.headers[name] !== value) return null;
-    seen.add(name);
-    if (!droppedHeaders.has(name)) headers[name] = value;
+    if (!voiceForm || !proxyMetadataHeaders.has(name)) {
+      // Node normalization may never rewrite a security-sensitive value.
+      if (req.headers[name] !== value)
+        return reject('INGRESS_HEADER_NORMALIZATION');
+      if (!droppedHeaders.has(name)) headers[name] = value;
+    }
   }
+  if (req.headers.host !== authority) return reject('INGRESS_HOST_MISMATCH');
   if (
-    req.headers.host !== authority ||
-    ((!healthProbe || req.headers['x-forwarded-proto'] !== undefined) &&
+    !voiceForm &&
+    (((!healthProbe || req.headers['x-forwarded-proto'] !== undefined) &&
       req.headers['x-forwarded-proto'] !== 'https') ||
-    req.headers.forwarded !== undefined ||
-    (req.headers['x-forwarded-host'] !== undefined &&
-      req.headers['x-forwarded-host'] !== authority)
+      req.headers.forwarded !== undefined ||
+      (req.headers['x-forwarded-host'] !== undefined &&
+        req.headers['x-forwarded-host'] !== authority))
   )
-    return null;
+    return reject('INGRESS_PROXY_METADATA');
   const forwardedFor = req.headers['x-forwarded-for'];
-  if (forwardedFor !== undefined) {
+  if (!voiceForm && forwardedFor !== undefined) {
     if (typeof forwardedFor !== 'string' || forwardedFor.length > 1024)
-      return null;
+      return reject('INGRESS_PROXY_METADATA');
     const addresses = forwardedFor.split(',');
     if (
       addresses.length > 16 ||
       addresses.some((address) => !isIP(address.trim()))
     )
-      return null;
+      return reject('INGRESS_PROXY_METADATA');
   }
   const { connection } = req.headers;
   if (
@@ -212,7 +246,7 @@ function headersForUpstream(
             ),
         ))
   )
-    return null;
+    return reject('INGRESS_CONNECTION');
   const length = req.headers['content-length'];
   if (
     length !== undefined &&
@@ -220,13 +254,14 @@ function headersForUpstream(
       !/^\d+$/.test(length) ||
       +length > MAX_BODY_BYTES)
   )
-    return null;
-  if (req.headers['content-encoding'] !== undefined) return null;
+    return reject('INGRESS_CONTENT_LENGTH');
+  if (req.headers['content-encoding'] !== undefined)
+    return reject('INGRESS_CONTENT_ENCODING');
   if (
     req.method !== 'POST' &&
     (req.headers['transfer-encoding'] || Number(length || 0))
   )
-    return null;
+    return reject('INGRESS_BODY_METHOD');
   if (upgrade) {
     const key = req.headers['sec-websocket-key'];
     if (
@@ -241,10 +276,11 @@ function headersForUpstream(
       Buffer.from(key, 'base64').toString('base64') !== key ||
       typeof req.headers['x-twilio-signature'] !== 'string'
     )
-      return null;
+      return reject('INGRESS_UPGRADE');
     headers.connection = 'Upgrade';
     headers.upgrade = 'websocket';
-  } else if (req.headers.upgrade !== undefined) return null;
+  } else if (req.headers.upgrade !== undefined)
+    return reject('INGRESS_UPGRADE');
   return headers;
 }
 

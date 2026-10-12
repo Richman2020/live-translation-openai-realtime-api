@@ -736,9 +736,14 @@ try {
     'JavaScript cannot read the authentication credential',
   );
   check(
-    (await page.state()).start,
+    Boolean(controllerProof),
     false,
     'login alone does not grant a controller lease',
+  );
+  check(
+    (await page.state()).start,
+    true,
+    'authenticated idle phone page enables explicit dialing without manual control acquisition',
   );
   signedInScreenshot = (
     await page.send('Page.captureScreenshot', {
