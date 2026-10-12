@@ -4,6 +4,17 @@
 
 需求见 [PROJECT_BRIEF.md](PROJECT_BRIEF.md)，工作规则见 [AGENTS.md](AGENTS.md)，运行步骤见 [LOCAL_SETUP.md](LOCAL_SETUP.md)，后续执行入口见 [LOCAL_CODEX_HANDOFF.md](LOCAL_CODEX_HANDOFF.md)。
 
+## 最新：云端恢复旧回调修复，正常验证被依赖阻塞（2026-10-12）
+
+- 记录时间2026-10-12 17:11（北京时间）；本云端聊天负责执行，dot负责协调/接口及验收。用户本轮仅授权从精确基线恢复旧修复、独立分支/目录、项目记录及已有依赖下的离线验证；下方旧执行/推送/部署/付费许可及PROJECT_BRIEF历史状态不覆盖此次云端与并行分工，不同时重构字幕、声音、登录或来电。
+- 从精确 `4f34fa313173e62d370e5f78c0780e4506848420` 新建 `codex/ai-phone-cloud-recovery-20261012`，实际独立目录 `/workspace/ai-phone-cloud-recovery-20261012`；创建前名称和目录均不存在。原 `/workspace/live-translation-openai-realtime-api` 保持 `work/5fabf51cd6976131ac829b1b95c87f7239096184`，附件及需求审计资料保留。
+- 原patch `git apply --check --exclude=AGENTS.md` exit0后，恢复6个tracked及1个原untracked文档；七个实际全文SHA-256和大小全部匹配清单。AGENTS旧差异未应用，基线文件SHA仍 `915651d9c86ea2a7e4bdbd64291f65bc76b71a312c19370fddfd23888d0862c7`。各文件哈希、路径、完整差异及命令见[本轮恢复验证报告](docs/CLOUD_PHONE_RECOVERY_VERIFICATION_2026-10-12.md)；原修复文档[只作历史成果](docs/CLOUD_PHONE_CALLBACK_CHAIN_FIX_2026-10-12.md)。
+- 本轮实际通过的是补丁适用性、恢复哈希、`git diff --check`，以及3个修改源码和2个测试文件的 `node --check`（均exit0）。这是静态/语法检查，不是typecheck/build/回调测试。静态安全审查未发现移除Google/Origin/CSRF/controller或Twilio官方签名、nonce/SID边界；全链运行负例仍未复验。
+- 新旧目录没有node_modules；42个直接锁依赖缺失，tsx/typescript/tsc-alias/fastify/twilio/ws等实际解析ERR_MODULE_NOT_FOUND。回调专项、相关授权/清理回归、typecheck、build、全套测试及相关离线浏览器未执行；未产生本轮pass/fail/skip统计，不沿用旧包或旧本机成绩。完整v3锁文件609安装位置全部registry.npmjs.org HTTPS且有integrity；root prepare=husky，四处transitive安装脚本标记见报告。
+- 本轮未安装。待具体安装任务的命令为 `npm ci --include=dev --ignore-scripts --no-audit --no-fund --registry=https://registry.npmjs.org`，实际目录为上述独立worktree；执行后仍须核tsx/esbuild并真实跑离线命令，不能提前记通过。
+- 原状态哈希异常保留记录：LF 257字节/8条的 `9846b97c…0fb9` 与NUL同长记录 `4a60f7ff…ddd0f5` 分别复算，NUL匹配清单，依据HASH_NOTE关闭为分隔符口径未注明；原ZIP未改。
+- 恢复与此进度/验证报告在本分支仅留本地版本，未push/部署/改Railway/凭据/试打或访问付费模型；远端与线上均未同步。完整交付差异、commit回执及保护校验保存在 `/workspace/ai-phone-reference/recovery-20261012`。dot下一步核对恢复交付和依赖阻塞，再下发安装/正常离线复验任务；通话功能、真实403闭合与质量/延迟仍未验收。
+
 ## 最新：固定 Voice 回调普通重复头修复（2026-10-12）
 
 - 从已部署精确 `f26006cb944e02700c32eb0ac7ad1f87105c86ee` 建立 `codex/cloud-phone-conversation-duplicate-header-fix-20261012`。用户自行发布deployment `e571df69-2931-4db6-a19b-d9f5713ba533` 02:28:36 UTC SUCCESS；自动控制权/session/call/voice准备成功，但两次真实回调仍403。02:30:24.994746Z、02:30:31.029782Z固定诊断均为 `INGRESS_DUPLICATE_HEADER`，已确认入口重复头分支；尚无具体原始头名证据。

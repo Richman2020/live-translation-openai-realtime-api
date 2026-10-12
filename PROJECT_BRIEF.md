@@ -1,5 +1,7 @@
 # 中英双向电话翻译：项目目标与范围
 
+**2026-10-12 最新完整回调链修复**：`4f34fa3`已由用户发布且真实client200，但后续connect/status/stream-status仍403。修复对象为完整四HTTP+媒体链，固定签名传输兼容覆盖后续既有query回调和精确media升级，完整URL/form及start授权不变；没有incoming/未知路径豁免。生产组合隔离验收必须经过local媒体、fake bridge ready与remote创建、remote连接、双腿状态及结束清理。只代码/开发分支交付，不stage/deploy或实际拨号；父线程协调已授权AI发布，portal/商机暂停。真实后续403具体原因和新版电话恢复分别核验，见 [完整链记录](docs/CLOUD_PHONE_CALLBACK_CHAIN_FIX_2026-10-12.md)。
+
 **2026-10-12 最新回调重复头修复**：用户自行发布 `f26006cb` 后自动控制权/会话/call/voice准备均成功，真实Voice回调仍因 `INGRESS_DUPLICATE_HEADER` 被拒绝。最小兼容仅对固定 `/voice/client` 签名表单剥离普通传输头，关键头与全部既有认证/通话绑定继续严格；不增加功能，不恢复应用预算门槛或改挂断清理。授权隔离检查后推送独立分支，不stage/deploy或实际拨号；具体真实重复头及新版真实回调由父线程核验。见 [修复记录](docs/CLOUD_PHONE_DUPLICATE_HEADER_FIX_2026-10-12.md)。
 
 **2026-10-12 最新拨号修正**：登录已真实通过，用户要求无需先手动取得控制权。改为用户明确拨打时安全领取空闲控制权并复核；其它页面持权、活动通话及清理待确认继续拒绝。线上两次 `/voice/client` 403 已明确为 ingress 拒绝，修正只作用于固定签名表单回调的代理元数据兼容，保留原固定URL/Host、官方验签和通话绑定；原请求头缺失及真人电话未通过仍明确记录。仅代码/隔离测试/开发分支交付，已授权推送，不自动stage/deploy、拨号或改供应商配置；见 [拨号修正记录](docs/CLOUD_PHONE_DIAL_FIX_2026-10-12.md)。
