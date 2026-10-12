@@ -1,0 +1,10 @@
+# Install only inside a separate Python 3.12 environment.
+# First install torch==2.7.1+cu118 and torchaudio==2.7.1+cu118
+# from https://download.pytorch.org/whl/cu118 (Windows x64).
+numpy==1.26.4
+transformers==4.49.0
+librosa==0.10.2.post1
+faiss-cpu==1.13.2
+praat-parselmouth==0.4.7
+soundfile==0.13.1
+scipy==1.17.1

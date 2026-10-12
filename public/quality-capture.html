@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>电话翻译 · 测试素材录制</title>
+    <style>
+      :root {
+        font-family: system-ui, 'Microsoft YaHei', sans-serif;
+        color: #162633;
+        background: #eef3f6;
+      }
+      body {
+        margin: 0;
+        padding: 36px 20px;
+      }
+      main {
+        max-width: 840px;
+        margin: auto;
+      }
+      h1 {
+        font-size: 28px;
+        margin: 8px 0 18px;
+      }
+      p {
+        line-height: 1.75;
+      }
+      .eyebrow {
+        color: #367a79;
+        font-weight: 700;
+      }
+      .card {
+        background: white;
+        border: 1px solid #d7e2e9;
+        border-radius: 16px;
+        padding: 26px;
+        margin: 20px 0;
+      }
+      .source {
+        font-size: 24px;
+        line-height: 1.8;
+        white-space: pre-wrap;
+      }
+      button,
+      select {
+        font: inherit;
+        padding: 11px 15px;
+        border: 1px solid #bdced8;
+        border-radius: 9px;
+        background: white;
+      }
+      button {
+        cursor: pointer;
+      }
+      button.primary {
+        background: #165f60;
+        color: white;
+        border-color: #165f60;
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+      .controls {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        margin-top: 20px;
+      }
+      #status {
+        min-height: 26px;
+        color: #225f65;
+      }
+      label {
+        display: block;
+        line-height: 1.8;
+      }
+      small {
+        color: #57717c;
+      }
+      audio {
+        display: block;
+        width: 100%;
+        margin-top: 16px;
+      }
+      .warning {
+        color: #88571d;
+      }
+      a {
+        color: #165f60;
+      }
+    </style>
+    <style>
+      audio[hidden] {
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="eyebrow">固定测试稿 V1 · 仅本机录制</div>
+      <h1>录一次原声，重复比较翻译效果</h1>
+      <p>
+        戴好耳麦，在安静环境中按正常音量读稿。中文由电脑端测试者读，英文由英语测试者读；不要读编号。这里不会拨号或上传声音。
+      </p>
+      <section class="card">
+        <label
+          ><input id="consent" type="checkbox" />
+          参与者已知情同意：这批专门测试录音导出到本机后，可用于本项目的 OpenAI
+          翻译对照。不会作为声音克隆样本上传。</label
+        >
+        <div class="controls">
+          <select id="case" aria-label="测试句子" disabled></select
+          ><span id="count">已录制 0 / 14</span>
+        </div>
+        <p id="source" class="source">正在载入固定稿件…</p>
+        <small
+          >每句最多 60
+          秒。读完后点停止；同一句可以重新录制。录制结束会释放麦克风。</small
+        >
+        <div class="controls">
+          <button id="record" class="primary" disabled>开始录制本句</button
+          ><button id="stop" disabled>停止</button
+          ><button id="next" disabled>下一句</button>
+        </div>
+        <p id="status" role="status" aria-live="polite">尚未使用麦克风</p>
+        <audio id="player" controls hidden></audio>
+      </section>
+      <section class="card">
+        <h2>保存整批素材</h2>
+        <p>
+          录完全部 14
+          条后，导出一个文件。录音只暂存在本页内存，刷新或关闭页面会丢失；下载不会自动启动供应商测试。
+        </p>
+        <button id="export" disabled>导出测试录音</button>
+        <p class="warning">
+          此页面不会创建你的克隆声音。用于克隆的本人录音将另行准备。
+        </p>
+        <a href="/">返回电话工作台</a>
+      </section>
+    </main>
+    <script type="module" src="/quality-capture.js"></script>
+  </body>
+</html>

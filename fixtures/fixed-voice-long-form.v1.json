@@ -1,0 +1,53 @@
+{
+  "schema": "fixed-voice-long-form/1",
+  "description_zh": "两组各六句连贯讲话。第二组由助手将本页中文译为固定英文稿，用于控制合成变量；这不是实时中文语音识别或翻译准确率测试。姓名、号码和场景均为合成测试内容。",
+  "passages": [
+    {
+      "id": "authored-en",
+      "title_zh": "第一组：六句连贯英文 · 维修预约",
+      "source_language": "en",
+      "sentences": [
+        "Hello, thank you for calling, and I hope you are having a good afternoon.",
+        "I am calling about the repair appointment we discussed earlier this week.",
+        "The front door opens normally, but it does not close all the way.",
+        "I can be at home on Thursday morning, between nine and eleven.",
+        "Before we confirm the visit, please tell me the total price and how long the repair will take.",
+        "If you need any other information, I can send a photo after this call."
+      ],
+      "meanings_zh": [
+        "你好，谢谢你来电，希望你今天下午过得愉快。",
+        "我打电话是想谈一下我们这周早些时候讨论的维修预约。",
+        "前门可以正常打开，但是关不严。",
+        "周四上午九点到十一点之间，我可以在家。",
+        "确认上门之前，请告诉我总价，以及维修需要多长时间。",
+        "如果你还需要其他信息，我可以在通话结束后发一张照片。"
+      ],
+      "critical_checks": ["does not close all the way", "Thursday morning", "between nine and eleven", "total price", "photo after this call"],
+      "expected_final_words": "after this call"
+    },
+    {
+      "id": "translated-zh-en",
+      "title_zh": "第二组：六句中文对应英文译文 · 清洁预约",
+      "source_language": "zh",
+      "translation_source": "assistant_authored_fixed_translation_not_live_model_output",
+      "source_sentences": [
+        "你好，我想预约明天下午三点，不是今天下午。",
+        "我家有两个房间需要清洁，其中一个房间里有一块比较大的地毯。",
+        "请先告诉我全部费用，并说明是否包括材料费和上门费。",
+        "如果整个工作需要超过两个小时，请提前告诉我，这样我好调整安排。",
+        "我的联系电话最后四位是二四六八，请不要记成二八四六。",
+        "如果明天下午没有空位，周五上午十点也可以，谢谢。"
+      ],
+      "sentences": [
+        "Hello, I would like to book an appointment for three tomorrow afternoon, not this afternoon.",
+        "There are two rooms in my home that need cleaning, and one of them has a fairly large carpet.",
+        "Please tell me the total cost first, and let me know whether supplies and the service visit are included.",
+        "If the whole job will take more than two hours, please let me know in advance so I can adjust my schedule.",
+        "The last four digits of my phone number are two four six eight, not two eight four six.",
+        "If you have no openings tomorrow afternoon, ten on Friday morning would also work for me, thank you."
+      ],
+      "critical_checks": ["three tomorrow afternoon, not this afternoon", "two rooms", "more than two hours", "two four six eight, not two eight four six", "ten on Friday morning"],
+      "expected_final_words": "thank you"
+    }
+  ]
+}
