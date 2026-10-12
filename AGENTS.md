@@ -1,5 +1,7 @@
 # 本项目的共享协作规则（用户明确要求）
 
+2026-10-12 紧急登录修复范围优先：从已确认线上 `efb1443b89eeb0a22084e29f6cd28a8c88e1a5cf` 独立分支修复 phone 工作台 `/controlled` 外站顶层导航误报 `LOCAL_ACCESS_ONLY`。只调整公开静态页面的合法导航，不放宽身份、Origin/CSRF、controller、Twilio 验签或本地管理 API；保留取消应用预算与挂断清理。当前保存云环境完成代码、隔离 HTTP/浏览器测试和本地提交，由父线程协调已授权 devpush 与发布；本任务不推送、不建 Railway patch、不部署、不拨号、不调用付费模型、不创建 OAuth/凭据/角色、不连接用户电脑。实际 Google 登录由父线程核验，隔离测试不能替代。详见 [修复记录](docs/CLOUD_PHONE_LOGIN_FIX_2026-10-12.md)。
+
 2026-10-11 12:58:08 UTC 最新用户授权优先：取消应用内五美元预算及费用证据/预留/预算推导时长门槛。个人云phone不再装配预算journal，不读写旧账本，不重引入300秒；保留登录鉴权、单用户并发、已授权目标、挂断/失联/会话到期及双腿错误清理。Railway3/4美元提醒与资源范围、供应商账户限额/套餐/号码不改。本轮仅源码、离线回归、本地提交；**不外部推送、不建PR、不部署、不拨号、不进行付费握手**，此要求覆盖下方旧推送流程。父线程已核对App回调正确、13:00:27 UTC三类Twilio活跃通话均0且分页完整；预算目录不存在不是占线证据。详见 [个人模式](docs/CLOUD_PERSONAL_NO_BUDGET.md)。下方预算要求保留为历史，不能重新用作前置。
 
 2026-10-11 恢复任务最新范围优先：预算驱动时长修正已在独立交付分支实现并离线验收，六处统一有限D和媒体额度，缺完整费用证据仍禁拨；旧journal/sentinel/锁不迁移、不重置。当前不发布、不拨号、不再弹发布确认、不新增依赖或权限。原唯一patch的一次调用已回收为SUCCESS/calls-disabled，实际checkout来源差异仍未闭合；不要重复应用原patch。代码交付分支 `codex/cloud-phone-conversation-duration-20261011`，不推动原部署关联分支。最新事实与测试见 [PROGRESS](PROGRESS.md)、[预算驱动时长](docs/CLOUD_BUDGET_DURATION.md) 及 [发布记录](docs/CLOUD_RELEASE_RESULT_2026-10-11.md)；下方旧300秒/尚未发布等按历史阶段理解。

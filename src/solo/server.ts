@@ -99,9 +99,13 @@ function controlledPublicRequest(req: FastifyRequest, origin: string): boolean {
   const dest = req.headers['sec-fetch-dest'];
   if ([site, mode, dest].every((value) => value === undefined)) return true;
   const path = req.url.split('?')[0];
+  // This is a public HTML shell, including links from other sites and login
+  // return navigation. Session and controller APIs keep their own policy.
   if (path === '/controlled')
     return (
-      ['none', 'same-origin'].includes(site as string) &&
+      ['none', 'same-origin', 'same-site', 'cross-site'].includes(
+        site as string,
+      ) &&
       mode === 'navigate' &&
       dest === 'document'
     );

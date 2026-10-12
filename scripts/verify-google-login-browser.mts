@@ -18,19 +18,11 @@ import { promisify } from 'node:util';
 import WebSocket from 'ws';
 
 import { CLOUD_SESSION_COOKIE } from '../src/solo/cloud-access';
-import { CloudPhoneAccess } from '../src/solo/cloud-phone-access';
-import {
-  CloudControllerLeases,
-  type ControllerProof,
-} from '../src/solo/controller-lease';
-import { ConfigStore, type SoloConfig } from '../src/solo/config';
-import {
-  GOOGLE_LOGIN_COOKIE,
-  GoogleBrowserLogin,
-} from '../src/solo/google-login';
-import { GOOGLE_OIDC, GoogleOidcClient } from '../src/solo/google-oidc';
-import { buildSoloServer } from '../src/solo/server';
-import { SessionManager } from '../src/solo/session-manager';
+import type { ControllerProof } from '../src/solo/controller-lease';
+import { GOOGLE_LOGIN_COOKIE } from '../src/solo/google-login';
+import { GOOGLE_OIDC } from '../src/solo/google-oidc';
+import { parseCloudServiceConfig } from '../src/solo/cloud-service-config';
+import { createCloudService } from '../src/solo/cloud-service';
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const executable =
@@ -92,7 +84,9 @@ let chrome: ReturnType<typeof spawn> | undefined;
 let browserStderr = '';
 let signedOutScreenshot: string | undefined;
 let signedInScreenshot: string | undefined;
-let app: Awaited<ReturnType<typeof buildSoloServer>> | undefined;
+let service: Awaited<ReturnType<typeof createCloudService>> | undefined;
+const entryOrigin = 'https://entry.example.invalid';
+const documentSites: string[] = [];
 
 function check(actual: unknown, expected: unknown, label: string) {
   assert.deepEqual(actual, expected, label);
@@ -286,6 +280,17 @@ class CdpPage {
   }
   async intercept(event: any) {
     const url = new URL(event.request.url);
+    if (url.origin === entryOrigin && event.resourceType === 'Document') {
+      await this.send('Fetch.fulfillRequest', {
+        requestId: event.requestId,
+        responseCode: 200,
+        responseHeaders: [{ name: 'Content-Type', value: 'text/html' }],
+        body: Buffer.from(
+          `<!doctype html><meta name="referrer" content="no-referrer"><link rel="icon" href="data:,"><a id="open-phone" href="${origin}/controlled">Open phone</a>`,
+        ).toString('base64'),
+      });
+      return;
+    }
     if (
       url.origin === origin ||
       url.protocol === 'data:' ||
@@ -402,6 +407,8 @@ const proxy = https.createServer((request, response) => {
     request.url || '/',
     origin || 'https://phone.example.test',
   ).pathname;
+  if (path === '/controlled')
+    documentSites.push(String(request.headers['sec-fetch-site']));
   if (path === '/vendor/twilio.min.js') {
     response
       .writeHead(200, {
@@ -441,7 +448,7 @@ const proxy = https.createServer((request, response) => {
       port: backendPort,
       method: request.method,
       path: request.url,
-      headers: request.headers,
+      headers: { ...request.headers, 'x-forwarded-proto': 'https' },
     },
     (stream) => {
       if (path === '/auth/google/callback')
@@ -498,18 +505,34 @@ try {
   const address = proxy.address();
   assert.ok(address && typeof address !== 'string');
   origin = `https://phone.example.test:${address.port}`;
-  const login = new GoogleBrowserLogin({
-    publicOrigin: origin,
-    client: new GoogleOidcClient({
-      clientId,
-      clientSecret: syntheticSecret,
-      redirectUri: `${origin}/auth/google/callback`,
-      allowedEmail: syntheticEmail,
-      expectedHostedDomain: 'workspace.example.test',
-      fetch: fakeProviderFetch,
-    }),
+  const reservation = http.createServer();
+  await new Promise<void>((done) => reservation.listen(0, '127.0.0.1', done));
+  const reserved = reservation.address();
+  assert.ok(reserved && typeof reserved !== 'string');
+  await new Promise<void>((done) => reservation.close(() => done()));
+  const config = parseCloudServiceConfig({
+    CLOUD_SERVICE_MODE: 'phone',
+    AI_PHONE_RUNTIME_MODE: 'cloud',
+    PORT: String(reserved.port),
+    CLOUD_WARM_INSTANCES: '1',
+    CLOUD_PUBLIC_ORIGIN: origin,
+    PUBLIC_BASE_URL: origin,
+    TWILIO_ACCOUNT_SID: `AC${'a'.repeat(32)}`,
+    TWILIO_AUTH_TOKEN: 'b'.repeat(32),
+    TWILIO_API_KEY_SID: `SK${'c'.repeat(32)}`,
+    TWILIO_API_KEY_SECRET: 'd'.repeat(32),
+    TWILIO_TWIML_APP_SID: `AP${'e'.repeat(32)}`,
+    TWILIO_CALLER_NUMBER: '+12125550123',
+    OPENAI_API_KEY: `sk-offline-${'f'.repeat(32)}`,
+    GOOGLE_CLIENT_ID: clientId,
+    GOOGLE_CLIENT_SECRET: syntheticSecret,
+    GOOGLE_ALLOWED_EMAIL: syntheticEmail,
+    GOOGLE_HOSTED_DOMAIN: 'workspace.example.test',
+    CLOUD_PUBLIC_CALLBACK_CONFIRMED: 'true',
+    CLOUD_TEST_TARGET_NUMBER: '+12025550101',
   });
-  const manager = new SessionManager({
+  service = await createCloudService(config, {
+    googleFetch: fakeProviderFetch,
     providerFactory: () => ({
       create: async () => {
         supplierCalls++;
@@ -519,54 +542,12 @@ try {
         supplierCalls++;
       },
     }),
-    bridgeFactory: () => ({ attach() {}, close() {} }),
-  });
-  const leases = new CloudControllerLeases({ policy: login.policy });
-  const access = new CloudPhoneAccess({
-    policy: login.policy,
-    manager,
-    controllerLeases: leases,
-    publicReadinessChecker: async () => ({
-      status: 'ready',
-      code: 'PUBLIC_CALLBACK_READY',
-    }),
-    translationReadinessChecker: async () => ({
-      name: 'offline',
-      status: 'passed',
-      code: 'OFFLINE_READY',
-    }),
-  });
-  const config: SoloConfig = {
-    API_HOST: '127.0.0.1',
-    API_PORT: '5050',
-    PUBLIC_BASE_URL: origin,
-    TWILIO_ACCOUNT_SID: `AC${'a'.repeat(32)}`,
-    TWILIO_AUTH_TOKEN: 'b'.repeat(32),
-    TWILIO_API_KEY_SID: `SK${'c'.repeat(32)}`,
-    TWILIO_API_KEY_SECRET: 'd'.repeat(32),
-    TWILIO_TWIML_APP_SID: `AP${'e'.repeat(32)}`,
-    TWILIO_CALLER_NUMBER: '+12125550123',
-    OPENAI_API_KEY: `sk-offline-${'f'.repeat(32)}`,
-    OPENAI_REALTIME_MODEL: 'gpt-realtime-1.5',
-    OPENAI_TRANSCRIPTION_MODEL: 'whisper-1',
-    OPENAI_PROXY_URL: '',
-    LOCAL_ACCESS_TOKEN: 't'.repeat(64),
-  };
-  app = await buildSoloServer({
-    configStore: new ConfigStore({
-      envPath: join(directory, '.env'),
-      values: config,
-      generateToken: false,
-    }),
-    sessionManager: manager,
-    browserControl: access,
-    googleLogin: login,
+    bridgeFactory: () => {
+      throw new Error('Login acceptance cannot open a model bridge');
+    },
     publicDir: join(repo, 'public'),
   });
-  await app.listen({ host: '127.0.0.1', port: 0 });
-  const backend = app.server.address();
-  assert.ok(backend && typeof backend !== 'string');
-  backendPort = backend.port;
+  backendPort = config.runtime.port;
   chrome = spawn(
     executable,
     [
@@ -622,7 +603,8 @@ try {
     deviceScaleFactor: 1,
     mobile: false,
   });
-  await page.send('Page.navigate', { url: `${origin}/controlled` });
+  await page.send('Page.navigate', { url: `${entryOrigin}/` });
+  await page.click('open-phone');
   await eventually(
     async () =>
       (await page.state()).ready === 'true' &&
@@ -633,6 +615,17 @@ try {
     (await page.state()).start,
     false,
     'signed-out actual workbench cannot dial',
+  );
+  check(
+    documentSites[0],
+    'cross-site',
+    'native external top-level navigation opens only the public phone workbench',
+  );
+  check(
+    service.app.server.address() &&
+      (service.app.server.address() as import('node:net').AddressInfo).address,
+    '127.0.0.1',
+    'production phone application stays behind restricted ingress',
   );
   check(
     (await page.send('Network.getCookies', { urls: [origin] })).cookies.some(
@@ -796,7 +789,7 @@ try {
     false,
     'logout expires authentication cookie',
   );
-  const stale = await app.inject({
+  const stale = await service.app.inject({
     method: 'POST',
     url: '/api/controller/renew',
     headers: {
@@ -931,7 +924,7 @@ try {
   }
   if (chrome?.pid && process.platform !== 'win32') stopBrowser('SIGKILL');
   for (const request of upstreamRequests) request.destroy();
-  await app?.close();
+  await service?.close();
   await new Promise<void>((done) => proxy.close(() => done()));
   await rm(directory, {
     recursive: true,

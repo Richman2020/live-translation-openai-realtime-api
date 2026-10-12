@@ -1,8 +1,18 @@
 # 项目进度与交接
 
-更新日期：2026-10-11。共享仓库：<https://github.com/Richman2020/live-translation-openai-realtime-api>。
+更新日期：2026-10-12。共享仓库：<https://github.com/Richman2020/live-translation-openai-realtime-api>。
 
 需求见 [PROJECT_BRIEF.md](PROJECT_BRIEF.md)，工作规则见 [AGENTS.md](AGENTS.md)，运行步骤见 [LOCAL_SETUP.md](LOCAL_SETUP.md)，后续执行入口见 [LOCAL_CODEX_HANDOFF.md](LOCAL_CODEX_HANDOFF.md)。
+
+## 最新：cloud phone 公开工作台导航回归修复，本地交付（2026-10-12）
+
+- 从父线程已确认线上精确 `efb1443b89eeb0a22084e29f6cd28a8c88e1a5cf` 建立修复分支 `codex/cloud-phone-google-login-fix-20261012`。实际运行 phone/cloud/回调确认 true/单副本；父线程确认部署 `c90c8a93-d787-4c12-97fb-9221df043db5` 于00:27:50 UTC SUCCESS。本任务没有读取或修改 Railway 秘密、创建 patch 或重复旧发布。
+- 用户截图明确 `/controlled` 无query报精确 `LOCAL_ACCESS_ONLY`，Google入口可以进入账户选择。生产工厂真实 HTTP 先复现：phone 的 same-site/cross-site 顶层 navigate/document 403，旧 web-workbench 200；none/same-origin 均200。`cc21d647` 到 `efb1443` 的 server/Google login/ingress/web service 源码相同，模式切换暴露既有公开导航门槛，不是 OAuth 验证失败。
+- 唯一生产修改是 `src/solo/server.ts` 的公开 `/controlled` 导航枚举增加 same-site/cross-site（6行差异）。GET/HEAD、navigate/document、Host、loopback、提供时的精确Origin、重复/转发头、query、CSP继续；仅静态壳，不授会话、controller或Voice。Google、身份/目标、Origin/CSRF、Twilio验签、本地特权隔离、预算移除和双腿清理实现均未改。
+- 新 `tests/cloud-phone-login-http.test.ts` 直接通过生产 parser/createCloudService/public ingress/loopback HTTP：修复前2fail/1pass，修复后 **12/12**。覆盖Google start/callback的RSA/PKCE与issuer/state/绑定/重放拒绝、旧会话/取消/替换、刷新、续期/退出CSRF、空闲/绝对过期、controller领取/续约/撤销/过期、跨站fetch/iframe/素材/API拒绝、已登录本地settings/presence/maintenance/token/shutdown拒绝和unsigned Twilio403。固定假凭据及tests-only Google端口，provider/bridge调用均0。
+- Google Chrome脚本升级为实际生产phone工厂和ingress，原生外站链接生成cross-site；原源码不能打开壳，修复后 **26/26**。沿用PKCE/RSA、Lax/Strict session cookie、callback干净返回、控制领取、退出/刷新/replay拒绝。Chrome151既有conversation **16/16**、Pocket受控页 **54/54**、continuous配对 **60/60**、默认回程字幕 **57/57**、web-verification **48/48**、daily web-workbench **82/82** 全通过；所有浏览器外部请求/真实供应商调用/异常0，fake电话创建仅在既有隔离验收中。
+- Node24.19.0/npm11.9.0：沿用原锁文件 `npm ci --ignore-scripts`，按CI准备既有Voice SDK后全套 **1256总/1251pass/5既有Windows skip/0fail**。build/typecheck、public JS语法、修改源码ESLint、修改文件Prettier和git diff --check通过；未新增依赖或改lockfile，未称全仓lint通过。首次全套因尚未执行CI SDK拷贝步骤产生1个asset404，准备后完整重跑0fail，不修改实现或测试期望解决。
+- 独立只读审计认可公开导航补丁与完整HTTP回归。源码、离线协议与浏览器已验收；**真实Google完成手机验证并返回工作台仍由父线程核验**，不将fake身份代替真实账号。不拨号、不进行付费模型握手、不创建OAuth/凭据/角色、不连接用户电脑。仅本地提交/patch/bundle；精确SHA由交付答复提供，未推送/PR/部署，因此尚无该提交远端CI。父线程协调已授权devpush/发布后再做真实浏览器核验，详见 [修复记录](docs/CLOUD_PHONE_LOGIN_FIX_2026-10-12.md)。
 
 ## 最新：个人电话取消应用内预算，本地交付（2026-10-11）
 
