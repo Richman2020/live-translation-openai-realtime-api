@@ -1,5 +1,7 @@
 # 本项目的共享协作规则（用户明确要求）
 
+2026-10-12 最新重复头修复范围：用户自行发布精确 `f26006cb944e02700c32eb0ac7ad1f87105c86ee` 后两次真实 `/voice/client` 仍403，固定诊断明确为 `INGRESS_DUPLICATE_HEADER`。仅该精确签名表单候选剥离不参与鉴权的普通头，Host/签名/消息边界及认证相关头继续唯一和原校验，浏览器/API/其他Voice规则保持；原具体头名未有证据，不猜测或输出任意头数据。代码、真实HTTP隔离回归、完整检查后推送独立开发分支；不stage/deploy、不建Railway patch、不拨号或付费调用。见 [重复头修复记录](docs/CLOUD_PHONE_DUPLICATE_HEADER_FIX_2026-10-12.md)。
+
 2026-10-12 最新拨号修正范围：用户已自行发布 `fd6ec092`，真实 Google 登录已通过，随后两次 `/voice/client` 403，Request Inspector 固定响应为 `CLOUD_INGRESS_FORBIDDEN`。从该精确提交修复首次拨号安全领取空闲控制权及严格限定的回调代理元数据兼容，保留固定Host、签名/账户/nonce/身份/join/SID、Origin/CSRF、单活动通话及清理。当前云端代码与隔离回归完成后已授权推送独立开发分支；不自动stage/deploy、不创建Railway patch、不实际拨号/付费模型调用，不改Twilio资源或凭据。原真实请求哪项头触发和真实电话恢复未验收，不能以模拟通过或固定诊断代替；详见 [拨号修正记录](docs/CLOUD_PHONE_DIAL_FIX_2026-10-12.md)。
 
 2026-10-12 紧急登录修复范围优先：从已确认线上 `efb1443b89eeb0a22084e29f6cd28a8c88e1a5cf` 独立分支修复 phone 工作台 `/controlled` 外站顶层导航误报 `LOCAL_ACCESS_ONLY`。只调整公开静态页面的合法导航，不放宽身份、Origin/CSRF、controller、Twilio 验签或本地管理 API；保留取消应用预算与挂断清理。当前保存云环境完成代码、隔离 HTTP/浏览器测试和本地提交，由父线程协调已授权 devpush 与发布；本任务不推送、不建 Railway patch、不部署、不拨号、不调用付费模型、不创建 OAuth/凭据/角色、不连接用户电脑。实际 Google 登录由父线程核验，隔离测试不能替代。详见 [修复记录](docs/CLOUD_PHONE_LOGIN_FIX_2026-10-12.md)。

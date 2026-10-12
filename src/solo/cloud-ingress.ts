@@ -108,11 +108,26 @@ const droppedHeaders = new Set([
   'transfer-encoding',
   'upgrade',
 ]);
-const proxyMetadataHeaders = new Set([
-  'forwarded',
-  'x-forwarded-for',
-  'x-forwarded-host',
-  'x-forwarded-proto',
+// The fixed Voice form needs only these headers. Ordinary transport metadata
+// is discarded, including duplicates; identity and framing stay unambiguous.
+const voiceProtectedHeaders = new Set([
+  'host',
+  'x-twilio-signature',
+  'content-type',
+  'content-length',
+  'content-encoding',
+  'transfer-encoding',
+  'connection',
+  'upgrade',
+  'expect',
+  'te',
+  'trailer',
+  'keep-alive',
+  'proxy-authenticate',
+  'proxy-authorization',
+  'authorization',
+  'origin',
+  'cookie',
 ]);
 const MAX_BODY_BYTES = 16 * 1024;
 const MAX_REQUEST_BYTES = 4096;
@@ -175,7 +190,7 @@ function headersForUpstream(
   healthProbe = false,
 ): Record<string, string> | null {
   // A signature header selects transport handling, never authentication. Only
-  // the fixed Voice form route may discard opaque proxy metadata; the backend
+  // the fixed Voice form route may discard ordinary metadata; the backend
   // still verifies the exact public HTTPS URL, account and full parsed form.
   const voiceForm =
     !upgrade &&
@@ -186,6 +201,11 @@ function headersForUpstream(
     /^application\/x-www-form-urlencoded(?:;|$)/i.test(
       req.headers['content-type'] || '',
     );
+  const discardVoiceHeader = (name: string): boolean =>
+    voiceForm &&
+    !voiceProtectedHeaders.has(name) &&
+    !name.startsWith('x-phone-') &&
+    !name.startsWith('sec-');
   const reject = (reason: string): null => {
     if (req.method === 'POST' && req.url === '/voice/client')
       reportCloudVoiceClientRejection(reason);
@@ -197,7 +217,7 @@ function headersForUpstream(
   if (raw.length % 2) return reject('INGRESS_HEADER_SHAPE');
   for (let index = 0; index < raw.length; index += 2) {
     const name = raw[index].toLowerCase();
-    if (!voiceForm || !proxyMetadataHeaders.has(name)) {
+    if (!discardVoiceHeader(name)) {
       if (seen.has(name)) return reject('INGRESS_DUPLICATE_HEADER');
       seen.add(name);
     }
@@ -205,7 +225,7 @@ function headersForUpstream(
   for (let index = 0; index < raw.length; index += 2) {
     const name = raw[index].toLowerCase();
     const value = raw[index + 1];
-    if (!voiceForm || !proxyMetadataHeaders.has(name)) {
+    if (!discardVoiceHeader(name)) {
       // Node normalization may never rewrite a security-sensitive value.
       if (req.headers[name] !== value)
         return reject('INGRESS_HEADER_NORMALIZATION');

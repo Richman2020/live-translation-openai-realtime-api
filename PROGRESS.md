@@ -4,6 +4,14 @@
 
 需求见 [PROJECT_BRIEF.md](PROJECT_BRIEF.md)，工作规则见 [AGENTS.md](AGENTS.md)，运行步骤见 [LOCAL_SETUP.md](LOCAL_SETUP.md)，后续执行入口见 [LOCAL_CODEX_HANDOFF.md](LOCAL_CODEX_HANDOFF.md)。
 
+## 最新：固定 Voice 回调普通重复头修复（2026-10-12）
+
+- 从已部署精确 `f26006cb944e02700c32eb0ac7ad1f87105c86ee` 建立 `codex/cloud-phone-conversation-duplicate-header-fix-20261012`。用户自行发布deployment `e571df69-2931-4db6-a19b-d9f5713ba533` 02:28:36 UTC SUCCESS；自动控制权/session/call/voice准备成功，但两次真实回调仍403。02:30:24.994746Z、02:30:31.029782Z固定诊断均为 `INGRESS_DUPLICATE_HEADER`，已确认入口重复头分支；尚无具体原始头名证据。
+- 生产源码仅修改cloud-ingress：既有精确POST `/voice/client` form+非空签名候选剥离所有不参与鉴权的普通头，不拼接、不择一转发。Host/签名/Content-Type/Length/Encoding/framing/hop/auth/Origin/Cookie及全部x-phone-/sec-头仍唯一/raw-normalized一致，原URL/正文/官方SDK验签/账户/nonce/From/join/SID保持。Browser/API/其他Voice/loopback/本地特权/Origin/CSRF、移除应用预算与挂断清理保持，未增加产品功能或诊断请求数据。
+- 同一真实HTTP生产组合旧重复Accept红例403，新重复Accept/User-Agent/X-Request-Id200 Stream TwiML且私有上游确认已剥离。Browser API重复Accept仍403；关键头重复、错签/错Host/错URL/错通话绑定仍拒绝。Cookie因Node客户端合并数组，测试改真实socket两个字段403；重复Content-Length与CL-TE解析器400，不改生产规则使测试通过。HTTP13/13，独立安全审查及ingress/HTTP/diagnostics30/30通过；fixture fake PSTN create=0、model bridge=0，原挂断清理确认。
+- 最终Node24.19.0/npm11.9.0完整 **1277总/1272pass/5既有Windows skip/0fail**，build/typecheck通过。离线Chrome151全部七场通过：Google27、Pocket59、continuous配对65、回程62、verification48、daily82、conversation成功；外部请求/真实供应商调用/异常均0。修改源码ESLint、Prettier、全部public JS语法及git diff --check通过。锁定依赖未变；精确提交/远端验证由交付答复及交付目录提供。
+- 仅独立开发分支交付，不stage/deploy、不创建Railway patch、不拨号/付费调用、不改供应商资源/凭据。原真实具体重复头及新版真人电话恢复仍待父线程核验，隔离通过不替代；详见 [重复头修复记录](docs/CLOUD_PHONE_DUPLICATE_HEADER_FIX_2026-10-12.md)。
+
 ## 最新：首次拨号与固定 Voice 回调兼容候选，开发分支交付（2026-10-12）
 
 - 从已部署精确 `fd6ec0921d4551de03d3afe95306b3072b746369` 建立 `codex/cloud-phone-conversation-dial-fix-20261012`。父线程确认用户自行发布，deployment `94058041-e24c-4b58-8495-ca81d5b53915` 01:35:59 UTC SUCCESS；真实 Google callback/工作台/browser-session 200。两次 calls/voice 200 后 `/voice/client` 403，Request Inspector 固定响应 `CLOUD_INGRESS_FORBIDDEN`、11200，后续 hangup 200；拒绝已定位到 ingress，原请求头仍缺，不把标准 form 齐备当每项头已通过。

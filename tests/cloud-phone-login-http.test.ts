@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash, generateKeyPairSync, sign } from 'node:crypto';
 import { createServer, request, type IncomingHttpHeaders } from 'node:http';
+import { createConnection } from 'node:net';
 import { test, type TestContext } from 'node:test';
 import twilio from 'twilio';
 import { createControllerClient } from '../public/controller-client.js';
@@ -903,6 +904,14 @@ test('production signed Twilio form passes real ingress and per-call Voice autho
       fields,
     ),
   };
+  const ordinaryHeaders = ['accept', 'user-agent', 'x-request-id'];
+  let ordinaryHeadersAbsent = false;
+  f.service.app.server.prependListener('request', (req) => {
+    if (req.url === '/voice/client')
+      ordinaryHeadersAbsent = ordinaryHeaders.every(
+        (name) => req.headers[name] === undefined,
+      );
+  });
   const result = await httpCall(
     f.port,
     '/voice/client',
@@ -952,6 +961,57 @@ test('production signed Twilio form passes real ingress and per-call Voice autho
     new URLSearchParams(fields).toString(),
   );
   assert.equal(duplicateProxy.status, 200, duplicateProxy.body);
+  for (const ordinary of ordinaryHeaders) {
+    const duplicated = await httpCall(
+      f.port,
+      '/voice/client',
+      {
+        ...headers,
+        [ordinary]: ['offline-one', 'offline-two'] as unknown as string,
+      },
+      'POST',
+      new URLSearchParams(fields).toString(),
+    );
+    assert.equal(duplicated.status, 200, `${ordinary}: ${duplicated.body}`);
+    assert.match(duplicated.body, /<Connect><Stream/);
+    assert.equal(ordinaryHeadersAbsent, true);
+  }
+  // Compatibility is specific to the signed Voice form. Browser/API headers
+  // retain their original duplicate rejection before cookie/Origin/CSRF checks.
+  const duplicateBrowserHeader = await httpCall(
+    f.port,
+    '/api/browser-session',
+    {
+      ...readHeaders(login.session),
+      accept: ['application/json', '*/*'] as unknown as string,
+    },
+  );
+  assert.equal(duplicateBrowserHeader.status, 403);
+  assert.deepEqual(JSON.parse(duplicateBrowserHeader.body), {
+    error: 'CLOUD_INGRESS_FORBIDDEN',
+  });
+  for (const [name, value] of [
+    ['content-type', headers['content-type']],
+    ['connection', 'close'],
+    ['te', 'trailers'],
+    ['origin', origin],
+    ['authorization', 'Bearer offline'],
+    ['x-phone-csrf', 'offline'],
+    ['sec-fetch-site', 'same-origin'],
+    ['sec-websocket-key', 'offline'],
+  ]) {
+    const duplicated = await httpCall(
+      f.port,
+      '/voice/client',
+      { ...headers, [name]: [value, value] as unknown as string },
+      'POST',
+      new URLSearchParams(fields).toString(),
+    );
+    assert.equal(duplicated.status, 403, name);
+    assert.deepEqual(JSON.parse(duplicated.body), {
+      error: 'CLOUD_INGRESS_FORBIDDEN',
+    });
+  }
   const duplicateSignature = await httpCall(
     f.port,
     '/voice/client',
@@ -970,6 +1030,37 @@ test('production signed Twilio form passes real ingress and per-call Voice autho
     error: 'CLOUD_INGRESS_FORBIDDEN',
   });
   const encodedForm = new URLSearchParams(fields).toString();
+  // Node's HTTP client joins Cookie arrays into one header. Send wire-level
+  // duplicates directly so the test reaches the real ingress rawHeaders gate.
+  for (const [duplicate, expectedStatus] of [
+    ['Cookie: offline=1\r\nCookie: offline=1', 403],
+    [`Content-Length: ${Buffer.byteLength(encodedForm)}`, 400],
+  ] as const) {
+    const response = await new Promise<string>((resolve, reject) => {
+      const socket = createConnection({ host: '127.0.0.1', port: f.port });
+      let received = '';
+      socket.setTimeout(3000, () =>
+        socket.destroy(new Error('offline raw HTTP timeout')),
+      );
+      socket.on('error', reject);
+      socket.on('data', (chunk) => {
+        received += chunk.toString('utf8');
+      });
+      socket.on('end', () => resolve(received));
+      socket.on('connect', () => {
+        socket.write(
+          `POST /voice/client HTTP/1.1\r\nHost: ${new URL(origin).host}\r\n` +
+            `Content-Type: ${headers['content-type']}\r\n` +
+            `X-Twilio-Signature: ${headers['x-twilio-signature']}\r\n` +
+            `Content-Length: ${Buffer.byteLength(encodedForm)}\r\n` +
+            `${duplicate}\r\nConnection: close\r\n\r\n${encodedForm}`,
+        );
+      });
+    });
+    assert.match(response, new RegExp(`^HTTP/1.1 ${expectedStatus} `));
+    if (expectedStatus === 403)
+      assert.match(response, /CLOUD_INGRESS_FORBIDDEN/);
+  }
   const duplicateHost = await httpCall(
     f.port,
     '/voice/client',
@@ -1020,6 +1111,7 @@ test('production signed Twilio form passes real ingress and per-call Voice autho
       ...headers,
       forwarded: 'for=unknown;proto=http',
       'x-forwarded-proto': 'http',
+      accept: ['application/xml', '*/*'] as unknown as string,
       'x-twilio-signature': 'offline-forged-signature',
     },
     'POST',
