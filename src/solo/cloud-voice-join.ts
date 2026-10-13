@@ -37,11 +37,17 @@ export type CloudVoiceGrant = Readonly<{
   callId: string;
   identity: string;
   issuedAt: number;
+  /** One-use callback admission deadline, independent of SDK signaling. */
   expiresAt: number;
+  /** Existing authenticated-session deadline; this grant never renews it. */
+  authExpiresAt: number;
+  /** Finite SDK signaling validity, not permission to join a second call. */
+  tokenExpiresAt: number;
   incomingAllow: false;
   outgoingApplicationSid: string;
   outgoing: Readonly<{ callId: string; identity: string }>;
 }>;
+export const CLOUD_VOICE_SIGNALING_LIFETIME_MS = 15 * 60 * 1000;
 export type CloudVoiceReservation = Readonly<{
   /** Synchronous current call-admission validation, never a boolean. */
   assertCurrent: () => void;
@@ -388,6 +394,7 @@ export class CloudVoiceJoin {
       const grant = this.authorized(context, record, (controller) => {
         record.pending = true;
         const now = this.time();
+        const authExpiresAt = this.policy.expiresAt(context, 'mutate');
         return Object.freeze({
           version: 1 as const,
           authSessionId: context.authSessionId,
@@ -404,8 +411,13 @@ export class CloudVoiceJoin {
           issuedAt: now,
           expiresAt: Math.min(
             controller.expiresAt,
-            this.policy.expiresAt(context, 'mutate'),
+            authExpiresAt,
             now + this.maxTokenLifetimeMs,
+          ),
+          authExpiresAt,
+          tokenExpiresAt: Math.min(
+            authExpiresAt,
+            now + CLOUD_VOICE_SIGNALING_LIFETIME_MS,
           ),
           incomingAllow: false as const,
           outgoingApplicationSid: this.outgoingApplicationSid!,
@@ -527,6 +539,8 @@ export class CloudVoiceJoin {
           !record.reservation ||
           record.sid ||
           this.time() >= response.grant.expiresAt ||
+          response.grant.tokenExpiresAt >
+            this.policy.expiresAt(context, 'mutate') ||
           controller.leaseId !== response.grant.controller.leaseId ||
           controller.tabId !== response.grant.controller.tabId ||
           controller.epoch !== response.grant.controller.epoch

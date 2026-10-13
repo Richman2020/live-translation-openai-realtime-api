@@ -236,6 +236,18 @@ export class CloudPhoneAccess {
     this.authorizeController(context, proof, callId);
   }
 
+  recheckCleanupController(
+    context: CloudAccessContext,
+    callId: string,
+    proof: ControllerProof,
+  ): void {
+    this.readAccess(context, callId, 'mutate');
+    if (!this.manager.hasEndIntent(callId))
+      throw new CloudAccessError('FORBIDDEN');
+    const original = this.calls.get(callId)!.controller;
+    this.controllerLeases.authorizeCleanup(context, proof, original);
+  }
+
   async prepareVoice(
     context: CloudAccessContext,
     callId: string,
@@ -363,6 +375,7 @@ export class CloudPhoneAccess {
           {
             browserIdentity: `cloud-phone-${randomBytes(18).toString('hex')}`,
             deferBrowserJoin: true,
+            maintainControllerConnection: true,
             authorizeBrowserJoin: (fields) => {
               if (!this.voiceJoin)
                 throw new SessionError('VOICE_CONNECTION_NOT_READY', 503);
@@ -390,6 +403,11 @@ export class CloudPhoneAccess {
                 joined: false,
               });
               callId = id;
+              this.controllerLeases.bindCallConnection(
+                state.controller,
+                id,
+                () => this.manager.controllerConnectionDeadline(id),
+              );
               if (this.voiceJoin)
                 rollbackVoice = this.voiceJoin.registerCall(
                   state.context,
@@ -477,12 +495,19 @@ export class CloudPhoneAccess {
     proof?: ControllerProof,
   ): CloudCleanupIntent {
     this.readAccess(context, callId, 'mutate');
+    if (this.manager.hasEndIntent(callId)) {
+      this.recheckCleanupController(context, callId, proof);
+      const intent = Object.freeze({ callId });
+      this.intents.set(intent, callId);
+      return intent;
+    }
     const controller = this.authorizeController(context, proof, callId);
     let accepted = false;
     try {
       this.policy.runAuthorizedCall(context, callId, 'mutate', () => {
         this.controllerLeases.authorizeCurrent(controller);
         accepted = true;
+        this.controllerLeases.retainForCleanup(controller, callId);
         this.manager.beginEndIntent(callId);
       });
     } catch (error) {

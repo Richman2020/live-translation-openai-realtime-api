@@ -30,7 +30,11 @@ function clock() {
     timers,
   };
 }
-function fixture({ translationEngines = ['pocket-prefix', 'pocket-captions'], defaultTranslationEngine = 'pocket-prefix', outgoingPairedCaptions = defaultTranslationEngine !== 'continuous-captions' } = {}) {
+function fixture({
+  translationEngines = ['pocket-prefix', 'pocket-captions'],
+  defaultTranslationEngine = 'pocket-prefix',
+  outgoingPairedCaptions = defaultTranslationEngine !== 'continuous-captions',
+} = {}) {
   const time = clock();
   const requests: any[] = [];
   let serverLease: any = null, active: any = null, epoch = 0, busy = false;
@@ -48,7 +52,8 @@ function fixture({ translationEngines = ['pocket-prefix', 'pocket-captions'], de
         activeSession: active, busy, translationEngines, defaultTranslationEngine, outgoingPairedCaptions });
     }
     if (route === '/api/controller/acquire') {
-      if (serverLease && serverLease.expiresAt > time.now() || busy) return response({ error: 'CONTROLLER_BUSY' }, 409);
+      if ((serverLease && serverLease.expiresAt > time.now()) || busy)
+        return response({ error: 'CONTROLLER_BUSY' }, 409);
       serverLease = { tabId: entry.body.tabId, leaseId: capability, epoch: ++epoch, expiresAt: time.now() + 30000 };
       return response({ ...serverLease });
     }
@@ -489,18 +494,487 @@ test('explicit renewal timer maintains a visible connected controller without di
   assert.equal(posts(f, '/api/controller/renew').length, 1); assert.ok(f.client.state.lease.expiresAt > initial); assert.equal(f.client.state.canControl, true); await f.close();
 });
 
-test('offline lease expiry disconnects browser media and requests both cleanup actions', async () => {
-  const f = fixture(); await f.ready(); const sdk = callFixture(); await f.client.startCall('+15550000000', { connectVoice: async () => sdk.call });
-  f.client.markVoiceAccepted('call-1'); f.client.setConnectionState(false); await f.time.advance(30000);
-  assert.equal(sdk.count(), 1); assert.equal(f.client.state.lease, null); assert.equal(f.client.state.canMute, false);
-  assert.equal(posts(f, '/hangup').length, 1); assert.equal(posts(f, '/api/controller/revoke').length, 1); assert.equal(posts(f, '/api/controller/renew').length, 0); await f.close();
+test('an accepted call survives the old browser deadline during an SSE outage without granting new admission', async () => {
+  const f = fixture();
+  await f.ready();
+  const sdk = callFixture();
+  await f.client.startCall('+15550000000', { connectVoice: async () => sdk.call });
+  f.client.markVoiceAccepted('call-1');
+  f.client.setConnectionState(false);
+  await f.time.advance(30000);
+  assert.equal(sdk.count(), 0);
+  assert.ok(f.client.state.lease);
+  assert.equal(f.client.state.canHangup, true);
+  assert.equal(f.client.state.canStart, false);
+  assert.equal(f.client.state.canDial, false);
+  assert.equal(posts(f, '/hangup').length, 0);
+  assert.equal(posts(f, '/api/controller/revoke').length, 0);
+  assert.equal(posts(f, '/api/controller/renew').length, 0);
+  await f.client.cancel();
+  assert.equal(sdk.count(), 1);
+  assert.equal(posts(f, '/hangup').length, 1);
+  await f.close();
 });
 
-test('hidden-page return checks absolute deadline even when browser timers were suspended', async () => {
-  const f = fixture(); await f.ready(); const sdk = callFixture(); await f.client.startCall('+15550000000', { connectVoice: async () => sdk.call });
-  f.client.markVoiceAccepted('call-1'); f.client.setVisible(false); f.time.jump(31000); f.client.setVisible(true); await flush();
-  assert.equal(f.client.state.lease, null); assert.equal(f.client.state.canControl, false); assert.equal(sdk.count(), 1);
-  assert.equal(posts(f, '/api/controller/renew').length, 0); await f.close();
+test('an accepted hidden call survives suspended browser timers and can still be hung up', async () => {
+  const f = fixture();
+  await f.ready();
+  const sdk = callFixture();
+  await f.client.startCall('+15550000000', { connectVoice: async () => sdk.call });
+  f.client.markVoiceAccepted('call-1');
+  f.client.setVisible(false);
+  f.time.jump(31000);
+  f.client.setVisible(true);
+  await flush();
+  assert.ok(f.client.state.lease);
+  assert.equal(f.client.state.canControl, false);
+  assert.equal(sdk.count(), 0);
+  assert.equal(f.client.state.canHangup, true);
+  assert.equal(f.client.state.canMute, true);
+  assert.equal(posts(f, '/api/controller/renew').length, 0);
+  const held = f.lease();
+  f.setLease({ ...held, expiresAt: f.time.now() + 30000 });
+  await f.client.refresh();
+  assert.equal(f.client.state.lease.expiresAt, f.lease().expiresAt);
+  assert.equal(f.client.state.phase, 'active');
+  assert.equal(f.client.state.canDial, false);
+  await f.client.cancel();
+  assert.equal(sdk.count(), 1);
+  await f.close();
+});
+
+test('a fresh server denial retires an accepted owner even after its old local deadline', async () => {
+  const f = fixture();
+  await f.ready();
+  const sdk = callFixture();
+  await f.client.startCall('+15550000000', { connectVoice: async () => sdk.call });
+  f.client.markVoiceAccepted('call-1');
+  f.client.setVisible(false);
+  f.time.jump(31000);
+  f.setLease(null);
+  await f.client.refresh();
+  await flush();
+  assert.equal(sdk.count(), 1);
+  assert.equal(f.client.state.lease, null);
+  assert.equal(f.client.state.canMute, false);
+  assert.equal(f.client.state.error.code, 'FORBIDDEN');
+  await f.close();
+});
+
+test('a fresh authoritative idle projection retires accepted media when the terminal SSE event was missed', async () => {
+  const f = fixture();
+  await f.ready();
+  const sdk = callFixture();
+  await f.client.startCall('+15550000000', { connectVoice: async () => sdk.call });
+  f.client.markVoiceAccepted('call-1');
+  f.setCall(null);
+  f.setBusy(false);
+  await f.client.refresh();
+  await flush();
+  assert.equal(sdk.count(), 1);
+  assert.equal(f.client.state.call, null);
+  assert.equal(f.client.state.lease, null);
+  assert.equal(f.client.state.canMute, false);
+  assert.equal(f.client.state.canDial, true);
+  assert.equal(posts(f, '/api/controller/revoke').length, 1);
+  await f.close();
+});
+
+test('a delayed idle read issued before SDK acceptance cannot retire the newly accepted call', async () => {
+  const f = fixture();
+  await f.ready();
+  const sdk = callFixture(),
+    connecting = deferred(),
+    reading = deferred();
+  const starting = f.client.startCall('+15550000000', {
+    connectVoice: () => connecting.promise,
+  });
+  await flush();
+  const held = { ...f.lease() };
+  f.overrides.set('/api/browser-session', () => reading.promise);
+  const refreshed = f.client.refresh();
+  await flush();
+  connecting.resolve(sdk.call);
+  await starting;
+  assert.equal(f.client.markVoiceAccepted('call-1'), true);
+  reading.resolve(
+    response({
+      mode: 'controlled',
+      csrfToken: f.csrf,
+      controller: {
+        mode: 'held',
+        ownSession: true,
+        tabMatches: true,
+        epoch: held.epoch,
+        expiresAt: held.expiresAt,
+      },
+      activeSession: null,
+      busy: false,
+      translationEngines: ['pocket-prefix'],
+      defaultTranslationEngine: 'pocket-prefix',
+      outgoingPairedCaptions: true,
+    }),
+  );
+  await refreshed;
+  await flush();
+  assert.equal(sdk.count(), 0);
+  assert.equal(f.client.state.phase, 'active');
+  assert.equal(f.client.state.call.id, 'call-1');
+  assert.equal(f.client.state.canDial, false);
+  assert.equal(posts(f, '/api/controller/revoke').length, 0);
+  f.overrides.delete('/api/browser-session');
+  await f.close();
+});
+
+for (const projection of [
+  'expired-held',
+  'available',
+  'changed-epoch',
+] as const) {
+  test(`an entire pre-accept ${projection} bootstrap is stale after acceptance and a delay beyond the old lease`, async () => {
+    const f = fixture();
+    await f.ready();
+    const sdk = callFixture(),
+      connecting = deferred(),
+      reading = deferred();
+    const starting = f.client.startCall('+15550000000', {
+      connectVoice: () => connecting.promise,
+    });
+    await flush();
+    const held = { ...f.lease() };
+    f.overrides.set('/api/browser-session', () => reading.promise);
+    const refreshed = f.client.refresh();
+    await flush();
+    connecting.resolve(sdk.call);
+    await starting;
+    assert.equal(f.client.markVoiceAccepted('call-1'), true);
+    // Browser timers remain suspended: only wall time crosses the original TTL.
+    f.time.jump(31000);
+    reading.resolve(
+      response({
+        mode: 'controlled',
+        csrfToken: f.csrf,
+        controller: {
+          mode: projection === 'available' ? 'available' : 'held',
+          ownSession: projection !== 'available',
+          tabMatches: projection !== 'available',
+          epoch: held.epoch + (projection === 'changed-epoch' ? 1 : 0),
+          expiresAt: projection === 'available' ? null : held.expiresAt,
+        },
+        activeSession: null,
+        busy: false,
+        translationEngines: ['pocket-prefix'],
+        defaultTranslationEngine: 'pocket-prefix',
+        outgoingPairedCaptions: true,
+      }),
+    );
+    await refreshed;
+    await flush();
+    assert.equal(sdk.count(), 0);
+    assert.equal(f.client.state.phase, 'active');
+    assert.equal(f.client.state.call.id, 'call-1');
+    assert.ok(f.client.state.lease);
+    assert.equal(f.client.state.canHangup, true);
+    assert.equal(f.client.state.canDial, false);
+    assert.equal(posts(f, '/hangup').length, 0);
+    assert.equal(posts(f, '/api/controller/revoke').length, 0);
+    // A genuinely new authoritative read after accept is still allowed to deny
+    // the owner; the phase fence must not conceal a real server revocation.
+    f.overrides.delete('/api/browser-session');
+    await f.client.refresh();
+    await flush();
+    assert.equal(sdk.count(), 1);
+    assert.equal(f.client.state.lease, null);
+    assert.equal(f.client.state.canMute, false);
+    await f.close();
+  });
+}
+
+test('an accepted same-call bootstrap delayed beyond its deadline rechecks instead of disconnecting media', async () => {
+  const f = fixture();
+  await f.ready();
+  const sdk = callFixture(),
+    reading = deferred();
+  await f.client.startCall('+15550000000', { connectVoice: async () => sdk.call });
+  f.client.markVoiceAccepted('call-1');
+  const held = { ...f.lease() },
+    sameCall = { id: 'call-1', status: 'active' };
+  f.setCall(sameCall);
+  f.overrides.set('/api/browser-session', () => reading.promise);
+  const readCount = f.requests.filter((entry) =>
+    entry.path.startsWith('/api/browser-session'),
+  ).length;
+  const refreshed = f.client.refresh();
+  await flush();
+  f.time.jump(31000);
+  f.setLease({ ...held, expiresAt: f.time.now() + 30000 });
+  f.overrides.delete('/api/browser-session');
+  reading.resolve(
+    response({
+      mode: 'controlled',
+      csrfToken: f.csrf,
+      controller: {
+        mode: 'held',
+        ownSession: true,
+        tabMatches: true,
+        epoch: held.epoch,
+        expiresAt: held.expiresAt,
+      },
+      activeSession: sameCall,
+      busy: true,
+      translationEngines: ['pocket-prefix'],
+      defaultTranslationEngine: 'pocket-prefix',
+      outgoingPairedCaptions: true,
+    }),
+  );
+  await refreshed;
+  await flush();
+  assert.equal(sdk.count(), 0);
+  assert.equal(f.client.state.phase, 'active');
+  assert.equal(f.client.state.canDial, false);
+  assert.equal(f.client.state.lease.expiresAt, f.lease().expiresAt);
+  assert.equal(
+    f.requests.filter((entry) => entry.path.startsWith('/api/browser-session'))
+      .length - readCount,
+    2,
+  );
+  f.setCall(null);
+  f.setBusy(false);
+  await f.client.refresh();
+  await flush();
+  assert.equal(sdk.count(), 1);
+  assert.equal(f.client.state.lease, null);
+  assert.equal(f.client.state.canDial, true);
+  await f.close();
+});
+
+test('repeated expired same-owner snapshots get one bounded recheck and cannot restore new admission', async () => {
+  const f = fixture();
+  await f.ready();
+  const sdk = callFixture();
+  await f.client.startCall('+15550000000', { connectVoice: async () => sdk.call });
+  f.client.markVoiceAccepted('call-1');
+  const held = { ...f.lease() };
+  f.time.jump(31000);
+  f.overrides.set('/api/browser-session', () =>
+    response({
+      mode: 'controlled',
+      csrfToken: f.csrf,
+      controller: {
+        mode: 'held',
+        ownSession: true,
+        tabMatches: true,
+        epoch: held.epoch,
+        expiresAt: held.expiresAt,
+      },
+      activeSession: { id: 'call-1', status: 'active' },
+      busy: true,
+      translationEngines: ['pocket-prefix'],
+      defaultTranslationEngine: 'pocket-prefix',
+      outgoingPairedCaptions: true,
+    }),
+  );
+  const before = f.requests.length;
+  await f.client.refresh();
+  await flush();
+  assert.equal(
+    f.requests
+      .slice(before)
+      .filter((entry) => entry.path.startsWith('/api/browser-session')).length,
+    2,
+  );
+  assert.equal(sdk.count(), 0);
+  assert.equal(f.client.state.canStart, false);
+  assert.equal(f.client.state.canDial, false);
+  f.overrides.set('/api/browser-session', () =>
+    response({ error: 'FORBIDDEN' }, 403),
+  );
+  await f.client.refresh();
+  await flush();
+  assert.equal(sdk.count(), 1);
+  assert.equal(f.client.state.lease, null);
+  await f.close();
+});
+
+test('a delayed same-proof renewal deadline cannot disconnect an accepted owner and requires a fresh read', async () => {
+  const f = fixture();
+  await f.ready();
+  const sdk = callFixture(),
+    renewing = deferred();
+  await f.client.startCall('+15550000000', { connectVoice: async () => sdk.call });
+  f.client.markVoiceAccepted('call-1');
+  const held = { ...f.lease() };
+  f.overrides.set('/api/controller/renew', () => renewing.promise);
+  const readCount = f.requests.filter((entry) =>
+    entry.path.startsWith('/api/browser-session'),
+  ).length;
+  const renewed = f.client.renew();
+  await flush();
+  f.time.jump(31000);
+  f.setLease({ ...held, expiresAt: f.time.now() + 30000 });
+  renewing.resolve(response(held));
+  await renewed;
+  await flush();
+  assert.equal(sdk.count(), 0);
+  assert.equal(f.client.state.phase, 'active');
+  assert.equal(f.client.state.canDial, false);
+  assert.equal(f.client.state.lease.expiresAt, f.lease().expiresAt);
+  assert.equal(
+    f.requests.filter((entry) => entry.path.startsWith('/api/browser-session'))
+      .length - readCount,
+    1,
+  );
+  assert.equal(posts(f, '/api/controller/revoke').length, 0);
+  await f.close();
+});
+
+for (const fault of ['wrong-proof', 'UNAUTHORIZED', 'FORBIDDEN'] as const) {
+  test(`a delayed renewal ${fault} still retires accepted media after the old deadline`, async () => {
+    const f = fixture();
+    await f.ready();
+    const sdk = callFixture(),
+      renewing = deferred();
+    await f.client.startCall('+15550000000', { connectVoice: async () => sdk.call });
+    f.client.markVoiceAccepted('call-1');
+    const held = { ...f.lease() };
+    f.overrides.set('/api/controller/renew', () => renewing.promise);
+    const renewed = f.client.renew(),
+      rejected = assert.rejects(renewed, {
+        code: fault === 'wrong-proof' ? 'INVALID_RESPONSE' : fault,
+      });
+    await flush();
+    f.time.jump(31000);
+    if (fault === 'wrong-proof')
+      renewing.resolve(response({ ...held, leaseId: 'W'.repeat(43) }));
+    else {
+      f.overrides.set('/api/browser-session', () =>
+        response({ error: fault }, fault === 'UNAUTHORIZED' ? 401 : 403),
+      );
+      renewing.resolve(
+        response({ error: fault }, fault === 'UNAUTHORIZED' ? 401 : 403),
+      );
+    }
+    await rejected;
+    await flush();
+    assert.equal(sdk.count(), 1);
+    assert.equal(f.client.state.lease, null);
+    assert.equal(f.client.state.canMute, false);
+    assert.equal(f.client.state.canStart, false);
+    if (fault !== 'wrong-proof') assert.equal(f.client.state.canDial, false);
+    await f.close();
+  });
+}
+
+test('an unaccepted SDK preparation still expires and a late acceptance cannot use active-call continuity', async () => {
+  const f = fixture();
+  await f.ready();
+  const sdk = callFixture();
+  await f.client.startCall('+15550000000', { connectVoice: async () => sdk.call });
+  f.time.jump(31000);
+  f.client.handleEvent('call', { id: 'call-1', status: 'active' });
+  await flush();
+  assert.equal(sdk.count(), 1);
+  assert.equal(f.client.state.lease, null);
+  assert.equal(f.client.markVoiceAccepted('call-1'), false);
+  assert.equal(f.client.state.canHangup, false);
+  assert.equal(posts(f, '/hangup').length, 1);
+  await f.close();
+});
+
+test('server-maintained read hints cannot recover a proof in another document', async () => {
+  const f = fixture();
+  await f.ready();
+  const reader = f.makeClient();
+  f.overrides.set('/api/browser-session', () =>
+    response({
+      mode: 'controlled',
+      csrfToken: f.csrf,
+      controller: {
+        mode: 'held',
+        ownSession: true,
+        tabMatches: true,
+        epoch: 1,
+        expiresAt: f.time.now() + 30000,
+        serverMaintained: true,
+      },
+      activeSession: { id: 'call-1', status: 'active' },
+      busy: true,
+      translationEngines: ['pocket-prefix'],
+      defaultTranslationEngine: 'pocket-prefix',
+      outgoingPairedCaptions: true,
+    }),
+  );
+  await reader.boot();
+  reader.setConnectionState(true);
+  assert.equal(reader.state.lease, null);
+  assert.equal(reader.state.canHangup, false);
+  assert.equal(reader.state.canMute, false);
+  assert.equal(reader.state.canDial, false);
+  const before = posts(f).length;
+  await reader.cancel();
+  assert.equal(posts(f).length, before);
+  await f.close();
+});
+
+test('normal complete cleanup permits the next direct dial to acquire internally without a manual action', async () => {
+  const f = fixture();
+  await f.client.boot();
+  f.client.setConnectionState(true);
+  await f.client.dial('+15550000000', { connectVoice: async () => callFixture().call });
+  f.client.markVoiceAccepted('call-1');
+  await f.client.hangup();
+  assert.equal(f.client.state.canDial, true);
+  assert.equal(f.client.state.lease, null);
+  await f.client.dial('+15550000000', { connectVoice: async () => callFixture().call });
+  assert.equal(posts(f, '/api/controller/acquire').length, 2);
+  assert.equal(posts(f, '/api/calls').length, 2);
+  assert.equal(f.client.state.phase, 'connecting');
+  await f.close();
+});
+
+test('automatic hangup retains its private proof for failed-cleanup retry and releases only after confirmation', async () => {
+  const f = fixture();
+  await f.ready();
+  await f.client.startCall('+15550000000', { connectVoice: async () => callFixture().call });
+  f.client.markVoiceAccepted('call-1');
+  f.overrides.set('/api/calls/call-1/hangup', () => response({ error: 'CALL_CLEANUP_UNCONFIRMED' }, 503));
+  await f.client.hangup();
+  assert.equal(posts(f, '/api/controller/revoke').length, 0);
+  assert.equal(f.client.state.cleanupPending, true);
+  assert.equal(f.client.state.canHangup, true);
+  assert.equal(f.client.state.canDial, false);
+  f.overrides.delete('/api/calls/call-1/hangup');
+  await f.client.hangup();
+  assert.equal(posts(f, '/hangup').length, 2);
+  assert.equal(posts(f, '/api/controller/revoke').length, 1);
+  assert.equal(f.client.state.lease, null);
+  assert.equal(f.client.state.canDial, true);
+  await f.close();
+});
+
+test('a failed accepted-call cleanup can retry beyond its old lease without authorizing another call', async () => {
+  const f = fixture();
+  await f.ready();
+  await f.client.startCall('+15550000000', { connectVoice: async () => callFixture().call });
+  f.client.markVoiceAccepted('call-1');
+  f.overrides.set('/api/calls/call-1/hangup', () => response({ error: 'CALL_CLEANUP_UNCONFIRMED' }, 503));
+  f.setCall({ id: 'call-1', status: 'completed', cleanupUnconfirmed: true });
+  await f.client.hangup();
+  f.time.jump(31000);
+  await f.client.refresh();
+  assert.equal(f.client.state.canHangup, true);
+  assert.equal(f.client.state.canDial, false);
+  assert.equal(f.client.state.canStart, false);
+  assert.equal(f.client.state.canRenew, false);
+  assert.equal(f.client.state.canMute, false);
+  assert.equal(posts(f, '/api/controller/revoke').length, 0);
+  f.overrides.delete('/api/calls/call-1/hangup');
+  await f.client.hangup();
+  assert.equal(posts(f, '/hangup').length, 2);
+  assert.equal(f.client.state.lease, null);
+  assert.equal(f.client.state.cleanupPending, false);
+  assert.equal(f.client.state.canDial, true);
+  await f.close();
 });
 
 test('revoked renew invalidates existing media and late responses cannot revive it', async () => {

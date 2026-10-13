@@ -217,6 +217,8 @@ test('minimal immutable Voice grant binds verified login, controller tab/epoch a
     identity: f.call.identity,
     issuedAt: 10000,
     expiresAt: 40000,
+    authExpiresAt: 90000,
+    tokenExpiresAt: 90000,
     incomingAllow: false,
     outgoingApplicationSid: applicationSid,
     outgoing: { callId: f.call.callId, identity: f.call.identity },
@@ -250,6 +252,59 @@ test('grant deadline cannot exceed current login expiry, lease expiry or configu
     (await short.voice.prepareGrant(short.context, short.call.callId)).grant
       .expiresAt,
     12000,
+  );
+});
+
+test('SDK token validity is separate from one-use admission and capped by unchanged login and finite signaling limit', async () => {
+  const f = fixture();
+  const before = {
+    idle: f.session.idleExpiresAt,
+    absolute: f.session.absoluteExpiresAt,
+  };
+  const prepared = await f.voice.prepareGrant(f.context, f.call.callId);
+  assert.equal(prepared.grant.expiresAt, 40000);
+  assert.equal(prepared.grant.tokenExpiresAt, 90000);
+  assert.equal(prepared.grant.authExpiresAt, 90000);
+  assert.deepEqual(
+    { idle: f.session.idleExpiresAt, absolute: f.session.absoluteExpiresAt },
+    before,
+  );
+  f.advance(40000);
+  f.leases.acquire(f.context, 'tab-b');
+  assert.equal(f.voice.consume(f.fields(prepared.join)), 'cleanup');
+  assert.deepEqual([f.effects.reserves, f.effects.signs], [1, 1]);
+
+  const long = fixture();
+  long.session.idleExpiresAt = 2000000;
+  long.session.absoluteExpiresAt = 3000000;
+  const bounded = await long.voice.prepareGrant(long.context, long.call.callId);
+  assert.equal(bounded.grant.tokenExpiresAt, 10000 + 15 * 60 * 1000);
+  assert.equal(bounded.grant.expiresAt, 40000);
+  assert.equal(long.session.idleExpiresAt, 2000000);
+
+  const short = fixture();
+  short.session.idleExpiresAt = 18000;
+  const limited = await short.voice.prepareGrant(
+    short.context,
+    short.call.callId,
+  );
+  assert.equal(limited.grant.expiresAt, 18000);
+  assert.equal(limited.grant.tokenExpiresAt, 18000);
+});
+
+test('final delivery rejects an SDK token when the current login deadline was shortened after signing', async () => {
+  const f = fixture();
+  const prepared = await f.voice.prepareGrant(f.context, f.call.callId);
+  f.session.idleExpiresAt = 50000;
+  assert.ok(prepared.grant.expiresAt < f.session.idleExpiresAt);
+  assert.ok(prepared.grant.tokenExpiresAt > f.session.idleExpiresAt);
+  assert.throws(
+    () => f.voice.assertPreparedCurrent(f.context, f.call.callId, prepared),
+    voiceError('INVALID_VOICE_JOIN'),
+  );
+  await assert.rejects(
+    f.voice.prepareGrant(f.context, f.call.callId),
+    voiceError('INVALID_VOICE_JOIN'),
   );
 });
 

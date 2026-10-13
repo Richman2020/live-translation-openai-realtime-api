@@ -5,6 +5,7 @@ import type { CloudServiceConfig } from './cloud-service-config';
 import { ConfigStore, SETTING_NAMES } from './config';
 import { CloudControllerLeases } from './controller-lease';
 import {
+  CLOUD_VOICE_SIGNALING_LIFETIME_MS,
   CloudVoiceJoin,
   type CloudVoiceGrant,
   type CloudVoiceAdmission,
@@ -68,7 +69,7 @@ export function createCloudVoiceSigner(
 ): CloudVoiceSigner {
   return async (grant: CloudVoiceGrant) => {
     const time = now();
-    const expiry = grant?.expiresAt;
+    const expiry = grant?.tokenExpiresAt;
     if (
       !Number.isSafeInteger(time) ||
       time < 0 ||
@@ -92,6 +93,12 @@ export function createCloudVoiceSigner(
       grant.issuedAt > time ||
       !Number.isSafeInteger(grant.expiresAt) ||
       grant.expiresAt - grant.issuedAt > 60000 ||
+      grant.expiresAt - time < 1000 ||
+      !Number.isSafeInteger(grant.authExpiresAt) ||
+      !Number.isSafeInteger(expiry) ||
+      expiry < grant.expiresAt ||
+      expiry > grant.authExpiresAt ||
+      expiry - grant.issuedAt > CLOUD_VOICE_SIGNALING_LIFETIME_MS ||
       expiry <= time ||
       grant.outgoingApplicationSid !== config.providers.TWILIO_TWIML_APP_SID ||
       grant.outgoing?.callId !== grant.callId ||

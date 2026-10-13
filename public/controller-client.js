@@ -4,9 +4,9 @@ const messages = {
   UNAUTHORIZED: '登录已失效。请重新登录；此页面不能继续控制电话。',
   FORBIDDEN: '控制许可已失效。此标签页已转为只读，请刷新状态。',
   CONTROLLER_BUSY: '另一标签页持有控制权，或上次线路仍待清理。当前标签页只读。',
-  CONTROL_REQUIRED: '请先取得当前标签页的控制权。',
-  CONTROL_EXPIRED: '控制权已到期，已停止本页语音并请求线路清理。请刷新状态。',
-  CONTROL_PAUSED: '连接或页面活动已暂停自动续约。恢复后请明确续约；读取不会延长控制权。',
+  CONTROL_REQUIRED: '电话暂未就绪。请检查登录和连接后再拨打。',
+  CONTROL_EXPIRED: '本次电话准备已到期，请检查线路状态后重新拨打。',
+  CONTROL_PAUSED: '状态连接暂时中断，请等待恢复后再拨打。',
   CALL_CANCELLED: '本次操作已取消，线路状态以服务端确认结果为准。',
   CALL_CLEANUP_UNCONFIRMED: '线路关闭尚未确认。确认前不能开始下一通电话。',
   REQUEST_TIMEOUT: '操作超时，结果仍待服务端确认。请刷新状态，不要重复拨号。',
@@ -58,9 +58,22 @@ export function createControllerClient({
   const retireCall = id => { retiredCalls.add(id); if (retiredCalls.size > 100) retiredCalls.delete(retiredCalls.values().next().value); };
   const liveLease = () => Boolean(!disposed && authenticated && lease && now() < lease.expiresAt);
   const activeCall = () => Boolean(call && (!terminal(call.status) || call.cleanupUnconfirmed));
+  // An already accepted SDK belongs to this exact document and call. Its live
+  // media is checked independently by the server; an old browser deadline or
+  // background timer is not evidence that those media have disconnected.
+  // This continuity never admits another call, token or replacement SDK.
+  const acceptedOwner = () => Boolean(!disposed && authenticated && lease && attempt &&
+    attempt.voiceAccepted && !attempt.cancelled && attempt.generation === generation &&
+    attempt.lease === lease && attempt.callId === call?.id && activeCall() &&
+    !terminal(call.status) && call.status !== 'ending' && !cleanupPending);
+  // A retired call may retain only its original private proof to retry cleanup.
+  // The server has a separate end-intent authorization for this exact call;
+  // this does not renew idle authority or admit any new media or call.
+  const cleanupOwner = () => Boolean(!disposed && authenticated && lease && cleanupPending &&
+    call && retiredCalls.has(call.id));
   const snapshot = () => {
-    const holdsControl = liveLease();
-    const canControl = holdsControl && readConfirmed && connected && visible && !cleanupPending;
+    const holdsControl = liveLease() || acceptedOwner() || cleanupOwner();
+    const canControl = liveLease() && readConfirmed && connected && visible && !cleanupPending;
     const canAcquire = !disposed && authenticated && readConfirmed && connected && visible && controller?.mode === 'available' && !lease && !busy && !activeCall() && !attempt && !cleanupPending && !pendingAcquire;
     const canStart = canControl && !activeCall() && !attempt && !busy;
     return Object.freeze({
@@ -77,7 +90,7 @@ export function createControllerClient({
   };
   const emit = () => { onChange(snapshot()); };
   const current = item => Boolean(item && attempt === item && !item.cancelled && item.generation === generation &&
-    lease === item.lease && liveLease() && readConfirmed && connected && visible && !cleanupPending);
+    lease === item.lease && (acceptedOwner() || liveLease() && readConfirmed && connected && visible && !cleanupPending));
   const clearControlTimers = () => {
     clearTimer(deadlineTimer); clearTimer(renewalTimer); deadlineTimer = renewalTimer = null;
   };
@@ -167,6 +180,7 @@ export function createControllerClient({
   }
   function expire() {
     if (!lease) return;
+    if (acceptedOwner() || cleanupOwner()) return;
     error = safeError(fail('CONTROL_EXPIRED'));
     void client.cancel('CONTROL_EXPIRED');
   }
@@ -176,7 +190,7 @@ export function createControllerClient({
       void client.cancel(failure?.code || 'FORBIDDEN');
     } else { error = safeError(failure); phase = 'readonly'; emit(); }
   }
-  function applyBootstrap(value) {
+  function applyBootstrap(value, observedAccepted) {
     if (value?.mode !== 'controlled' || typeof value.csrfToken !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(value.csrfToken) ||
         !value.controller || !['held', 'available'].includes(value.controller.mode) || typeof value.busy !== 'boolean' ||
         !Array.isArray(value.translationEngines) || !value.translationEngines.length || value.translationEngines.length > 3 ||
@@ -185,33 +199,69 @@ export function createControllerClient({
         typeof value.outgoingPairedCaptions !== 'boolean' ||
         !value.translationEngines.includes(value.defaultTranslationEngine)) throw fail('INVALID_RESPONSE');
     csrf = value.csrfToken; authenticated = true; readConfirmed = true;
-    controller = Object.freeze(Object.fromEntries(['mode', 'ownSession', 'tabMatches', 'epoch', 'expiresAt'].map(key => [key, value.controller[key]]))); busy = value.busy;
+    controller = Object.freeze(Object.fromEntries(['mode', 'ownSession', 'tabMatches', 'epoch', 'expiresAt', 'serverMaintained'].map(key => [key, value.controller[key]]))); busy = value.busy;
     engines = [...value.translationEngines]; defaultEngine = value.defaultTranslationEngine;
     outgoingPairedCaptions = value.outgoingPairedCaptions;
     const nextCall = safeCall(value.activeSession);
+    const observedOwnerMatches = observedAccepted &&
+      observedAccepted.attempt === attempt && observedAccepted.lease === lease &&
+      observedAccepted.generation === generation && observedAccepted.callId === call?.id;
+    const completedOwner = !nextCall && !busy && acceptedOwner() && observedOwnerMatches;
+    if (completedOwner) {
+      // A fresh idle projection settles a missed terminal SSE event. Keeping
+      // an accepted SDK merely because its old local attempt exists would
+      // retain media after the server has already ended the call.
+      retireCall(attempt.callId); rejectAttempt(attempt); attempt = null;
+    }
     if (nextCall) call = nextCall;
     else if (!busy && !attempt) call = null;
     if (!busy && !nextCall && !attempt) cleanupPending = false;
-    if (lease && (controller.mode !== 'held' || controller.epoch !== lease.epoch || !controller.ownSession || !controller.tabMatches || now() >= lease.expiresAt)) {
-      loseControl(fail('FORBIDDEN')); return;
+    if (lease && !busy && !nextCall && !attempt && !pendingDial && controller.mode === 'available') {
+      // Successful cleanup can outlive the finite lease. A fresh idle read
+      // confirms the old proof is retired, without trying to restore it.
+      lease = null; clearControlTimers(); renewPaused = true;
+    }
+    if (lease && !cleanupOwner()) {
+      const sameHeldOwner = controller.mode === 'held' && controller.epoch === lease.epoch &&
+        controller.ownSession === true && controller.tabMatches === true;
+      if (sameHeldOwner && observedOwnerMatches && acceptedOwner() && nextCall?.id === observedAccepted.callId &&
+          Number.isSafeInteger(controller.expiresAt) && controller.expiresAt > 0 && controller.expiresAt <= now()) {
+        // A successful same-owner snapshot can age while a background document
+        // is frozen. Its deadline cannot override the independently live SDK.
+        // Keep the local deadline unchanged and request one current projection.
+        emit(); return 'stale_deadline';
+      }
+      if (controller.mode !== 'held' || controller.epoch !== lease.epoch || !controller.ownSession || !controller.tabMatches ||
+          !Number.isSafeInteger(controller.expiresAt) || controller.expiresAt <= now()) {
+        loseControl(fail('FORBIDDEN')); return;
+      }
+      // A current projection can report the server's independently maintained
+      // deadline only to the document that already owns the opaque proof.
+      lease.expiresAt = controller.expiresAt;
+      if (acceptedOwner()) { renewPaused = false; installTimers(); }
     }
     if (!attempt && phase !== 'acquiring' && !cleanupPending) phase = liveLease() ? 'ready' : 'readonly';
     emit();
+    if (completedOwner && lease) void client.hangup();
   }
 
   const client = {
     get state() { return snapshot(); },
     get tabId() { return tabId; },
     async boot() { return client.refresh(); },
-    async refresh() {
+    async refresh({ retryStaleDeadline = true } = {}) {
       if (disposed) return snapshot();
       if (lease && now() >= lease.expiresAt) expire();
       const seq = ++readSequence, before = generation;
+      const observedAccepted = acceptedOwner() ? { attempt, lease, generation, callId: call.id } : null;
       try {
         const value = await request(`/api/browser-session?tabId=${encodeURIComponent(tabId)}`);
         if (disposed || seq !== readSequence || before !== generation) return snapshot();
         appliedReadSequence = seq;
-        applyBootstrap(value);
+        const applied = applyBootstrap(value, observedAccepted);
+        // One bounded recheck avoids a loop if a transport repeatedly returns
+        // an aged projection. Only this already accepted owner survives it.
+        if (applied === 'stale_deadline' && retryStaleDeadline && acceptedOwner()) void client.refresh({ retryStaleDeadline: false });
       } catch (failure) {
         if (disposed || seq !== readSequence || before !== generation) return snapshot();
         if (failure?.code === 'UNAUTHORIZED') { authenticated = false; csrf = ''; loseControl(failure); }
@@ -251,14 +301,20 @@ export function createControllerClient({
       } finally { pendingAcquire = false; if (!disposed) emit(); }
     },
     async renew() {
-      if (!liveLease() || !readConfirmed || !connected || !visible || cleanupPending) throw fail('CONTROL_REQUIRED');
+      if (!(liveLease() || acceptedOwner()) || !readConfirmed || !connected || !visible || cleanupPending) throw fail('CONTROL_REQUIRED');
       if (pendingRenew) return snapshot();
       const held = lease, proof = proofOf(held), capturedCsrf = csrf, before = generation;
       pendingRenew = true; emit();
       try {
         const received = await request('/api/controller/renew', proof, { capturedCsrf });
         if (disposed || lease !== held || before !== generation) throw fail('CALL_CANCELLED');
-        if (!validLease(received) || received.leaseId !== held.leaseId || received.epoch !== held.epoch) throw fail('INVALID_RESPONSE');
+        if (!received || received.tabId !== held.tabId || received.leaseId !== held.leaseId || received.epoch !== held.epoch ||
+            !Number.isSafeInteger(received.expiresAt) || received.expiresAt <= 0) throw fail('INVALID_RESPONSE');
+        if (received.expiresAt <= now()) {
+          if (!acceptedOwner()) throw fail('INVALID_RESPONSE');
+          renewPaused = true; clearTimer(renewalTimer);
+          await client.refresh(); return snapshot();
+        }
         held.expiresAt = received.expiresAt; controller = Object.freeze({ ...controller, expiresAt: held.expiresAt });
         renewPaused = !connected || !visible; error = null; installTimers(); return snapshot();
       } catch (failure) {
@@ -307,7 +363,7 @@ export function createControllerClient({
       if (!snapshot().canStart) throw fail('CONTROL_REQUIRED');
       if (!engines.includes(translationEngine)) throw fail('INVALID_TRANSLATION_ENGINE');
       if (typeof connectVoice !== 'function' || (prepareMedia !== undefined && typeof prepareMedia !== 'function')) throw fail('INVALID_RESPONSE');
-      const item = { generation, lease, proof: proofOf(lease), capturedCsrf: csrf, callId: null, pendingCallId: null, creating: false, sdkCall: null, cancelled: false, aborters: new Set() };
+      const item = { generation, lease, proof: proofOf(lease), capturedCsrf: csrf, callId: null, pendingCallId: null, creating: false, sdkCall: null, voiceAccepted: false, cancelled: false, aborters: new Set() };
       attempt = item; phase = 'preparing'; error = null; emit();
       const lateCreate = async value => {
         const late = safeCall(value);
@@ -354,7 +410,11 @@ export function createControllerClient({
     markVoiceAccepted(callId) {
       if (!current(attempt) || !['connecting', 'active'].includes(phase) || callId !== attempt.callId || !call || terminal(call.status)) return false;
       // SDK accept means browser media joined; provider ringing/active stays in call.status.
-      phase = 'active'; emit(); return true;
+      // Reads sent during preparation describe an earlier phase. Retire their
+      // entire projection, including stale lease deadlines or held/idle hints,
+      // so they cannot disconnect an accepted SDK after a background delay.
+      if (!attempt.voiceAccepted) readSequence += 1;
+      attempt.voiceAccepted = true; phase = 'active'; emit(); return true;
     },
     handleVoiceDisconnected(callId) {
       if (!attempt || attempt.cancelled || callId !== attempt.callId) return false;
@@ -392,7 +452,8 @@ export function createControllerClient({
         renewPaused = true; clearTimer(renewalTimer); if (lease) error = safeError(fail('CONTROL_PAUSED'));
         if (pendingAcquire || pendingDial || (attempt && phase !== 'active')) void client.cancel('CONTROL_PAUSED');
       }
-      // An SSE reconnect is read-only. It never calls renew or restarts auto-renew.
+      // Reads cannot recreate a proof or an SDK. This document's existing call
+      // may resume routine renewal after an authoritative refresh.
       if (lease && now() >= lease.expiresAt) expire();
       emit();
     },
@@ -429,6 +490,14 @@ export function createControllerClient({
       } finally { cleanupRequests -= 1; if (!disposed) emit(); }
     },
     async revoke() { return client.cancel('CALL_CANCELLED'); },
+    async hangup() {
+      // Keep the captured owner available for an explicit cleanup retry until
+      // the authoritative gate is idle. Only then release it automatically so
+      // the next normal dial can acquire afresh without any control UI.
+      await client.cancel({ releaseControl: false });
+      if (!disposed && lease && !cleanupPending && !busy && !activeCall() && !attempt && !pendingDial && !pendingAcquire) await client.revoke();
+      return snapshot();
+    },
     async logout() {
       if (disposed || pendingLogout || !authenticated || !csrf) throw fail('UNAUTHORIZED');
       const capturedCsrf = csrf;

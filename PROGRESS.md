@@ -1,10 +1,74 @@
 # 项目进度与交接
 
-更新日期：2026-10-12。共享仓库：<https://github.com/Richman2020/live-translation-openai-realtime-api>。
+更新日期：2026-10-13。共享仓库：<https://github.com/Richman2020/live-translation-openai-realtime-api>。
 
 需求见 [PROJECT_BRIEF.md](PROJECT_BRIEF.md)，工作规则见 [AGENTS.md](AGENTS.md)，运行步骤见 [LOCAL_SETUP.md](LOCAL_SETUP.md)，后续执行入口见 [LOCAL_CODEX_HANDOFF.md](LOCAL_CODEX_HANDOFF.md)。
 
-## 最新：锁依赖与回调离线复验通过，今晚一通试打待发布批准（2026-10-12）
+## 最新：初步实测成功后修复自动通话控制，新候选待 dot 验收（2026-10-13）
+
+- 用户本人已实际完成开头一句中文和一句英文，对当前声音、翻译满意，随后中断。本轮范围仅自动处理本页控制、取消手动取得/续约/保持及倒计时，不扩展字幕、声音、登录或来电功能。此前部署授权已经使用，本候选不自动推送、部署或付费试打。历史中“真实通话未进行”的描述对应当时状态，现以本次初步实测为准；整通验收仍未通过。
+- 基线及当前线上完整 SHA 为 `95ab05593863c004abbf2d355c4bcaa4f8caaf0e`，运行部署 `887f89bd-1c1a-449b-a545-d92f7641942a`，只读核对仍 SUCCESS。原目录/附件及旧 PROGRESS 均保留；在既有工作目录 `/workspace/ai-phone-cloud-recovery-20261012` 新建 `codex/ai-phone-auto-control-fix-20261013`，沿用现有锁定依赖，没有再次安装。
+- 同一次通话窗口 UTC03:47–03:51:30（北京时间11:47–11:51:30）读取 deploy0 / HTTP27。11:48:10.460 与20.758两次 renew200，30.525 hangup200，30.815 revoke200。媒体两条平台状态0不是标准HTTP状态，不认定失败先后；本次没有回调403。没有客户端 SDK 错误码、状态响应体/身份期限、回调body，**不能把倒计时观察认定为已证实根因**。真实原因先后仍未确认。
+- 已确认旧代码两条缺陷：前端隐藏/SSE中断暂停续约、本地旧期限取消SDK；服务端媒体/模型路径独立复核控制TTL。另实际SDK JWT与一次入场票据共用约30秒期限，续租不更新JWT；锁定SDK信令31205会产生20104 Device error并进入旧清理路径。JWT是本次30秒中断的候选解释，缺少实际SDK码不能写成确证。
+- 修复实现：显式正常拨号自动取得并复核空闲控制；删除手动控制操作和倒计时。已接通本通在原私密proof/epoch/owner下维持，服务器只由验证后的local媒体随机ping/pong推进有限30秒窗口，浏览器后台/计时节流不作为结束依据；静音无需讲话续命。一次入场仍约30秒/一次nonce/SID绑定，实际信令JWT最多15分钟且不超过既有认证期限，发送前再校验，不增incoming/凭据或token刷新。
+- 用户挂断、真实SDK/媒体错误、正常远端终态、注销/身份/CSRF失效继续清理。失败后只凭原身份与私密控制证明重试已接受结束的原通话，不能重新拨号/加入/续约；两腿清理未确认仍阻止新通话，迟到旧清理不能影响下一通。重复标签页不抢占，未加入准备票据仍有限过期。原登录15分钟闲置/8小时绝对期限不变；个人cloud phone继续不装配应用金额预算/journal或应用通话时长，`maxCallMs:null`和个人准入不变，仅保留legacy兼容，不读写删旧预算账本，不恢复已撤销门槛。供应商、认证和信令技术边界仍有限，不承诺无限通话或瞬时停止计费。
+- 独立审查发现的P2迟到状态边界已闭合：接通前发出的旧bootstrap整份结果在SDK首次accept后失效；接通后新鲜idle/deny仍终止旧SDK。同通归属仍匹配的迟到bootstrap/renew仅旧deadline过期时有限重新读取，不误清健康通话，不授权新加入；wrongproof/epoch/tab、malformed期限、401/403仍清理。返回workspace补一次只读刷新，后台仍busy时保持禁止拨号，确认idle后恢复，不acquire/renew/手动清flag。最终八产品源码独立审查无未解决阻塞；实现者自检与独立代理审查分开，触发/位置/影响/回归及产品哈希见资料目录 `independent-final-control-review.md`。
+- 最终冻结后已完成：**全量1324总/1319pass/5既有Windows skip/0fail/0cancel**；服务端专项95/95、前端专项87/87、信令/入场/legacy fixture专项66/66、既有准入兼容48/48。build、typecheck、六个修改TS源码ESLint/Prettier、两JS语法、两浏览器脚本独立typecheck及diff检查通过。Google离线真实页面29/29、Pocket82/82、五会话88/88、默认三会话85/85，外部请求/真实供应商调用/异常均0。五会话final3/final4最后observer场景得到安全CONTROLLER_BUSY且未创建calls；只等manager或一次公开idle不排除独立预约释放，失败后投影不能还原瞬时busy来源。harness加真实reserve/release完成信号及完整idle前提，不改变产品决定，final5完整88通过，失败日志保留。旧Google harness引用已删除按钮先超时，已改为新页面契约及本地认证路由probe，未改登录产品逻辑。中间失败/成功及旧1315/1318轮记录分开保留，不使用旧CI或旧包数量；一次Pocket观察者等待active偶发超时未稳定确证根因，后续完整通过不等于该超时已解释。默认三会话导航busy投影问题已加确定性回归并修复。
+- 为缩小验收差异，收尾仅把前端单测及controlled browser harness中未改语句恢复基线排版；恢复前后完整TypeScript AST相等，八产品源码全文不变。再次运行前端87专项、typecheck及harness编译通过，DOM记录对应同一产品/相同逻辑，不宣称另跑一轮。原格式副本、语法树证明和全部失败记录保留，新增回归不删。
+- 未执行：新候选GitHub push/PR/CI、Railway写入/部署、公网新版本检查、真实付费通话/模型；没有改Twilio配置、凭据、权限、号码或portal-test，Hobby不变。新发布方案见 [自动控制修复报告](docs/CLOUD_PHONE_AUTOMATIC_CONTROL_FIX_2026-10-13.md)；先由dot验收精确本地候选，再按新的明确授权更新仅AI staging，旧PR4/成功CI38329410460只覆盖95版本。
+- 本轮脱敏日志、失败及复测记录、独立审查、完整差异/候选回执保存 `/workspace/ai-phone-reference/auto-control-fix-20261013`。原工作区44文件与附件/旧审计19文件全文校验无变化；既有351tracked中328文件无变化，另23路径为本轮业务/测试/进度的明确差异，加本轮报告；AGENTS、package.json及锁文件全文不变。
+
+## 历史：用户提交的修复部署已上线，运行 SHA 与健康通过，公网页面当时待本地检查（2026-10-13）
+
+- 用户报告北京时间11:37亲自在Railway点击Deploy Changes，本云端本轮仅只读服务端验收；未再次提交、发布、申请确认、回滚或操作portal-test，也未重复Twilio/配置核验。此前工具确认取消及暂存关口已由用户这次操作解除，不再作为当前阻塞。
+- 指定project `145aa27a-3a84-4e4d-91f9-b97f33bf6d42`、staging `c5db5ddb-26b6-48ce-b920-dc1ebbe30fa8`、AI service `407bede7-11b6-4260-b055-a8045dc71588`，新部署 **`887f89bd-1c1a-449b-a545-d92f7641942a`**。实际创建2026-10-13 11:36:54.947北京时间，**11:37:23完成SUCCESS**（state.statusUpdatedAt为.212，deployment.updatedAt为.213，两种原始时间戳分开保存）；平台active running deployment为该ID，1/1 Online、0crash、0failure，pendingWork=[]、staged=null。
+- 运行部署metadata的完整commitHash及服务source pin均精确 **`95ab05593863c004abbf2d355c4bcaa4f8caaf0e`**，分支恢复分支，已绑定到正在运行的上述部署，不仅检查构建状态。此精确候选PR4/成功CI38329410460的既有证据保持，无重跑；本地HEAD仍95ab055，未提交PROGRESS不进入平台代码。未读取运行时HTTP自报SHA，实际版本证据来自active deployment/meta/source与该部署启动日志的组合。
+- 该新部署启动日志：11:37:19.441 `Starting Container`，**11:37:20.101 `CLOUD_CONFIGURED_SINGLE_INSTANCE_STARTED`**。候选cloud-index.ts显示此固定标记位于phone配置解析及createCloudService成功后，网页calls-disabled模式使用不同标记；证明本实例phone入口已启动，不证明供应商或模型握手成功。该部署平台日志11:37:19.187开始 `/api/health`，**11:37:20.437 `[1/1] Healthcheck succeeded!`**；当前运行1/1正常。
+- 公网页面验收限度：当前云网络restricted/enforced，有效允许域名不匹配 `ai-phone-test-staging.up.railway.app`，主动GET为0，未绕过/新增权限。仅一次有界读取新部署03:37:23.213Z之后的GET `/controlled`/`/api/health`代理日志，返回0条，不能声称公网访问已通过。平台健康成功与直接公网页面未验收分开记录。准确测试网址 **`https://ai-phone-test-staging.up.railway.app/controlled`**（无用户消息中误附的中文尾串）；本地现有浏览器下一步检查 `/api/health`与 `/controlled`，可进入本人拨号前页面检查，当前不能宣布已可通话。
+- 旧deployment `922a6a82-1039-41ec-9356-4a1f6ab547ce` / `4f34fa313173e62d370e5f78c0780e4506848420` 已正常REMOVED，平台仍canRollback=true，作为回退参考保留；不自动回滚。资源、卷、Hobby及凭据/供应商设置不变，无新服务或套餐操作。
+- 接听目标1406已获本人确认且与主叫不同，已完成配置核验不再重复询问。1通/≤2分钟/Twilio+OpenAI $2仍仅建议、未批准；本轮未拨号或付费模型。真实回调、媒体接通、翻译与字幕/持续讲话/清理仍待本人实际通话。收到本地转交的同一次通话时间和现象后，再对照该部署日志，不拿部署/健康/页面状态代替电话验收。
+- 可转交验收回执和脱敏日志/版本、独立复核及公共检查限制存于 `/workspace/ai-phone-reference/deployment-20261013-95ab055/acceptance-887f89bd`。本PROGRESS继续仅本地未提交/未推送，保护此前进度和审计；旧发布取消回执作为历史保留，当前状态以上述新部署验收为准。
+
+## 历史：配置关口已解除，候选来源已暂存，发布提交被工具执行确认取消（2026-10-13）
+
+- 接受用户转交的完整配置证据，不再要求重复核验或发布批准。2026-10-13 11:18北京时间，AI电话本地经用户Chrome核验Railway/Twilio Account SID精确匹配、账户Active；TwiML App SID匹配且属于该账户；Voice URL精确 `https://ai-phone-test-staging.up.railway.app/voice/client`、无query、HTTP POST；虚拟主叫精确匹配、属于该账户、Voice enabled。未发现需改配置，入站路由未改。dot于10:36:49实读 `CLOUD_PUBLIC_CALLBACK_CONFIRMED=true`；它不是新版本真实回调成功证据。
+- 用户本轮明确确认接听目标末四位 **1406** 是本人本次测试号码，且与Twilio虚拟主叫不同。此前“用户尚未确认”的记录仅为历史，现已失效，不重复询问。试打次数/时长/费用仍独立：1通、≤2分钟、Twilio/OpenAI合计$2仅建议，未批准，无拨号或付费模型。
+- 发布前实际检查线上仍 `4f34fa313173e62d370e5f78c0780e4506848420` / deployment `922a6a82-1039-41ec-9356-4a1f6ab547ce` SUCCESS/Online、1/1、无故障或待变更，没有新版本被他人发布。独立复核本地与远端恢复分支均精确 `95ab05593863c004abbf2d355c4bcaa4f8caaf0e`，PR4/CI38329410460 success、证据哈希与tree绑定通过。唯一未提交变化为本PROGRESS，另350个tracked源码/测试/public/lock不变；文档已备份，未重跑CI/安装/恢复。
+- 已执行限定staging的source stage：project `145aa27a-3a84-4e4d-91f9-b97f33bf6d42`、environment `c5db5ddb-26b6-48ce-b920-dc1ebbe30fa8`、service `407bede7-11b6-4260-b055-a8045dc71588`。patch **`933f24be-f9be-4c1d-b40f-68b1435b227e`**、STAGED，2026-10-13 11:29:07创建；全环境review仅AI的source.branch改恢复分支、source.commitSha改95ab055两字段，无portal/其他资源/变量/供应商/凭据/套餐变更。
+- 按已有明确发布授权，仅一次调用 `railway_accept_deploy`；工具返回 **`Cancelled — the user did not approve this action. No changes were made.`**，isError=true、error_code=INVALID_ARGUMENT。这是工具侧执行确认取消，不能改写成聊天用户没有批准，也没有证据证明Railway账号权限不足。未重复提交或改用另一自动写入路径绕过确认。
+- 2026-10-13 11:30:09取消后只读复核：新部署ID不存在，实际线上SHA仍4f34、部署仍922/SUCCESS、1/1无故障；唯一pending是上述source patch，仍STAGED且精确两字段。现有线上服务未被停止或回退；回退参考922仍保留。新版本启动日志、健康和 `/controlled` 验收未执行，因为新版本未部署。另公共GET受本云网络restricted/enforced策略阻塞，未绕过策略；平台状态不能冒充公网HTTP检查。
+- 当前具体所缺操作：完成现有patch的工具执行确认，或由本地既有授权操作人在指定Railway staging审阅并应用 **同一patch933f24be…的这两项AI源码变更一次**；不新建patch、不合入main或上传本地未提交文件、不操作portal-test。随后本云端只读回读实际部署ID/SHA/启动日志/健康；若95已上线直接验收，不重复部署。不存在配置证据等待；尚不能按新修复进入本人拨号前页面检查。
+- 本次可转交回执、原始取消响应、stage/review及取消后核对在 `/workspace/ai-phone-reference/deployment-20261013-95ab055/final-publication`。本PROGRESS仅本地未提交/未推送；保护旧报告/附件和业务候选。真实回调、媒体接通、翻译/字幕/双腿清理仍留随后另获试打预算的本人电话，不设置为发布前提。
+
+## 历史：继续已授权发布，候选与 CI 对应，三项配置证据当时待补（2026-10-13）
+
+- 北京时间10:45，用户批准用现有Chromium/Playwright打开官方控制台并由本人登录。实际先读当前云环境状态：spec34/observed34、observations_current=true，network restricted/enforced；有效允许域名不含 `railway.com` 或 `console.twilio.com`，故止于网络关口，未尝试导航被禁止网站、未打开登录页。仍无共享可视登录/用户接管入口，不能承诺用后台浏览器完成本人登录交回流程。不绕过网络、不改权限、不复制凭据、不架设远程桌面；既有Railway连接器发布能力及一次指定服务发布授权保留。证据 `CONSOLE_OPEN_NETWORK_GATE.json`；此限制仅阻断浏览器核验路径，不把真实电话先成功新增为发布前提。
+- 浏览器能力后续复核修正：当前环境实际已有 `/usr/bin/chromium`（151.0.7922.173）及Python Playwright，可通过脚本操控后台浏览器；已在offline=true、全部请求abort的本地HTML中实测点击成功、exit0，外部页面/登录/新安装均0。此前“无可接管浏览器”不能泛化成“不能操控浏览器”。仍无用户可共享的可视界面或登录接管工具，也没有连接用户桌面已登录页面；不复制Cookie、不新增凭据或自行架设远程桌面。详情见资料目录 `BROWSER_CAPABILITY_CHECK.md`，此能力探针不是通话/供应商验收。
+- 北京时间10:30，用户要求先检查网页登录及本人接管能力。已查本聊天可调用工具目录：无浏览器导航/交互、登录接管及交还控制工具；仅有的handoff工具是聊天交接状态，不是登录接管。Railway OAuth API与Chrome离线测试均不代表可操控网页，不启动无接管UI的登录浏览器或复制Cookie/凭据。已给用户官方Twilio控制台和指定Railway项目页面及精确手动核验字段，不再反复索取接口读不到的值。Twilio虚拟号是主叫；Railway接听目标1406仍未获用户确认，不据此拨号或改号。原一次发布授权保留，无平台写入；详情见资料目录 `MANUAL_CONSOLE_HANDOFF.md`。
+- 独立只读源码复核澄清：Twilio核验是既有Account SID匹配且active、App SID/Voice URL/POST匹配、主叫号码属于该账户且Voice可用。浏览器外呼由VoiceGrant指定App，PSTN号码来电绑定属于另一链路，不新增“主叫号码来电必须绑定同一App”的发布条件；现有来电Fallback/Status/短信路由只记录、不改。本人确认接听目标后再核其与主叫不同。
+- 北京时间10:27本云端复核；用户明确继续第二步发布及第三步试打准备，同一次发布授权已存在，无需重复批准。仍仅现有 `ai-phone-portal-trial/145aa27a-3a84-4e4d-91f9-b97f33bf6d42` 的 `ai-phone-test` staging，不合并main、不操作portal-test、不改供应商或凭据、不升级Hobby，不重复安装、需求盘点、恢复补丁或成功CI。
+- local HEAD与ls-remote候选均精确 `95ab05593863c004abbf2d355c4bcaa4f8caaf0e`；只有前轮未提交PROGRESS记录，另350个tracked全文与候选一致，已备份当前文档，不夹带业务。既有CI run `38329410460`只读回读仍completed/success；独立代理复核已保存CI哈希与head/tree绑定通过，无重跑。
+- 本轮实际只读Railway：指定服务仍source pin/线上 `4f34fa313173e62d370e5f78c0780e4506848420`、deployment `922a6a82-1039-41ec-9356-4a1f6ab547ce` SUCCESS/Online，1/1、无故障，staged=null/pendingWork=[]。保留回退参考，未覆盖未知版本，尚未创建patch/部署。
+- 沿用用户转交dot的2026-10-13 08:57–08:58实际配置核验：cloud/phone、配对字幕false、warm1、两个origin均固定AI HTTPS域名、`CLOUD_TEST_TARGET_NUMBER`末四位1406。证据源为dot，不冒充本接口取得隐藏值，也不证明新版本实际加载或真实通话。用户最新费用读数为10:07、账期Oct9–Nov9，portal-test $0.1494、ai-phone-test $0.0480、保守合计$0.1974，未扣基线；页面读数非计费更新时间，保持Hobby与$3提醒/$4用户关停决定，非硬封顶。
+- 仅余三项发布前必需证据：Railway `CLOUD_PUBLIC_CALLBACK_CONFIRMED`实值true；Twilio配置App/账户/主叫关联匹配、Voice URL为固定AI域名 `/voice/client`无query且POST；目标1406与主叫不同。一次限定AI list_variables返回valuesRedacted=true，confirmed仅名称存在、值不可读；无Twilio读取工具。已一条短问题请dot/既有授权操作人返回上述脱敏结论和时间，不发完整SID/号码/密钥，不继续寻找替代入口。真实签名回调、音频/模型、双向翻译与挂断清理留发布后实际通话验收，不要求“新版本真实通话先成功”作为部署前提。
+- 试打准备已记录：现有 `/controlled`、既有Google账号、系统耳机/网页麦克风选择、显式拨号自动安全取空闲控制权、Device创建后输出试听、异常先结束并核清理。建议本人确认目标1406后1通≤2分钟，Twilio/OpenAI操作预算建议$2、尚未批准且非硬封顶；此前$5建议不算授权。不代拨、不自动重拨、不新增费用计时器。
+- 本次资料在 `/workspace/ai-phone-reference/deployment-20261013-95ab055`，保存preflight、既有PROGRESS副本及试打准备。记录仅本地未提交/未推送，HEAD/远端候选继续95ab055。必要配置证据到达后直接执行一次已授权指定服务发布，回读部署ID/SHA/健康及公网无付费检查；当前发布与冒烟未执行，真实通话未验收。
+
+## 历史：候选已推送、草稿 PR 与完整 CI 通过，停在配置核验关口（2026-10-13）
+
+- 本云端执行，dot协调与验收。用户授权精确候选 `95ab05593863c004abbf2d355c4bcaa4f8caaf0e` 推送专属恢复分支、草稿PR、必要CI成功且前置核验无阻塞后仅发布既有AI staging一次。随后用户明确要求停在配置核验关口，暂不部署、不改配置、不拨号；保留原发布范围，不重复安装、需求盘点或恢复补丁。
+- 发布前实际目录 `/workspace/ai-phone-cloud-recovery-20261012`、分支 `codex/ai-phone-cloud-recovery-20261012`，HEAD精确95ab055且工作区干净；351个tracked路径已作全文保护快照。候选业务/测试/锁文件与实际已验证109977e相同，第二提交仅进度及报告。origin为 `Richman2020/live-translation-openai-realtime-api`；原目录、附件及审计报告保持。
+- 只读先核GitHub规则：恢复分支不匹配workflow的push规则，pull_request会触发离线CI；workflow没有部署步骤。Railway现有来源仍旧交接分支并pin精确4f34，恢复分支推送不匹配该来源且commitSha pin不会追随分支新头；未改自动部署设置、平台配置或凭据，不把此事实泛化为独立autoDeploy开关已关闭。
+- 精确95ab055已非强制推送到原仓库恢复分支，并ls-remote回读匹配。已创建并附加[草稿PR #4](https://github.com/Richman2020/live-translation-openai-realtime-api/pull/4)，保持open/draft、未合并。实际base为交接分支 `codex/cloud-phone-conversation-duplicate-header-fix-20261012` / `4f34fa313173e62d370e5f78c0780e4506848420`，head为上述恢复分支/95ab055；2提交、10路径、1282新增/43删除。没有默认使用旧main或更新其他人的提交。
+- [Offline phone regression #66](https://github.com/Richman2020/live-translation-openai-realtime-api/actions/runs/38329410460)，run `38329410460`、job `115075476483`、attempt1，2026-10-13 08:55:25北京时间最终completed/success，全部steps成功，未重触发或重跑。本轮Hosted CI实际1290 total/1285 pass/5既有Windows skip/0fail/0cancel，锁定安装、SDK/build、typecheck、JS语法、Docker隔离artifact及format均通过；七组浏览器16/59/65/62/27/48/82通过，externalRequests与exceptions全0，六个供应商fixture组realSupplierCalls=0，纯conversation组未输出该字段。CI Chrome154与此前本地Chrome151分开记录，不沿用旧包成绩。
+- CI checkout为临时PR merge `14514c2a0e61ca3c2b0ca7fb27ed56ac5987760d`，父提交4f34/95ab055；独立Git-data回读确认完整tree与候选一致 `e500e26f9cfdc0aac8a5a8ae1686b2d1b5573fd1`，因此覆盖批准候选。未来部署仍固定95ab055，不使用临时merge SHA。
+- Railway只读仍为指定 `ai-phone-portal-trial` / `145aa27a-3a84-4e4d-91f9-b97f33bf6d42`、staging `c5db5ddb-26b6-48ce-b920-dc1ebbe30fa8`、`ai-phone-test` / `407bede7-11b6-4260-b055-a8045dc71588`。线上精确 `4f34fa313173e62d370e5f78c0780e4506848420`，部署/回退点 `922a6a82-1039-41ec-9356-4a1f6ab547ce` SUCCESS/Online、canRollback=true，无暂存/待发布。尚未发布候选、未创建平台patch，没有新部署ID；portal-test未操作。
+- 用户转交dot页面核验：2026-10-13 08:53:29北京时间，本账期Oct9–Nov9，portal-test $0.1462、ai-phone-test $0.0466、项目合计$0.1928，Hobby；未扣基线，时间仅页面读取时间、不是计费数据更新时间。本执行接口无账单读取能力，不冒充独立平台实读。沿用合计$3提醒/$4由用户决定关停，提醒非硬封顶，电话和模型另算；不升级/新建付费资源。
+- 未核验且阻塞发布：Railway实际 `AI_PHONE_RUNTIME_MODE=cloud`、`CLOUD_SERVICE_MODE=phone`、`CLOUD_OUTGOING_PAIRED_CAPTIONS_ENABLED=false`、`CLOUD_WARM_INSTANCES=1`；`CLOUD_PUBLIC_ORIGIN`/`PUBLIC_BASE_URL`为固定HTTPS origin；`CLOUD_PUBLIC_CALLBACK_CONFIRMED=true`的事实依据；`CLOUD_TEST_TARGET_NUMBER`的授权目标及末四位；`TWILIO_TWIML_APP_SID`/`TWILIO_ACCOUNT_SID`/`TWILIO_CALLER_NUMBER`与既有Twilio App/账户/号码关联。list_variables实际valuesRedacted=true，仅变量名不算通过。Twilio控制台当前需由既有授权操作人登录核对App Voice URL固定 `/voice/client`、POST、号码关联，不能猜测或新增凭据/权限。完整核验表见本轮资料报告。
+- 平台域名可见，现有入口为 `https://ai-phone-test-staging.up.railway.app/controlled`、预期同源WSS `/voice/media`；真实公网HTTP/媒体握手、Google登录、实际controller/耳麦/两向通话/字幕/挂断清理仍未验收。当前云网络策略不允许该公网host，本轮未绕过限制或以HTTP200/部署状态代替通话证据。用户在配置核验完成后再推进一次已授权发布；未请求/执行试打，既有1通/5分钟/$5仅建议且未获批准。
+- 本轮发布与核验依据保存在 `/workspace/ai-phone-reference/publication-20261013-95ab055`，含发布前全文快照、push回执、PR元数据、CI日志及独立终态核验、平台预检和缺项表。此新增PROGRESS记录仅本地未提交/未推送，HEAD和远端候选仍95ab055，原候选PROGRESS副本单独保留，避免把新记录夹入批准部署。无业务修改、安装、合并、平台写入、真实电话或付费模型调用；等待dot返回实际配置/供应商核验结果。
+
+## 历史：锁依赖与回调离线复验通过，今晚一通试打待发布批准（2026-10-12）
 
 - 北京时间17:43记录。本轮优先是今晚一次真实外呼翻译试验，先恢复可测试链路；完整28需求保持，不等待或顺带重构字幕、声音、登录、来电。实际目录 `/workspace/ai-phone-cloud-recovery-20261012`、分支 `codex/ai-phone-cloud-recovery-20261012`，检查前HEAD `109977e2e317b1fd640ce59101f5047ca891454f` 且干净；原目录、附件/审计成果保持。
 - 用户批准的 `npm ci --include=dev --ignore-scripts --no-audit --no-fund --registry=https://registry.npmjs.org` 实际exit0，added549packages，安装生命周期始终禁用。未升级依赖、改锁、开脚本或装全局工具；tsx/esbuild实际可用。锁SHA仍 `3577eb5548e3f44086b3a8db7fb2483751f9af3dc7792a0728e145e025c13267`。Voice SDK仅从现有锁包本地复制准备，不是安装脚本或用户电脑操作。

@@ -23,6 +23,8 @@ export type ControllerLeaseStatus = Readonly<{
   tabMatches: boolean;
   epoch: number;
   expiresAt: number | null;
+  /** Informational only; it cannot restore a document's private proof. */
+  serverMaintained?: true;
 }>;
 
 export class ControllerLeaseError extends Error {
@@ -42,6 +44,10 @@ type LeaseRecord = {
   epoch: number;
   issuedAt: number;
   expiresAt: number;
+  connection?: {
+    callId: string;
+    deadline: () => number | undefined;
+  };
 };
 type BoundState = {
   context: CloudAccessContext;
@@ -82,8 +88,8 @@ function proofFields(proof: ControllerProof): ControllerProof {
   return { tabId, leaseId, epoch };
 }
 
-/** One in-memory controller. No identity provider, persistence or implicit lease
- * extension: only explicit authenticated POST renew extends the deadline.
+/** One in-memory controller. A verified call may supply a private, finite media
+ * connection deadline. Reads do not extend that connection or its identity.
  * The caller must supply its active/preparing/unconfirmed-cleanup busy gate to
  * acquire. An expired lease does not prove that a provider call was cleaned up.
  */
@@ -142,11 +148,95 @@ export class CloudControllerLeases {
     });
   }
 
+  private connectionCurrent(record: LeaseRecord, now: number): boolean {
+    if (!record.connection) return false;
+    const deadline = record.connection.deadline();
+    if (deadline === undefined) return false;
+    if (!Number.isSafeInteger(deadline) || deadline <= now)
+      throw new CloudAccessError('FORBIDDEN');
+    // The witness deadline advances only when the verified transport answers
+    // a server ping. Polling/SSE and silent model output cannot manufacture it.
+    record.expiresAt = Math.min(
+      deadline,
+      this.policy.expiresAt(record.owner, 'mutate'),
+    );
+    return true;
+  }
+
+  /** Server-only binding: copied proofs or read contexts cannot install one.
+   * The manager returns no witness before its original media admission passes.
+   */
+  bindCallConnection(
+    bound: BoundControllerLease,
+    callId: string,
+    deadline: () => number | undefined,
+  ): void {
+    this.authorizeCurrent(bound);
+    requireTabId(callId);
+    if (Object.prototype.toString.call(deadline) !== '[object Function]')
+      throw new CloudAccessError('FORBIDDEN');
+    const state = this.issued.get(bound)!;
+    if (
+      state.record.connection &&
+      state.record.connection.callId !== callId &&
+      state.record.connection.deadline() !== undefined
+    )
+      throw new CloudAccessError('FORBIDDEN');
+    state.record.connection = { callId, deadline };
+  }
+
+  /** After an accepted hangup, retain only a finite authenticated cleanup
+   * response window. The ended manager never grants further media admission.
+   */
+  retainForCleanup(bound: BoundControllerLease, callId: string): void {
+    this.authorizeCurrent(bound);
+    const state = this.issued.get(bound)!;
+    if (state.record.connection && state.record.connection.callId !== callId)
+      return;
+    const now = this.time();
+    const expiresAt = Math.min(
+      now + this.ttlMs,
+      this.policy.expiresAt(state.context, 'mutate'),
+    );
+    state.record.connection = undefined;
+    state.record.expiresAt = expiresAt;
+  }
+
+  /** Cleanup-only: callers must first prove that this exact call has accepted
+   * an end intent. Fresh identity/CSRF and the original secret tab proof remain
+   * mandatory, but a retired control TTL cannot prevent terminating its legs.
+   * This returns no handle and cannot renew, join or restore a controller.
+   */
+  authorizeCleanup(
+    context: CloudAccessContext,
+    proof: ControllerProof,
+    original: BoundControllerLease,
+  ): void {
+    this.policy.revalidate(context, 'mutate');
+    const state = this.issued.get(original);
+    if (!state) throw new CloudAccessError('UNAUTHORIZED');
+    if (this.time() < state.record.issuedAt)
+      throw new CloudAccessError('FORBIDDEN');
+    const fields = proofFields(proof);
+    if (
+      !sameOwner(state.record.owner, context) ||
+      fields.tabId !== state.record.tabId ||
+      fields.epoch !== state.record.epoch ||
+      !timingSafeEqual(
+        Buffer.from(fields.leaseId),
+        Buffer.from(state.record.leaseId),
+      )
+    )
+      throw new CloudAccessError('FORBIDDEN');
+    this.policy.revalidate(context, 'mutate');
+  }
+
   private requireLease(context: CloudAccessContext, proof: ControllerProof) {
     this.policy.revalidate(context, 'mutate');
     const fields = proofFields(proof);
     const record = this.current;
     const now = this.time();
+    if (record) this.connectionCurrent(record, now);
     if (
       !record ||
       now < record.issuedAt ||
@@ -172,6 +262,7 @@ export class CloudControllerLeases {
     if (!options || typeof options.busy !== 'boolean')
       throw new CloudAccessError('FORBIDDEN');
     const now = this.time();
+    if (this.current) this.connectionCurrent(this.current, now);
     if (options.busy || (this.current && now < this.current.expiresAt))
       throw new ControllerLeaseError();
     const authExpiresAt = this.policy.expiresAt(context, 'mutate');
@@ -222,6 +313,8 @@ export class CloudControllerLeases {
     const state = this.issued.get(bound);
     if (!state) throw new CloudAccessError('UNAUTHORIZED');
     const now = this.time();
+    if (state.record === this.current)
+      this.connectionCurrent(state.record, now);
     if (
       state.record !== this.current ||
       now < state.record.issuedAt ||
@@ -241,6 +334,7 @@ export class CloudControllerLeases {
     if (tabId !== undefined) requireTabId(tabId);
     const now = this.time();
     const record = this.current;
+    const maintained = !!record && this.connectionCurrent(record, now);
     const active = record && now >= record.issuedAt && now < record.expiresAt;
     const ownSession = !!active && sameOwner(record.owner, context);
     return Object.freeze({
@@ -249,6 +343,7 @@ export class CloudControllerLeases {
       tabMatches: ownSession && tabId === record.tabId,
       epoch: this.epoch,
       expiresAt: active ? record.expiresAt : null,
+      ...(active && maintained ? { serverMaintained: true as const } : {}),
     });
   }
 }

@@ -397,7 +397,7 @@ class CdpPage {
   }
   async state() {
     return this.evaluate(
-      `({ready:document.documentElement.dataset.phoneReady, authenticated:document.getElementById('google-logout') && !document.getElementById('google-logout').hidden && !document.getElementById('google-logout').disabled, loginVisible:document.getElementById('google-login') && !document.getElementById('google-login').hidden, start:!document.getElementById('start-call').disabled, acquire:!document.getElementById('enable-device').disabled})`,
+      `({ready:document.documentElement.dataset.phoneReady, authenticated:document.getElementById('google-logout') && !document.getElementById('google-logout').hidden && !document.getElementById('google-logout').disabled, loginVisible:document.getElementById('google-login') && !document.getElementById('google-login').hidden, start:!document.getElementById('start-call').disabled, manualControlAbsent:!document.getElementById('enable-device') && !document.getElementById('renew-control') && !document.getElementById('keep-online-toggle')})`,
     );
   }
 }
@@ -751,10 +751,23 @@ try {
       captureBeyondViewport: false,
     })
   ).data;
-  await page.click('enable-device');
-  await eventually(
-    async () => (await page.state()).start,
-    'Explicit controller after Google login',
+  check(
+    (await page.state()).manualControlAbsent,
+    true,
+    'actual phone page removes manual acquisition, renewal and keep-control actions',
+  );
+  // Login regression only: exercise the authenticated controller route without
+  // dialing or creating a Device. Automatic acquisition on dial is covered by
+  // the controlled browser suite with offline media and provider fixtures.
+  check(
+    await page.evaluate(`(async () => {
+      const session = await fetch('/api/browser-session',{credentials:'same-origin'}).then(r=>r.json());
+      return fetch('/api/controller/acquire',{method:'POST',credentials:'same-origin',
+        headers:{'Content-Type':'application/json','x-phone-csrf':session.csrfToken},
+        body:JSON.stringify({tabId:'offline-google-route-probe'})}).then(r=>r.status);
+    })()`),
+    200,
+    'offline controller route probe requires verified login and session CSRF',
   );
   check(
     Boolean(controllerProof),

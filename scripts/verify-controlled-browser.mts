@@ -88,8 +88,11 @@ const apiRequests: {
 const issuedGrants = new Map<string, CloudVoiceGrant>();
 const bridges: BridgeOptions[] = [];
 const providerCreates: Record<string, unknown>[] = [];
+const providerSids: string[] = [];
 const providerHangups: string[] = [];
 const preparations = { voice: 0, public: 0 };
+const heldVoiceReservations = new Set<object>();
+const acquirePortFacts: { busy: boolean; heldVoiceReservations: number }[] = [];
 let completedControllerRevocations = 0;
 let refreshRevokeGate: ReturnType<typeof deferred> | undefined;
 let heldRefreshRevocations = 0;
@@ -99,7 +102,6 @@ let voiceGate: ReturnType<typeof deferred> | undefined;
 let publicGate: ReturnType<typeof deferred> | undefined;
 let failHangup = false;
 let recoverOnBrowserHangup = false;
-let clockOffset = 0;
 let sidSequence = 0;
 const nextSid = () => `CA${(++sidSequence).toString(16).padStart(32, '0')}`;
 const token = Buffer.alloc(32, 81).toString('base64url');
@@ -115,7 +117,7 @@ const identity: CloudAuthSession = {
   revoked: false,
   csrfToken: csrf,
 };
-const now = () => Date.now() + clockOffset;
+const now = Date.now;
 let app: Awaited<ReturnType<typeof buildSoloServer>> | undefined;
 let backendPort = 0;
 let origin = '';
@@ -241,7 +243,7 @@ class CdpPage {
   }
   async state() {
     return this.evaluate(
-      `({ready:document.documentElement.dataset.phoneReady, acquire:!document.getElementById('enable-device').disabled, acquireText:document.getElementById('enable-device').textContent, start:!document.getElementById('start-call').disabled, end:!document.getElementById('end-call').disabled, mute:!document.getElementById('mute-button').disabled, error:document.getElementById('app-error').textContent, connection:document.getElementById('connection-text').textContent, engine:document.getElementById('translation-engine').value, title:document.getElementById('readiness-title').textContent})`,
+      `({ready:document.documentElement.dataset.phoneReady, manualControls:Boolean(document.querySelector('#enable-device,#renew-control,#keep-online-toggle')), start:!document.getElementById('start-call').disabled, end:!document.getElementById('end-call').disabled, mute:!document.getElementById('mute-button').disabled, error:document.getElementById('app-error').textContent, connection:document.getElementById('connection-text').textContent, engine:document.getElementById('translation-engine').value, title:document.getElementById('readiness-title').textContent})`,
     );
   }
 }
@@ -493,6 +495,7 @@ try {
       create: async (parameters) => {
         providerCreates.push(parameters);
         const sid = nextSid();
+        providerSids.push(sid);
         setTimeout(async () => {
           try {
             const url = new URL(parameters.url as string);
@@ -533,7 +536,16 @@ try {
     resolveSession: (credential) =>
       credential === token ? { ...identity } : null,
   });
-  const leases = new CloudControllerLeases({ policy, now, ttlMs: 30000 });
+  const leases = new (class extends CloudControllerLeases {
+    override acquire(...args: Parameters<CloudControllerLeases['acquire']>) {
+      // Observe the real access-layer admission decision without changing it.
+      acquirePortFacts.push({
+        busy: args[2]?.busy ?? false,
+        heldVoiceReservations: heldVoiceReservations.size,
+      });
+      return super.acquire(...args);
+    }
+  })({ policy, now, ttlMs: 30000 });
   const voiceJoin = new CloudVoiceJoin({
     policy,
     now,
@@ -548,7 +560,14 @@ try {
         preparations.voice++;
         const gate = voiceGate;
         if (gate) await gate.promise;
-        return { assertCurrent() {}, release: async () => undefined };
+        const reservation = {};
+        heldVoiceReservations.add(reservation);
+        return {
+          assertCurrent() {},
+          release: async () => {
+            heldVoiceReservations.delete(reservation);
+          },
+        };
       },
     },
   });
@@ -662,7 +681,22 @@ try {
     return page;
   }
   const page = await openPage();
-  await eventually(async () => (await page.state()).acquire, 'Idle authenticated page connected');
+  await eventually(
+    async () => (await page.state()).start,
+    'Idle authenticated page connected',
+  );
+  check(
+    (await page.state()).manualControls,
+    false,
+    'controlled page removes manual acquisition, renewal and keep-control controls',
+  );
+  check(
+    await page.evaluate(
+      `document.getElementById('readiness-copy').textContent.includes('秒内有效')`,
+    ),
+    false,
+    'controlled page has no controller countdown',
+  );
   check(
     await page.evaluate(`document.documentElement.dataset.phoneSurface`),
     'controlled',
@@ -737,12 +771,17 @@ try {
   check(acquireIndex >= 0 && recheckIndex > acquireIndex && createIndex > recheckIndex, true, 'first direct dial rechecks authority before the original call route');
   const observer = await openPage();
   check((await observer.state()).start, false, 'second real tab remains read-only while the first controls');
-  check((await observer.state()).acquire, false, 'read-only tab cannot offer acquisition while another tab holds control');
+  check(
+    (await observer.state()).manualControls,
+    false,
+    'read-only tab has no manual control action',
+  );
   check(await observer.evaluate(`document.getElementById('readiness-title').textContent.includes('其他页面')`), true, 'observer has a clear multi-page control conflict message');
-  const renewBefore = apiRequests.filter(item => item.path === '/api/controller/renew').length;
-  await page.click('renew-control');
-  await eventually(() => apiRequests.filter(item => item.path === '/api/controller/renew').length === renewBefore + 1, 'Explicit controller renew');
-  check(await page.evaluate('window.__offlineVoice.registers'), 0, 'renew performs no global SDK registration');
+  check(
+    await page.evaluate('window.__offlineVoice.registers'),
+    0,
+    'automatic per-call ownership performs no global SDK registration',
+  );
   check(
     apiRequests.filter(
       (item) => item.path === '/api/calls' && item.method === 'POST',
@@ -961,6 +1000,59 @@ try {
     true,
     'page mute controls only its current SDK call',
   );
+  async function verifyBackgroundCall() {
+    await eventually(
+      async () => (await page.state()).mute,
+      'Accepted SDK before freezing timers',
+    );
+    if (!(await page.evaluate('window.__offlineVoice.muted')))
+      await page.click('mute-button');
+    const backgroundHangups = providerHangups.length;
+    await observer.foreground();
+    await eventually(
+      () => page.evaluate('document.hidden'),
+      'Muted accepted owner tab is hidden',
+    );
+    await page.send('Page.setWebLifecycleState', { state: 'frozen' });
+    try {
+      // The browser's JS timers are paused while the real signed media sockets
+      // and server ping/pong witness remain connected, including silence.
+      await pause(31000);
+      check(
+        manager.activeSession?.status,
+        'active',
+        'normal silent media stay active beyond the old 30-second browser controller deadline',
+      );
+      check(
+        providerHangups.length,
+        backgroundHangups,
+        'background timer throttling does not hang up either healthy leg',
+      );
+      check(
+        (await observer.state()).start,
+        false,
+        'another page cannot dial while the background call remains active',
+      );
+    } finally {
+      await page.send('Page.setWebLifecycleState', { state: 'active' });
+    }
+    check(
+      await page.evaluate('window.__offlineVoice.lastCall.closed===true'),
+      false,
+      'old local expiry does not disconnect the accepted SDK',
+    );
+    check(
+      await page.evaluate('window.__offlineVoice.muted'),
+      true,
+      'mute remains intact while accepted media stay connected in the background',
+    );
+    await page.foreground();
+    await page.click('refresh-controlled-state');
+    await eventually(
+      async () => (await page.state()).mute,
+      'Existing accepted owner recovers authoritative status without manual renewal',
+    );
+  }
   await page.click('end-call');
   await eventually(
     () => !manager.controlAdmissionBlocked,
@@ -1120,10 +1212,9 @@ try {
     interruptedRenewals,
     'pending SDK reconnect performs no implicit controller renewal',
   );
-  await page.click('enable-device');
   await eventually(
     async () => (await page.state()).start,
-    'Explicit controller after pending SDK outage',
+    'Direct dialing is available after pending SDK outage cleanup',
   );
   await dial();
   await eventually(
@@ -1157,10 +1248,9 @@ try {
     false,
     'returning to a disconnected SDK tab cannot revive mute',
   );
-  await page.click('enable-device');
   await eventually(
     async () => (await page.state()).start,
-    'Explicit controller after hidden SDK disconnect',
+    'Direct dialing is available after hidden SDK disconnect cleanup',
   );
   // A real navigation while create readiness awaits revokes the captured lease.
   await eventually(
@@ -1176,6 +1266,36 @@ try {
     'Create readiness pending',
   );
   await page.foreground();
+  await page.evaluate(
+    `document.querySelector('[data-view="history"]').click()`,
+  );
+  const pendingNavigationReads = apiRequests.filter((item) =>
+    item.path.startsWith('/api/browser-session'),
+  ).length;
+  const navigationAuthorityWrites = apiRequests.filter((item) =>
+    ['/api/controller/acquire', '/api/controller/renew'].includes(item.path),
+  ).length;
+  await page.evaluate(
+    `document.querySelector('[data-view="workspace"]').click()`,
+  );
+  await eventually(
+    () =>
+      apiRequests.filter((item) => item.path.startsWith('/api/browser-session'))
+        .length > pendingNavigationReads,
+    'Returning to workspace issues a read while readiness is still pending',
+  );
+  check(
+    await page.evaluate(
+      `fetch('/api/browser-session?tabId=readonly-navigation-probe',{credentials:'same-origin',cache:'no-store'}).then(response=>response.json()).then(value=>value.busy)`,
+    ),
+    true,
+    'the real backend still reports pending readiness rather than confirmed idle',
+  );
+  check(
+    (await page.state()).start,
+    false,
+    'returning to workspace cannot bypass genuinely pending preparation',
+  );
   await page.evaluate(
     `document.querySelector('[data-view="history"]').click()`,
   );
@@ -1213,10 +1333,111 @@ try {
   await page.evaluate(
     `document.querySelector('[data-view="workspace"]').click()`,
   );
-  await page.click('enable-device');
   await eventually(
     async () => (await page.state()).start,
     'New controller after navigation',
+  );
+  check(
+    apiRequests.filter((item) =>
+      ['/api/controller/acquire', '/api/controller/renew'].includes(item.path),
+    ).length,
+    navigationAuthorityWrites,
+    'confirmed idle workspace navigation restores direct dialing using reads without acquiring or renewing',
+  );
+  check(
+    (await page.state()).manualControls,
+    false,
+    'returning to workspace requires no manual control button',
+  );
+  for (const code of [20104, 31205, 31005]) {
+    await eventually(
+      async () => (await page.state()).start,
+      'Direct dialing before Device error diagnosis',
+    );
+    await dial();
+    await eventually(
+      async () =>
+        manager.activeSession?.status === 'active' && (await page.state()).mute,
+      'Accepted call before Device error diagnosis',
+    );
+    await page.evaluate(
+      `window.__retiredDiagnosticDevice=window.__offlineVoice.lastDevice;window.__offlineVoice.lastDevice.emit('error',{code:${code},message:'PRIVATE_ERROR_MUST_NOT_RENDER',token:'PRIVATE_ERROR_MUST_NOT_RENDER',url:'PRIVATE_ERROR_MUST_NOT_RENDER'});`,
+    );
+    await eventually(
+      () => !manager.controlAdmissionBlocked,
+      'Device error cleans both provider legs',
+    );
+    await eventually(
+      async () =>
+        (await page.evaluate(
+          'document.documentElement.dataset.controllerPhase',
+        )) === 'readonly',
+      'Device error retires local admission',
+    );
+    check(
+      (await page.state()).error,
+      code === 20104 || code === 31205
+        ? '电话信令令牌到期；正在确认线路清理。'
+        : '浏览器电话连接失败；正在确认线路清理。',
+      'Device error exposes only the allowlisted expiry category or generic failure',
+    );
+    check(
+      await page.evaluate(
+        `document.body.textContent.includes('PRIVATE_ERROR_MUST_NOT_RENDER')`,
+      ),
+      false,
+      'Device supplier error details stay out of the page',
+    );
+  }
+  await eventually(
+    async () => (await page.state()).start,
+    'Direct dialing after diagnosed Device cleanup',
+  );
+  await dial();
+  await eventually(
+    async () =>
+      manager.activeSession?.status === 'active' && (await page.state()).mute,
+    'New accepted call before a stale Device error',
+  );
+  const staleDeviceHangups = providerHangups.length;
+  await page.evaluate(
+    `window.__retiredDiagnosticDevice.emit('error',{code:20104,message:'PRIVATE_ERROR_MUST_NOT_RENDER'});`,
+  );
+  await pause(80);
+  check(
+    manager.activeSession?.status,
+    'active',
+    'a late retired Device error cannot terminate the next call',
+  );
+  check(
+    providerHangups.length,
+    staleDeviceHangups,
+    'a late Device error performs no cleanup for the new owner',
+  );
+  const remoteStatus = new URL(
+    providerCreates.at(-1)!.statusCallback as string,
+  );
+  const remoteEnded = await signed(
+    remoteStatus.pathname + remoteStatus.search,
+    { CallSid: providerSids.at(-1)!, CallStatus: 'completed' },
+  );
+  check(
+    remoteEnded.statusCode,
+    204,
+    'a signed matching remote completion callback ends the current call',
+  );
+  await eventually(
+    () => !manager.controlAdmissionBlocked,
+    'Remote completion confirms remaining-leg cleanup',
+  );
+  await eventually(
+    async () => !(await page.state()).mute && (await page.state()).start,
+    'Remote completion retires media and offers a new direct dial',
+  );
+  check(
+    await page.evaluate('window.__offlineVoice.lastCall.closed===true'),
+    true,
+    'remote completion disconnects the accepted browser SDK',
   );
   // A failure is a real SDK rejection after real per-call preparation.
   const failureCreates = providerCreates.length;
@@ -1241,7 +1462,6 @@ try {
     false,
     'SDK failure leaves no usable microphone button',
   );
-  await page.click('enable-device');
   await eventually(
     async () => (await page.state()).start,
     'Controller before uncertain cleanup',
@@ -1272,6 +1492,17 @@ try {
     uncertain.connection,
     '线路关闭待确认',
     'failed cleanup never reports a completed call',
+  );
+  await pause(31000);
+  check(
+    (await page.state()).end,
+    true,
+    'unconfirmed accepted-call cleanup remains retryable after the old controller deadline',
+  );
+  check(
+    (await page.state()).start,
+    false,
+    'cleanup-only retry cannot authorize another call after the old deadline',
   );
   const retryBefore = apiRequests.filter((item) =>
     /^\/api\/calls\/[^/]+\/hangup$/.test(item.path),
@@ -1362,17 +1593,18 @@ try {
     );
     await eventually(
       async () =>
-        (await page.state()).title === '只读标签页 · 控制权在其他页面，请在该页面结束或释放',
+        (await page.state()).title ===
+        '其他页面正在使用电话，请在该页面结束通话',
       'New document reads the still-held old controller',
     );
     const heldState = await page.state();
     check(
       {
         serverMode: controllerStatus().mode,
-        acquire: heldState.acquire,
+        manualControls: heldState.manualControls,
         start: heldState.start,
       },
-      { serverMode: 'held', acquire: false, start: false },
+      { serverMode: 'held', manualControls: false, start: false },
       'completed hangup with delayed real revoke leaves refreshed page safely read-only',
     );
     check(
@@ -1449,18 +1681,17 @@ try {
   );
   await page.click('refresh-controlled-state');
   await eventually(
-    async () => (await page.state()).acquire,
+    async () => (await page.state()).start,
     'Explicit refresh confirms controller availability',
   );
   check(
     {
-      acquire: (await page.state()).acquire,
+      manualControls: (await page.state()).manualControls,
       start: (await page.state()).start,
     },
-    { acquire: true, start: true },
+    { manualControls: false, start: true },
     'confirmed revoke and state refresh offer direct dialing without acquiring control',
   );
-  await page.click('enable-device');
   await eventually(
     async () => (await page.state()).start,
     'Controller after refresh',
@@ -1470,32 +1701,81 @@ try {
     () => manager.activeSession?.status === 'active',
     'Second controlled call',
   );
-  const expiredBefore = providerHangups.length;
-  clockOffset += 60000;
+  await verifyBackgroundCall();
+  const disconnectedBefore = providerHangups.length;
+  for (const socket of mediaSockets) socket.terminate();
   await eventually(
     () => !manager.controlAdmissionBlocked,
-    'Control expiry two-leg cleanup',
+    'Real media disconnect two-leg cleanup',
   );
   await eventually(
-    async () => (await page.evaluate('document.documentElement.dataset.controllerPhase')) === 'readonly' && !(await page.state()).mute,
-    'Expired controller UI',
+    async () =>
+      (await page.evaluate(
+        'document.documentElement.dataset.controllerPhase',
+      )) === 'readonly' && !(await page.state()).mute,
+    'Disconnected media owner UI',
   );
   check(
-    providerHangups.length - expiredBefore,
+    providerHangups.length - disconnectedBefore,
     2,
-    'control expiry cleans both live legs without relying on SSE renewal',
+    'real media loss still cleans both live legs despite automatic ownership maintenance',
   );
+  const observerBootstrap = () =>
+    access.browserSession(
+      policy.authenticate(
+        {
+          host: new URL(origin).host,
+          origin,
+          cookie: `${CLOUD_SESSION_COOKIE}=${token}`,
+        },
+        'read',
+        { surface: 'http', method: 'GET' },
+      ),
+    );
+  // Manager line cleanup can finish before the independent Voice reservation
+  // release and captured controller revoke. Wait for the real complete idle
+  // projection before testing a different page's explicit fresh dial.
+  await eventually(() => {
+    const current = observerBootstrap();
+    return (
+      current.controller.mode === 'available' &&
+      current.busy === false &&
+      current.activeSession === null &&
+      heldVoiceReservations.size === 0
+    );
+  }, 'Disconnected-call Voice cleanup and old controller revoke complete');
   await observer.click('refresh-controlled-state');
-  await observer.click('enable-device');
   await eventually(
     async () => (await observer.state()).start,
-    'Observer explicitly acquires after expiry',
+    'Observer can dial directly after confirmed disconnected-call cleanup',
   );
   await dial(observer);
-  await eventually(
+  try {
+    await eventually(
     () => manager.activeSession?.status === 'active',
     'Actual close fixture active',
   );
+  } catch (failure) {
+    console.error(
+      JSON.stringify({
+        fixture: 'observer-close-call',
+        page: await observer.state(),
+        serverStatus: manager.activeSession?.status || 'none',
+        serverRead: {
+          controllerMode: observerBootstrap().controller.mode,
+          busy: observerBootstrap().busy,
+          active: observerBootstrap().activeSession !== null,
+        },
+        latestAcquire: acquirePortFacts.at(-1),
+        fakeProviderCreates: providerCreates.length,
+        routes: apiRequests.slice(-20).map((item) => ({
+          method: item.method,
+          path: new URL(item.path, origin).pathname,
+        })),
+      }),
+    );
+    throw failure;
+  }
   const closeHangups = providerHangups.length;
   const closed = await fetch(
     `http://127.0.0.1:${port}/json/close/${observer.targetId}`,

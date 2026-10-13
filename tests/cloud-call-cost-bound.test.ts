@@ -236,6 +236,8 @@ function journalFixture(
     controller: { leaseId: 'lease', tabId: 'tab', epoch: 1 },
     issuedAt: time,
     expiresAt: time + 1000,
+    authExpiresAt: time + 1000,
+    tokenExpiresAt: time + 1000,
     incomingAllow: false,
     outgoingApplicationSid: f.applicationSid,
     outgoing: { callId, identity: 'identity' },

@@ -173,6 +173,8 @@ async function fixture(t: TestContext, outgoingCaptions: boolean) {
     controller: { leaseId: 'offline_lease', tabId: 'offline_tab', epoch: 1 },
     issuedAt: now,
     expiresAt: now + 60000,
+    authExpiresAt: now + 60000,
+    tokenExpiresAt: now + 60000,
     incomingAllow: false,
     outgoingApplicationSid: applicationSid,
     outgoing: { callId: call.id, identity },

@@ -108,6 +108,8 @@ export type OutboundCallAdmission = {
   authorizeCurrent: () => void;
   /** Explicit controlled reservation: local presence never grants admission. */
   deferBrowserJoin?: true;
+  /** Trusted cloud choice; a verified local stream supplies server liveness. */
+  maintainControllerConnection?: true;
   authorizeBrowserJoin?: (
     fields: Record<string, string>,
   ) => 'join' | 'replay' | 'cleanup';
@@ -175,6 +177,15 @@ type Session = {
   journalUnconfirmed: boolean;
   localLimitReady: boolean;
   ended: boolean;
+  controllerConnection?: {
+    socket: WebSocket;
+    issuedAt: number;
+    observedAt: number;
+    expiresAt: number;
+    challenge?: Buffer;
+    timer?: ReturnType<typeof setInterval>;
+    pong: (data: Buffer) => void;
+  };
   ending?: Promise<void>;
   provider: CallProvider;
 };
@@ -187,6 +198,8 @@ export class SessionError extends Error {
   }
 }
 const callSidValid = (sid: string) => /^CA[0-9a-f]{32}$/i.test(sid || '');
+const CONTROLLER_PING_MS = 10_000;
+const CONTROLLER_CONNECTION_MS = 30_000;
 const terminal = new Set([
   'completed',
   'busy',
@@ -357,9 +370,118 @@ export class SessionManager extends EventEmitter {
     return this.sessions.has(id);
   }
 
+  hasEndIntent(id: string): boolean {
+    return this.sessions.get(id)?.ended === true;
+  }
+
   get activeSession(): CallView | null {
     const session = this.activeId && this.sessions.get(this.activeId);
     return session ? { ...session.view } : null;
+  }
+
+  /** A server-created witness, never a browser claim or SSE keepalive. Only a
+   * verified local stream gets one; an ended/closed connection cannot return it.
+   */
+  controllerConnectionDeadline(id: string): number | undefined {
+    const session = this.sessions.get(id);
+    const connection = session?.controllerConnection;
+    if (!session || session.ended || !connection) return undefined;
+    const now = this.now();
+    if (
+      !Number.isSafeInteger(now) ||
+      now < connection.observedAt ||
+      session.sockets.local !== connection.socket ||
+      connection.socket.readyState !== WebSocket.OPEN ||
+      now >= connection.expiresAt
+    ) {
+      this.track(this.end(id, 'PHONE_STREAM_TIMEOUT'));
+      throw new SessionError('PHONE_STREAM_TIMEOUT', 403);
+    }
+    connection.observedAt = now;
+    return connection.expiresAt;
+  }
+
+  private stopControllerConnection(session: Session): void {
+    const connection = session.controllerConnection;
+    session.controllerConnection = undefined;
+    if (!connection) return;
+    clearInterval(connection.timer);
+    connection.socket.off('pong', connection.pong);
+    connection.challenge = undefined;
+  }
+
+  private monitorControllerConnection(
+    session: Session,
+    socket: WebSocket,
+  ): void {
+    if (!session.admission?.maintainControllerConnection) return;
+    const issuedAt = this.now();
+    if (
+      !Number.isSafeInteger(issuedAt) ||
+      issuedAt < 0 ||
+      socket.readyState !== WebSocket.OPEN ||
+      typeof socket.ping !== 'function'
+    )
+      throw new SessionError('INVALID_MEDIA_STREAM', 403);
+    const connection: NonNullable<Session['controllerConnection']> = {
+      socket,
+      issuedAt,
+      observedAt: issuedAt,
+      expiresAt: issuedAt + CONTROLLER_CONNECTION_MS,
+      pong: () => {},
+    };
+    const current = () =>
+      !session.ended &&
+      session.controllerConnection === connection &&
+      session.sockets.local === socket;
+    const failed = () => {
+      if (current())
+        this.track(this.end(session.view.id, 'PHONE_STREAM_TIMEOUT'));
+    };
+    connection.pong = (data) => {
+      if (
+        !current() ||
+        !connection.challenge ||
+        !Buffer.isBuffer(data) ||
+        !data.equals(connection.challenge)
+      )
+        return;
+      const now = this.now();
+      if (
+        !Number.isSafeInteger(now) ||
+        now < connection.observedAt ||
+        now >= connection.expiresAt ||
+        socket.readyState !== WebSocket.OPEN
+      ) {
+        failed();
+        return;
+      }
+      connection.challenge = undefined;
+      connection.observedAt = now;
+      connection.expiresAt = now + CONTROLLER_CONNECTION_MS;
+    };
+    const ping = () => {
+      if (!current()) return;
+      try {
+        this.controllerConnectionDeadline(session.view.id);
+        if (socket.readyState !== WebSocket.OPEN) {
+          failed();
+          return;
+        }
+        if (connection.challenge) return;
+        connection.challenge = randomBytes(16);
+        socket.ping(connection.challenge, false, (error) => {
+          if (error) failed();
+        });
+      } catch {
+        failed();
+      }
+    };
+    session.controllerConnection = connection;
+    socket.on('pong', connection.pong);
+    connection.timer = setInterval(ping, CONTROLLER_PING_MS);
+    connection.timer.unref?.();
+    ping();
   }
 
   setPresence(available: boolean): void {
@@ -597,7 +719,10 @@ export class SessionManager extends EventEmitter {
           (admission.deferBrowserJoin !== true ||
             typeof admission.authorizeBrowserJoin !== 'function')) ||
         (admission.authorizeBrowserJoin !== undefined &&
-          admission.deferBrowserJoin !== true)
+          admission.deferBrowserJoin !== true) ||
+        (admission.maintainControllerConnection !== undefined &&
+          (admission.maintainControllerConnection !== true ||
+            admission.deferBrowserJoin !== true))
       )
         throw new SessionError('INVALID_CALL_ADMISSION');
       trusted = Object.freeze({ ...admission });
@@ -1076,6 +1201,8 @@ export class SessionManager extends EventEmitter {
             this.end(session.view.id, 'INVALID_MEDIA_MESSAGE');
         }
       });
+      if (role === 'local') this.monitorControllerConnection(session, socket);
+      if (session.ended) return true;
       if (!session.bridge) {
         session.bridge = this.bridgeFactory({
           apiKey: session.config.OPENAI_API_KEY,
@@ -1502,6 +1629,7 @@ export class SessionManager extends EventEmitter {
     if (!session) throw new SessionError('SESSION_NOT_FOUND', 404);
     if (session.ended) return;
     session.ended = true;
+    this.stopControllerConnection(session);
     session.providerUsage?.close();
     session.view.translationReady = false;
     session.readyRoles.clear();
