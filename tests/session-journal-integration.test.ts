@@ -762,6 +762,8 @@ test('real durable journal and manager record both legs and termination while re
     controller: { leaseId: 'offline_lease', tabId: 'offline_tab', epoch: 1 },
     issuedAt: now,
     expiresAt: now + 60000,
+    authExpiresAt: now + 60000,
+    tokenExpiresAt: now + 60000,
     incomingAllow: false,
     outgoingApplicationSid: `AP${'a'.repeat(32)}`,
     outgoing: { callId: call.id, identity },

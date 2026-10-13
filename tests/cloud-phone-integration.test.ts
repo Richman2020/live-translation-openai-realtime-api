@@ -161,7 +161,9 @@ async function fixture(
     externalNetwork: 0,
   };
   const providerState = { failHangup: false };
+  const pings = new Map<WebSocket, Buffer[]>();
   const manager = new SessionManager({
+    now: () => identity.now,
     providerFactory: () => {
       counters.factory += 1;
       return {
@@ -404,9 +406,11 @@ async function fixture(
     role: 'local' | 'remote',
     nonce: string,
     sid: string,
+    autoPong = true,
   ) {
     assert.ok(loopbackPort);
     const socket = new WebSocket(`ws://127.0.0.1:${loopbackPort}/voice/media`, {
+      autoPong,
       headers: {
         host: 'phone.example.com',
         'x-twilio-signature': twilio.getExpectedTwilioSignature(
@@ -417,6 +421,8 @@ async function fixture(
       },
     });
     socket.on('error', () => undefined);
+    pings.set(socket, []);
+    socket.on('ping', (data) => pings.get(socket)!.push(Buffer.from(data)));
     t.after(() => socket.terminate());
     await once(socket, 'open');
     socket.send(
@@ -490,6 +496,7 @@ async function fixture(
     store,
     directory,
     identity,
+    pings,
     policy,
     manager,
     access,
@@ -1098,6 +1105,7 @@ test('revoked owner cannot join its old signed browser callback and it is cleane
 async function fakeSdkTelephone(
   f: Awaited<ReturnType<typeof fixture>>,
   call: { id: string; connectionParams: { nonce: string } },
+  autoPong = true,
 ) {
   const response = await f.voice(call.id);
   assert.equal(response.statusCode, 200, response.body);
@@ -1120,6 +1128,7 @@ async function fakeSdkTelephone(
     'local',
     call.connectionParams.nonce,
     localSid,
+    autoPong,
   );
   await until(
     () => f.created.length === 1,
@@ -1146,6 +1155,164 @@ async function fakeSdkTelephone(
   );
   return { permission, browser, phone };
 }
+
+test('server pings keep a silent verified call alive beyond its original lease without browser renewal or SSE', async (t) => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const f = await fixture(t, { listen: true });
+  for (const session of f.identity.sessions.values()) {
+    session.idleExpiresAt = 200000;
+    session.absoluteExpiresAt = 200000;
+  }
+  const call = (await f.call()).json();
+  const { browser, phone } = await fakeSdkTelephone(f, call);
+  await until(() => f.pings.get(browser)!.length > 0, 'initial server ping');
+  await tick();
+  for (let step = 0; step < 6; step += 1) {
+    f.identity.now += 10000;
+    t.mock.timers.tick(10000);
+    await until(
+      () =>
+        f.manager.controllerConnectionDeadline(call.id) ===
+        f.identity.now + 30000,
+      'pong renews the finite transport witness',
+    );
+    assert.equal(f.manager.activeSession?.status, 'active');
+  }
+  const status = (
+    await f.app.inject({
+      url: '/api/browser-session?tabId=tab-a',
+      headers: readHeaders(),
+    })
+  ).json();
+  assert.equal(status.controller.serverMaintained, true);
+  assert.ok(status.controller.expiresAt > 31000);
+  assert.equal((await f.acquire(tokenB)).statusCode, 409);
+  assert.equal(
+    (await f.controller('acquire', tokenA, { tabId: 'second-tab' })).statusCode,
+    409,
+  );
+  assert.equal((await f.status(tokenB)).json().activeSession, null);
+  assert.equal(
+    (await f.hangup(call.id)).statusCode,
+    200,
+    'Accepted hangup remains authorized after retiring the media witness',
+  );
+  assert.equal(f.manager.controllerConnectionDeadline(call.id), undefined);
+  assert.deepEqual([...f.terminated].sort(), [localSid, remoteSid].sort());
+  assert.equal(f.counters.externalNetwork, 0);
+  browser.terminate();
+  phone.terminate();
+});
+
+test('an open media socket without matching pongs expires, and a late pong cannot revive its call or controller', async (t) => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const f = await fixture(t, { listen: true, leaseTtlMs: 1000 });
+  const call = (await f.call()).json();
+  const { browser, phone } = await fakeSdkTelephone(f, call, false);
+  await until(
+    () => f.pings.get(browser)!.length > 0,
+    'server challenge reaches fake phone',
+  );
+  const challenge = f.pings.get(browser)![0];
+  const serverLocal = [...f.app.websocketServer.clients][0];
+  browser.pong(Buffer.alloc(16, 99)); // Unsolicited/wrong pong must not extend it.
+  await tick();
+  await tick();
+  f.identity.now = 30000;
+  t.mock.timers.tick(29000);
+  assert.equal(f.manager.activeSession?.status, 'active');
+  assert.equal(f.manager.controllerConnectionDeadline(call.id), 31000);
+  f.identity.now = 31000;
+  t.mock.timers.tick(1000);
+  await until(
+    () => f.manager.isCleanupConfirmed(call.id),
+    'half-open media cleanup',
+  );
+  assert.deepEqual([...f.terminated].sort(), [localSid, remoteSid].sort());
+  assert.equal(f.manager.controllerConnectionDeadline(call.id), undefined);
+  assert.equal((await f.acquire()).statusCode, 200);
+  const next = (await f.call()).json();
+  assert.notEqual(next.id, call.id);
+  serverLocal.emit('pong', challenge); // Delivered to the retired transport object.
+  assert.equal(f.manager.activeSession?.id, next.id);
+  assert.equal(f.manager.controllerConnectionDeadline(call.id), undefined);
+  browser.terminate();
+  phone.terminate();
+});
+
+for (const retirement of [
+  'logout',
+  'auth-epoch',
+  'csrf',
+  'idle-expiry',
+  'absolute-expiry',
+  'controller-revoke',
+] as const)
+  test(`server-maintained media still stops both legs on ${retirement}`, async (t) => {
+    const f = await fixture(t, { listen: true });
+    const call = (await f.call()).json();
+    const { browser, phone } = await fakeSdkTelephone(f, call);
+    const session = f.identity.sessions.get(tokenA)!;
+    if (retirement === 'logout') session.revoked = true;
+    if (retirement === 'auth-epoch') session.epoch += 1;
+    if (retirement === 'csrf')
+      session.csrfToken = Buffer.alloc(32, 99).toString('base64url');
+    if (retirement === 'idle-expiry') session.idleExpiresAt = f.identity.now;
+    if (retirement === 'absolute-expiry')
+      session.absoluteExpiresAt = f.identity.now;
+    if (retirement === 'controller-revoke')
+      assert.equal((await f.revoke()).statusCode, 200);
+    await until(
+      () => f.manager.isCleanupConfirmed(call.id),
+      'identity/controller retirement cleanup',
+    );
+    assert.equal(f.manager.controllerConnectionDeadline(call.id), undefined);
+    assert.deepEqual([...f.terminated].sort(), [localSid, remoteSid].sort());
+    browser.terminate();
+    phone.terminate();
+  });
+
+test('accepted failed hangup can be retried beyond its control deadline without admitting other tabs or new media', async (t) => {
+  const f = await fixture(t, { listen: true });
+  for (const session of f.identity.sessions.values()) {
+    session.idleExpiresAt = 200000;
+    session.absoluteExpiresAt = 200000;
+  }
+  const call = (await f.call()).json();
+  const { browser, phone } = await fakeSdkTelephone(f, call);
+  f.providerState.failHangup = true;
+  assert.equal((await f.hangup(call.id)).statusCode, 503);
+  assert.equal(f.manager.hasEndIntent(call.id), true);
+  assert.equal(f.manager.controllerConnectionDeadline(call.id), undefined);
+  f.identity.now = 65000; // Both the old lease and finite response grace are past.
+  assert.equal((await f.acquire(tokenB)).statusCode, 409);
+  assert.equal((await f.hangup(call.id, tokenB)).statusCode, 404);
+  const wrongTab = await f.app.inject({
+    method: 'POST',
+    url: `/api/calls/${call.id}/hangup`,
+    headers: writeHeaders(),
+    payload: { controller: { ...f.proofs.get(tokenA), tabId: 'other-tab' } },
+  });
+  assert.equal(wrongTab.statusCode, 403);
+  assert.equal((await f.voice(call.id)).statusCode, 403);
+  assert.equal((await f.call()).statusCode, 403);
+  assert.equal(f.manager.activeSession?.status, 'ending');
+  f.providerState.failHangup = false;
+  const retried = await f.hangup(call.id);
+  assert.equal(retried.statusCode, 200, retried.body);
+  assert.equal(f.manager.isCleanupConfirmed(call.id), true);
+  assert.equal((await f.acquire(tokenB)).statusCode, 200);
+  const next = (await f.call(tokenB)).json();
+  assert.notEqual(next.id, call.id);
+  assert.equal(
+    (await f.hangup(call.id)).statusCode,
+    200,
+    'Late cleanup of the old call never revokes the next call controller',
+  );
+  assert.equal(f.manager.activeSession?.id, next.id);
+  browser.terminate();
+  phone.terminate();
+});
 
 test('actual controller routes protect same-session secondary tabs, reject stale epochs, and never return an existing lease', async (t) => {
   const f = await fixture(t, { listen: true });
@@ -1285,8 +1452,8 @@ test('controller revoke during asynchronous Voice preparation yields no token or
   );
 });
 
-test('fake SDK call receives paired owner captions and SSE reconnection cannot extend the controller lease', async (t) => {
-  const f = await fixture(t, { listen: true });
+test('fake SDK captions and SSE reconnect neither grant control nor extend the verified media witness', async (t) => {
+  const f = await fixture(t, { listen: true, leaseTtlMs: 1000 });
   const originalStream = await f.eventsFor();
   const readonlyStream = await f.eventsFor(tokenB);
   const call = (await f.call()).json();
@@ -1339,9 +1506,15 @@ test('fake SDK call receives paired owner captions and SSE reconnection cannot e
   const reconnected = await f.eventsFor();
   assert.equal((await f.status()).json().activeSession.id, call.id);
   f.identity.now = expiry;
+  assert.equal(
+    (await f.status()).json().activeSession.id,
+    call.id,
+    'A healthy admitted media connection survives the original controller deadline',
+  );
+  f.identity.now = 31000; // No further pong: reads/reconnects cannot renew this witness.
   await until(
     () => f.manager.activeSession === null,
-    'unrenewed controller expiry cleans fake legs',
+    'lost verified media witness cleans fake legs',
   );
   assert.deepEqual([...f.terminated].sort(), [localSid, remoteSid].sort());
   assert.equal((await f.call()).statusCode, 403);
@@ -1351,7 +1524,7 @@ test('fake SDK call receives paired owner captions and SSE reconnection cannot e
     utteranceId: 'fake-late',
     role: 'local',
     kind: 'translation',
-    text: 'must not publish after controller expiry',
+    text: 'must not publish after media loss',
     final: true,
     at: f.identity.now,
   });

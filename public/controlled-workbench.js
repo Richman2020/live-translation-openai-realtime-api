@@ -38,10 +38,10 @@ export async function startControlledWorkbench() {
   const statusNames = { connecting: '正在连接', ringing: '等待对方接听', active: '通话中', ending: '线路清理中', completed: '通话已结束', failed: '通话未完成' };
   const phaseNames = {
     loading: '正在检查登录与状态',
-    booting: '正在检查登录与状态', acquiring: '正在取得控制权', renewing: '正在续约控制权',
+    booting: '正在检查登录与状态', acquiring: '正在准备通话', renewing: '正在检查电话连接',
     preparing: '正在准备通话', microphone: '正在准备麦克风', creating: '正在准备电话许可',
     voice: '正在准备 Voice 加入许可', connecting: '正在连接浏览器电话', ending: '正在确认线路清理',
-    releasing: '正在释放控制权', cleanup: '正在确认线路清理',
+    releasing: '正在确认线路清理', cleanup: '正在确认线路清理',
     'logging-out': '正在退出登录',
   };
   const engineNames = {
@@ -131,12 +131,6 @@ export async function startControlledWorkbench() {
         ? '原生英文译音文字独立显示；另有中文原文与参考翻译，措辞可能不同。字幕不能确认译音已播放。'
         : '显示原生英文译音文字，以及对方英文原文与逐句中文字幕；原生英文未与中文逐句关联。字幕不能确认译音已播放。'
       : '每句原文与译文配对；临时文字、译音待播放与线路确认播放分别标明。');
-    $('enable-device').disabled = pending || (!lease && !snapshot.canAcquire);
-    text('enable-device', lease ? live ? '结束并释放控制' : '释放控制权' : '取得本页控制权');
-    $('keep-online-toggle').disabled = $('enable-device').disabled;
-    $('keep-online-toggle').classList.toggle('on', Boolean(lease));
-    $('keep-online-toggle').setAttribute('aria-checked', String(Boolean(lease)));
-    $('renew-control').disabled = !snapshot.canRenew;
     $('start-call').disabled = view !== 'workspace' || !snapshot.canDial || live || pending || snapshot.cleanupPending || output.snapshot.status !== 'idle';
     $('phone-number').disabled = live || pending;
     $('erase-number').disabled = $('phone-number').disabled;
@@ -149,20 +143,20 @@ export async function startControlledWorkbench() {
     text('app-error', failure); $('app-error').hidden = !failure;
     text('local-state', snapshot.connection === 'connected' ? '会话状态已连接' : '状态连接中断');
     const readonly = !lease;
-    const controlText = !snapshot.authenticated ? '尚未登录，无法取得控制权'
+    const controlText = !snapshot.authenticated ? '请先登录'
       : snapshot.cleanupPending ? '线路清理待确认，暂不能开始下一通'
-        : readonly ? snapshot.controller?.mode === 'held' ? '只读标签页 · 控制权在其他页面，请在该页面结束或释放' : '可以直接拨打 · 拨号时取得本页控制权'
-          : snapshot.renewPaused ? '控制权仍在期限内 · 请显式续约恢复续租' : '本页持有控制权';
+        : readonly ? snapshot.controller?.mode === 'held' ? '其他页面正在使用电话，请在该页面结束通话' : '登录后可以直接拨打'
+          : live ? statusNames[call.status] || '电话正在连接' : '可以直接拨打';
     text('device-state', phaseNames[snapshot.phase] || controlText);
     $('device-dot').classList.toggle('online', Boolean(lease));
     document.querySelector('.availability').classList.toggle('ready', Boolean(lease));
     text('readiness-title', phaseNames[snapshot.phase] || controlText);
     text('readiness-copy', snapshot.cleanupPending ? '两腿线路结束尚未确认；退出或刷新不能证明已挂断。'
       : !snapshot.authenticated ? loginAvailable ? '使用 Google 登录；仅服务端允许的已验证账号可进入。' : '需要已验证的登录会话。此入口尚未配置登录。'
-        : snapshot.connection !== 'connected' ? '状态中断会暂停续租；重连只读状态，不会延长控制权。'
+        : snapshot.connection !== 'connected' ? '状态连接正在恢复，请以实际电话连接和线路清理结果为准。'
           : snapshot.busy && !live && !pending ? '服务仍在确认准备或清理状态，暂不能开始下一通。请刷新状态。'
-          : lease ? `${Math.max(0, Math.ceil((lease.expiresAt - Date.now()) / 1000))} 秒内有效。页面可见且状态连接时按租约续租；返回页面后须显式续约。`
-            : '同一会话的其他标签页可以阅读状态。活动电话或清理待确认时不能接管。');
+          : live ? '电话接通后可正常交流；结束时点击挂断并等待线路清理确认。'
+            : '输入号码直接拨打。其他页面正在通话或线路清理未确认时，请等待。');
     let connectionText = call ? statusNames[call.status] || '等待电话状态确认' : '等待开始';
     if (call?.status === 'active' && (!sdkAccepted || sdkCallId !== call.id)) connectionText = '服务器通话已开始 · 本页音频未确认连接';
     else if (call?.status === 'active' && !call.translationReady) connectionText = '电话已接通 · 译音线路准备中';
@@ -241,7 +235,16 @@ export async function startControlledWorkbench() {
       if (!current() || !event.data) return;
       let value;
       try { value = JSON.parse(event.data); } catch { note('状态数据无法读取，请刷新状态；尚未确认线路已结束。'); return; }
-      if (kind === 'snapshot' || kind === 'call') { client.handleEvent(kind, value); renderHistory(); }
+      if (kind === 'snapshot' || kind === 'call') {
+        const applied = client.handleEvent(kind, value);
+        const received = kind === 'call' ? value : value?.activeSession;
+        if (applied && received?.id === client.state.call?.id && terminal(received.status) && !received.cleanupUnconfirmed) {
+          // A finished call releases this document's admission too. A later
+          // dial starts afresh after authoritative cleanup, with no extra UI.
+          clearMedia(); client.hangup().catch(() => {});
+        }
+        renderHistory();
+      }
       else if (kind === 'conversation' || kind === 'transcript') receiveConversation(kind, value);
       else if (kind === 'caption-status' && value?.sessionId === record?.id) { if (value.role === 'local') outgoingCaptionState = value; else captionState = value; render(client.state); }
       else if (kind === 'error') { client.handleEvent(kind, value); }
@@ -256,7 +259,7 @@ export async function startControlledWorkbench() {
       if (source.readyState !== EventSource.CLOSED) return;
       source.close(); eventSource = null;
       const delay = [1000, 3000, 10000][eventRetries++];
-      if (delay === undefined) { note('状态连接未恢复。请刷新状态；重连后仍须显式续约控制权。'); return; }
+      if (delay === undefined) { note('状态连接未恢复。请刷新状态查看当前电话和线路清理结果。'); return; }
       eventRetry = setTimeout(() => { eventRetry = null; connectEvents(); }, delay);
     };
   }
@@ -291,7 +294,13 @@ export async function startControlledWorkbench() {
         // Cleanup still belongs to this exact SDK owner; only new admission and
         // success events need visibility and a live status connection.
         const ownsMedia = () => lifecycle.isCurrent(attempt) && device === next && !disposed;
-        next.on?.('error', () => { if (ownsMedia()) { note('浏览器电话连接失败；正在确认线路清理。'); clearMedia(); client.cancel().catch(() => {}); } });
+        next.on?.('error', error => {
+          if (!ownsMedia()) return;
+          const code = error?.code;
+          const expired = code === 20104 || code === 31205;
+          note(expired ? '电话信令令牌到期；正在确认线路清理。' : '浏览器电话连接失败；正在确认线路清理。');
+          clearMedia(); client.cancel().catch(() => {});
+        });
         next.on?.('incoming', incoming => { try { incoming.reject(); } catch { /* Incoming permission is disabled. */ } });
         const expireJoin = () => {
           if (ownsMedia() && !sdkAccepted && Date.now() >= prepared.grant.expiresAt) {
@@ -300,9 +309,10 @@ export async function startControlledWorkbench() {
         };
         joinDeadline = setTimeout(expireJoin, Math.max(1, prepared.grant.expiresAt - Date.now()));
         next.on?.('tokenWillExpire', () => {
-          // The short token authorizes one join. Once joined, this call is
-          // governed by its current controller/budget, not the first ticket's
-          // deadline. Do not sign or refresh another token from this event.
+          // The SDK signalling token and short one-use join ticket have
+          // separate deadlines. An accepted call follows server-verified media
+          // and current authentication, rather than the initial join deadline.
+          // This notification never issues or refreshes either capability.
           expireJoin();
         });
         output.bind(next.audio || null);
@@ -342,17 +352,17 @@ export async function startControlledWorkbench() {
     }
     text('page-crumb', next === 'workspace' ? '通话工作台' : next === 'history' ? '当前页通话记录' : '接入说明');
     renderHistory();
+    if (next === 'workspace') client.refresh().catch(() => {});
   }
 
   // Reuse the actual workbench layout while replacing local-only explanations.
   document.querySelector('.preview-pill').textContent = 'CONTROLLED · 受控接入';
-  document.querySelector('.preference-row h3').textContent = '保持本页控制权';
-  document.querySelector('.preference-row p').textContent = '可见且状态连接时续租；其他标签只读。退出工作台会结束并释放控制。';
-  const renew = document.createElement('button'); renew.id = 'renew-control'; renew.className = 'secondary-button'; renew.textContent = '续约控制权'; renew.disabled = true;
-  $('enable-device').before(renew);
+  const accountActions = document.createElement('div'); accountActions.className = 'top-actions';
+  $('enable-device').replaceWith(accountActions);
+  document.querySelector('.preference-row').remove();
   for (const [id, label] of [['google-login', 'Google 登录'], ['google-logout', '退出登录'], ['google-login-cancel', '取消登录']]) {
     const button = document.createElement('button'); button.id = id; button.className = 'secondary-button'; button.textContent = label; button.hidden = true;
-    renew.before(button);
+    accountActions.append(button);
   }
   const refresh = document.querySelector('.preview-notice .text-button'); refresh.removeAttribute('data-navigate'); refresh.id = 'refresh-controlled-state'; refresh.textContent = '刷新状态';
   const engine = $('translation-engine'); engine.replaceChildren(); engine.disabled = true;
@@ -360,9 +370,9 @@ export async function startControlledWorkbench() {
   text('transcript-engine-note', '每句原文与译文配对；临时文字、译音待播放与线路确认播放分别标明。');
   text('audio-delivery-remote', '英文原声 → 电脑：与中文字幕独立传送');
   text('translation-timing-remote', '中文字幕生成计时不代表英文原声播放延迟。');
-  document.querySelector('.dial-footnote').textContent = '直接拨打会先安全取得空闲控制权。其他页面占用时不会接管。';
-  document.querySelector('.workspace-footer span:last-child').textContent = '保持本页与线路连接 · 关闭或刷新会失去控制权';
-  const empty = $('empty-conversation'); empty.querySelector('p').textContent = '输入号码后直接拨打，空闲时自动取得本页控制权。\n这里只显示服务端实际收到的字幕。';
+  document.querySelector('.dial-footnote').textContent = '登录后输入号码直接拨打。其他页面占用或线路清理未确认时不能拨打。';
+  document.querySelector('.workspace-footer span:last-child').textContent = '关闭或刷新页面会结束本页通话 · 请先挂断并等待线路清理确认';
+  const empty = $('empty-conversation'); empty.querySelector('p').textContent = '登录后输入号码直接拨打。\n这里只显示服务端实际收到的字幕。';
   $('incoming-banner').hidden = true; $('accept-call').disabled = true; $('reject-call').disabled = true;
   $('history-view').querySelector('.page-heading p').textContent = '只保留当前页面收到的文字；不写入浏览器存储，刷新后不会恢复。';
   text('clear-history', '清空过去记录');
@@ -370,9 +380,9 @@ export async function startControlledWorkbench() {
   $('settings-view').querySelector('.page-heading p').textContent = '登录由服务端明确配置；本页不编辑凭据或创建新权限。持久电话许可与恢复仍须完成。';
   $('settings-view').querySelector('.settings-grid').hidden = true;
   document.querySelector('[data-view="settings"]').lastChild.textContent = '接入说明';
-  $('help-dialog').querySelector('h2').textContent = '登录后直接拨打，空闲时安全取得控制权。';
+  $('help-dialog').querySelector('h2').textContent = '登录后输入号码直接拨打。';
   const help = $('help-dialog').querySelector('ol'); help.replaceChildren();
-  for (const message of ['通过已验证会话打开此入口。输入号码直接拨打；其他页面已持有控制权时，请在该页结束或释放。', '拨号时才请求麦克风。请等待电话接通与译音线路就绪后开始交流。', '结束通话后等待线路清理确认。导航、退出或刷新会撤销控制，不能证明线路已结束。']) { const item = document.createElement('li'); item.textContent = message; help.append(item); }
+  for (const message of ['使用已验证的 Google 账号登录，然后输入号码直接拨打。其他页面正在使用电话时，请先在该页结束通话。', '拨号时才请求麦克风。请等待电话接通与译音线路就绪后开始交流。', '结束通话后等待线路清理确认。导航、退出或刷新会结束本页通话，线路清理仍由服务端确认。']) { const item = document.createElement('li'); item.textContent = message; help.append(item); }
   $('help-dialog').querySelector('.dialog-note').textContent = '目前正在验证网页控制流程；真实电话接入、声音与听到译音的等待仍须另行验收。';
   for (const button of document.querySelectorAll('[data-view]')) button.addEventListener('click', () => navigate(button.dataset.view));
   for (const button of document.querySelectorAll('[data-navigate]')) button.addEventListener('click', () => navigate(button.dataset.navigate));
@@ -382,14 +392,6 @@ export async function startControlledWorkbench() {
     button.addEventListener('click', () => { if (!$('phone-number').disabled && $('phone-number').value.length < 24) $('phone-number').value += symbol; }); document.querySelector('.keypad').append(button);
   }
   $('erase-number').addEventListener('click', () => { if (!$('erase-number').disabled) $('phone-number').value = $('phone-number').value.slice(0, -1); });
-  const control = async () => {
-    if ($('enable-device').disabled) return;
-    localError = '';
-    if (client.state.lease) await release(); else await client.acquire().catch(() => {});
-    render(client.state);
-  };
-  $('enable-device').addEventListener('click', control); $('keep-online-toggle').addEventListener('click', control);
-  renew.addEventListener('click', () => { if (!renew.disabled) { localError = ''; client.renew().catch(() => {}); } });
   const refreshState = () => {
     localError = ''; eventRetries = 0; stopEvents(); client.setConnectionState(false);
     client.refresh().then(() => connectEvents()).catch(() => {});
@@ -444,7 +446,7 @@ export async function startControlledWorkbench() {
   });
   refresh.addEventListener('click', refreshState); $('refresh-status').addEventListener('click', refreshState);
   $('start-call').addEventListener('click', startCall);
-  $('end-call').addEventListener('click', () => { if (!$('end-call').disabled) { localError = ''; clearMedia(); client.cancel({ releaseControl: false }).catch(() => {}); } });
+  $('end-call').addEventListener('click', () => { if (!$('end-call').disabled) { localError = ''; clearMedia(); client.hangup().catch(() => {}); } });
   $('mute-button').addEventListener('click', () => {
     if ($('mute-button').disabled || !sdkCall) return;
     try { const next = !muted; sdkCall.mute(next); muted = next; $('mute-button').setAttribute('aria-pressed', String(muted)); $('mute-button').querySelector('span').textContent = muted ? '取消静音' : '静音'; text('call-hint', muted ? '麦克风已静音' : '麦克风已启用'); }

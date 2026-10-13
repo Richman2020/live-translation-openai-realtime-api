@@ -80,6 +80,8 @@ function fixture(
     identity: 'voice_one',
     issuedAt: now,
     expiresAt: now + 1000,
+    authExpiresAt: now + 1000,
+    tokenExpiresAt: now + 1000,
     incomingAllow: false,
     outgoingApplicationSid: policy.applicationSid,
     outgoing: { callId, identity: 'voice_one' },

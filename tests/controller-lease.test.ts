@@ -451,3 +451,110 @@ test('auth deadline lookup rechecks CSRF and refuses expiry boundaries', () => {
   f.advance(90000);
   denied(() => f.policy.expiresAt(context, 'mutate'), 'UNAUTHORIZED');
 });
+
+test('a server-bound finite call witness keeps only its current controller beyond the preparation lease', () => {
+  const f = fixture();
+  const lease = f.leases.acquire(f.post(), 'tab-a');
+  const bound = f.leases.authorize(f.post(), lease);
+  let deadline: number | undefined;
+  denied(
+    () => f.leases.bindCallConnection({ ...bound }, 'call-a', () => 55000),
+    'UNAUTHORIZED',
+  );
+  f.leases.bindCallConnection(bound, 'call-a', () => deadline);
+  f.advance(20000);
+  assert.equal(f.leases.status(f.read()).expiresAt, 40000);
+  deadline = 55000; // Supplied by the admitted transport, never the status read.
+  f.advance(45000);
+  assert.equal(f.leases.authorizeCurrent(bound).expiresAt, 55000);
+  assert.equal(f.leases.status(f.read(), 'tab-a').serverMaintained, true);
+  for (let i = 0; i < 10; i++)
+    assert.equal(f.leases.status(f.read()).expiresAt, 55000);
+  held(() => f.leases.acquire(f.post(), 'tab-b'));
+  denied(() => f.leases.authorize(f.post(true), lease));
+  denied(() => f.leases.bindCallConnection(bound, 'call-b', () => 65000));
+  f.advance(55000);
+  denied(() => f.leases.authorizeCurrent(bound));
+});
+
+test('call maintenance cannot bind an expired initial permission or bypass current identity and CSRF', () => {
+  const expired = fixture();
+  const lease = expired.leases.acquire(expired.post(), 'tab-a');
+  const bound = expired.leases.authorize(expired.post(), lease);
+  expired.advance(40000);
+  denied(() => expired.leases.bindCallConnection(bound, 'call-a', () => 60000));
+  for (const change of ['revoked', 'epoch', 'csrf', 'expiry'] as const) {
+    const f = fixture();
+    const proof = f.leases.acquire(f.post(), 'tab-a');
+    const handle = f.leases.authorize(f.post(), proof);
+    f.leases.bindCallConnection(handle, 'call-a', () => 60000);
+    f.advance(45000);
+    if (change === 'revoked') f.sessionA.revoked = true;
+    if (change === 'epoch') f.sessionA.epoch += 1;
+    if (change === 'csrf')
+      f.sessionA.csrfToken = Buffer.alloc(32, 77).toString('base64url');
+    if (change === 'expiry') f.sessionA.idleExpiresAt = 45000;
+    denied(
+      () => f.leases.authorizeCurrent(handle),
+      change === 'csrf' ? 'FORBIDDEN' : 'UNAUTHORIZED',
+    );
+  }
+});
+
+test('accepted cleanup retires call maintenance and retains only a finite identity-bounded response window', () => {
+  const f = fixture();
+  const lease = f.leases.acquire(f.post(), 'tab-a');
+  const bound = f.leases.authorize(f.post(), lease);
+  let deadline = 55000;
+  f.leases.bindCallConnection(bound, 'call-a', () => deadline);
+  f.advance(45000);
+  f.leases.retainForCleanup(bound, 'call-a');
+  deadline = 100000; // A late transport signal cannot reattach its retired witness.
+  assert.equal(f.leases.status(f.read()).serverMaintained, undefined);
+  assert.equal(f.leases.authorizeCurrent(bound).expiresAt, 75000);
+  f.advance(75000);
+  denied(() => f.leases.authorizeCurrent(bound));
+});
+
+test('cleanup validation accepts only the original owner proof after expiry and never restores active permissions', () => {
+  const f = fixture();
+  const proof = f.leases.acquire(f.post(), 'tab-a');
+  const original = f.leases.authorize(f.post(), proof);
+  f.advance(45000);
+  assert.equal(f.leases.authorizeCleanup(f.post(), proof, original), undefined);
+  denied(() => f.leases.authorizeCurrent(original));
+  denied(() => f.leases.renew(f.post(), proof));
+  denied(() => f.leases.authorize(f.post(), proof));
+  denied(() => f.leases.authorizeCleanup(f.post(true), proof, original));
+  denied(() =>
+    f.leases.authorizeCleanup(
+      f.post(),
+      { ...proof, tabId: 'other-tab' },
+      original,
+    ),
+  );
+  denied(() =>
+    f.leases.authorizeCleanup(f.post(), { ...proof, epoch: 2 }, original),
+  );
+  denied(() => f.leases.authorizeCleanup(f.read(), proof, original));
+  denied(
+    () => f.leases.authorizeCleanup(f.post(), proof, { ...original }),
+    'UNAUTHORIZED',
+  );
+  f.sessionA.revoked = true;
+  denied(
+    () => f.leases.authorizeCleanup(f.post(), proof, original),
+    'UNAUTHORIZED',
+  );
+});
+
+test('an old call cleanup window cannot retire a later call connection on the same controller', () => {
+  const f = fixture();
+  const proof = f.leases.acquire(f.post(), 'tab-a');
+  const bound = f.leases.authorize(f.post(), proof);
+  f.leases.bindCallConnection(bound, 'next-call', () => 55000);
+  f.advance(45000);
+  f.leases.retainForCleanup(bound, 'old-call');
+  assert.equal(f.leases.status(f.read()).serverMaintained, true);
+  assert.equal(f.leases.authorizeCurrent(bound).expiresAt, 55000);
+});

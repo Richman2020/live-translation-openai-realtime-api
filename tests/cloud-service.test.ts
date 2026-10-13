@@ -64,6 +64,8 @@ function grant(time: number): CloudVoiceGrant {
     identity: 'offline-call-identity',
     issuedAt: time,
     expiresAt: time + 30000,
+    authExpiresAt: time + 90000,
+    tokenExpiresAt: time + 90000,
     incomingAllow: false,
     outgoingApplicationSid: `AP${'3'.repeat(32)}`,
     outgoing: { callId: 'offline-call', identity: 'offline-call-identity' },
@@ -183,7 +185,9 @@ test('real locked Twilio signer scopes the outgoing app and identity, disables i
     voice.outgoingApplicationSid,
   );
   assert.equal(payload.grants.voice.incoming?.allow ?? false, false);
-  assert.ok(payload.exp * 1000 <= voice.expiresAt);
+  assert.ok(payload.exp * 1000 > voice.expiresAt);
+  assert.ok(payload.exp * 1000 <= voice.tokenExpiresAt);
+  assert.ok(payload.exp * 1000 <= voice.authExpiresAt);
   assert.deepEqual(Object.keys(payload.grants).sort(), ['identity', 'voice']);
 });
 
@@ -195,6 +199,12 @@ test('Twilio signer refuses subsecond TTL, stale or wrong app/identity grants wi
     { ...voice, expiresAt: time + 900 },
     { ...voice, expiresAt: time - 1 },
     { ...voice, expiresAt: time + 60001 },
+    { ...voice, tokenExpiresAt: time + 900 },
+    { ...voice, tokenExpiresAt: time - 1 },
+    { ...voice, tokenExpiresAt: voice.authExpiresAt + 1000 },
+    { ...voice, tokenExpiresAt: time + 900001, authExpiresAt: time + 1000000 },
+    { ...voice, authExpiresAt: time - 1 },
+    { ...voice, tokenExpiresAt: undefined },
     { ...voice, issuedAt: time + 10000 },
     { ...voice, outgoingApplicationSid: `AP${'9'.repeat(32)}` },
     { ...voice, identity: 'ai-phone' },
@@ -205,6 +215,28 @@ test('Twilio signer refuses subsecond TTL, stale or wrong app/identity grants wi
       signer(invalid as CloudVoiceGrant),
       /CLOUD_VOICE_SIGNING_DENIED/,
     );
+});
+
+test('SDK signaling token remains valid beyond the one-use join window without extending login', async () => {
+  const time = Date.now();
+  const voice = {
+    ...grant(time),
+    authExpiresAt: time + 47000,
+    tokenExpiresAt: time + 47000,
+  };
+  const token = await createCloudVoiceSigner(configuration(time))(voice);
+  const payload = JSON.parse(
+    Buffer.from(token.split('.')[1], 'base64url').toString('utf8'),
+  );
+  assert.ok(payload.exp * 1000 > time + 30000);
+  assert.ok(payload.exp * 1000 <= time + 47000);
+  assert.equal(payload.grants.identity, voice.identity);
+  assert.equal(payload.grants.voice.incoming?.allow ?? false, false);
+  assert.deepEqual(voice, {
+    ...grant(time),
+    authExpiresAt: time + 47000,
+    tokenExpiresAt: time + 47000,
+  });
 });
 
 test('deadline expires current admission before deferred cleanup and never renews after clock moves back', async () => {

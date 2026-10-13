@@ -228,6 +228,7 @@ async function buildPhoneApplication(
       proof?: ControllerProof;
       callId?: string;
       voice?: PreparedCloudVoice;
+      cleanup?: true;
     }
   >();
   const controllerResponseGuard: onSendHookHandler = (
@@ -244,6 +245,12 @@ async function buildPhoneApplication(
           issued.context,
           issued.callId!,
           issued.voice,
+        );
+      else if (issued.cleanup)
+        browserControl.recheckCleanupController(
+          issued.context,
+          issued.callId!,
+          issued.proof!,
         );
       else
         browserControl.recheckController(
@@ -743,6 +750,7 @@ async function buildPhoneApplication(
         context,
         proof: Object.freeze({ ...req.body.controller }),
         callId: req.params.id,
+        cleanup: true,
       });
       await browserControl.finishHangup(intent);
       if (!browserControl.recheckCleanup(context, req.params.id))
