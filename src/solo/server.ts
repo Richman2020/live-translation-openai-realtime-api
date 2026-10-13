@@ -17,7 +17,10 @@ import {
   type CloudPhoneRuntime,
 } from './cloud-runtime';
 import { CLOUD_CONTROLLED_PUBLIC_PATHS } from './cloud-ingress';
-import { reportCloudVoiceClientRejection } from './cloud-voice-diagnostics';
+import {
+  cloudVoiceRoute,
+  reportCloudVoiceRejection,
+} from './cloud-voice-diagnostics';
 import { CloudAccessError, type CloudAccessContext } from './cloud-access';
 import { createCloudAccessTransport } from './cloud-access-transport';
 import { CloudPhoneAccess } from './cloud-phone-access';
@@ -414,26 +417,25 @@ async function buildPhoneApplication(
     const isMedia =
       req.method === 'GET' && req.url.split('?')[0] === '/voice/media';
     if (!validTwilioRequest(req, configStore.value, isMedia)) {
-      if (
-        cloudRuntime &&
-        req.method === 'POST' &&
-        req.url === '/voice/client'
-      ) {
+      const route = cloudVoiceRoute(req.method, req.url);
+      if (cloudRuntime && route) {
         let reason = 'TWILIO_SIGNATURE_MISMATCH';
         if (typeof req.headers['x-twilio-signature'] !== 'string')
           reason = 'TWILIO_SIGNATURE_MISSING';
         else if (
+          !isMedia &&
           (req.body as Record<string, unknown>)?.AccountSid !==
-          configStore.value.TWILIO_ACCOUNT_SID
+            configStore.value.TWILIO_ACCOUNT_SID
         )
           reason = 'TWILIO_ACCOUNT_MISMATCH';
         else if (
+          !isMedia &&
           !/^application\/x-www-form-urlencoded(?:;|$)/i.test(
             req.headers['content-type'] || '',
           )
         )
           reason = 'TWILIO_FORM_CONTENT_TYPE_INVALID';
-        reportCloudVoiceClientRejection(reason);
+        reportCloudVoiceRejection(route, reason);
       }
       return reply.code(403).send({ error: 'INVALID_TWILIO_SIGNATURE' });
     }
@@ -456,13 +458,9 @@ async function buildPhoneApplication(
       statusCode = error.statusCode;
     else if (error.statusCode && error.statusCode < 500)
       statusCode = error.statusCode;
-    if (
-      cloudRuntime &&
-      req.method === 'POST' &&
-      req.url === '/voice/client' &&
-      statusCode === 403
-    )
-      reportCloudVoiceClientRejection(code);
+    const route = cloudVoiceRoute(req.method, req.url);
+    if (cloudRuntime && route && statusCode === 403)
+      reportCloudVoiceRejection(route, code);
     reply.code(statusCode).send({
       error: code,
       ...(code === 'CONFIGURATION_REQUIRED' && !browserControl
@@ -862,20 +860,29 @@ async function buildPhoneApplication(
     );
   }
   app.get('/voice/media', { websocket: true }, (socket: WebSocket) => {
-    const timer = setTimeout(() => socket.close(1008, 'Missing start'), 10000);
+    const timer = setTimeout(() => {
+      if (cloudRuntime)
+        reportCloudVoiceRejection('/voice/media', 'MEDIA_START_TIMEOUT');
+      socket.close(1008, 'Missing start');
+    }, 10000);
     timer.unref?.();
     const firstMessage = (data: WebSocket.RawData) => {
       try {
         const parsed = JSON.parse(data.toString());
         if (parsed.event === 'connected') return;
         if (parsed.event !== 'start') {
+          if (cloudRuntime)
+            reportCloudVoiceRejection('/voice/media', 'MEDIA_START_INVALID');
           socket.close(1008, 'Expected start');
           return;
         }
         clearTimeout(timer);
         socket.off('message', firstMessage);
-        manager.attachMedia(socket, parsed.start);
+        if (!manager.attachMedia(socket, parsed.start) && cloudRuntime)
+          reportCloudVoiceRejection('/voice/media', 'INVALID_MEDIA_STREAM');
       } catch {
+        if (cloudRuntime)
+          reportCloudVoiceRejection('/voice/media', 'MEDIA_START_INVALID');
         socket.close(1008, 'Invalid message');
       }
     };

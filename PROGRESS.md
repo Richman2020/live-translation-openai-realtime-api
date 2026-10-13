@@ -4,6 +4,27 @@
 
 需求见 [PROJECT_BRIEF.md](PROJECT_BRIEF.md)，工作规则见 [AGENTS.md](AGENTS.md)，运行步骤见 [LOCAL_SETUP.md](LOCAL_SETUP.md)，后续执行入口见 [LOCAL_CODEX_HANDOFF.md](LOCAL_CODEX_HANDOFF.md)。
 
+## 最新：锁依赖与回调离线复验通过，今晚一通试打待发布批准（2026-10-12）
+
+- 北京时间17:43记录。本轮优先是今晚一次真实外呼翻译试验，先恢复可测试链路；完整28需求保持，不等待或顺带重构字幕、声音、登录、来电。实际目录 `/workspace/ai-phone-cloud-recovery-20261012`、分支 `codex/ai-phone-cloud-recovery-20261012`，检查前HEAD `109977e2e317b1fd640ce59101f5047ca891454f` 且干净；原目录、附件/审计成果保持。
+- 用户批准的 `npm ci --include=dev --ignore-scripts --no-audit --no-fund --registry=https://registry.npmjs.org` 实际exit0，added549packages，安装生命周期始终禁用。未升级依赖、改锁、开脚本或装全局工具；tsx/esbuild实际可用。锁SHA仍 `3577eb5548e3f44086b3a8db7fb2483751f9af3dc7792a0728e145e025c13267`。Voice SDK仅从现有锁包本地复制准备，不是安装脚本或用户电脑操作。
+- 本轮现时日志：回调/身份/签名109/109通过；typecheck/build exit0；全套1290 total/1285 pass/5既有Windows-only skip/0fail/0cancel，相关清理/未知create/迟到SID/第二通回归包含其中。Google离线Chrome27、continuous配对65、默认三会话62通过；三场externalRequests/realSupplierCalls/异常均0。所有350个原tracked内容在安装/运行后不变，没有追加业务修复；仅此进度和发布报告为后续记录变化。没有使用旧包成绩，先前依赖阻塞已解除。
+- 独立review代理与其清理子审查针对4f34→109977e未发现补丁引入阻塞；签名含完整原query、固定Host、nonce/SID/account/controller和双腿清理继续。原有累计100注册记录容量/第101通可能拒绝作为既有边界记载，不影响本轮一通目标、不扩修。后续记录提交需代理核最终SHA及代码树等价。真实403、握手/手机音频仍未验。
+- Railway仅只读确认项目 `ai-phone-portal-trial/145aa27a-3a84-4e4d-91f9-b97f33bf6d42`、staging与 `ai-phone-test/407bede7-11b6-4260-b055-a8045dc71588`；线上仍4f34，deployment922a6a82… SUCCESS/Online、1/1、pending空，可作回退点。portal-test未操作。所需变量仅确认名字，配置值、真实Twilio回调/目标末4、模型公网能力、本人耳麦未核验；一次有界日志没有安全配置字段，不重试或新增认证。autoDeploy开关、套餐账单无工具证据。
+- 发布方案及批准清单见[今晚回调验证与发布方案](docs/CLOUD_PHONE_CALLBACK_VALIDATION_RELEASE_PLAN_2026-10-12.md)：待批准推送候选/草稿PR触发现有CI（本分支不匹配push规则、不合并），只更新既有AI staging精确SHA，确认必要phone/default3/origin/回调值，保留Hobby/资源/凭据/来电路由及回退点。建议用户自行对现有单授权本人号码发起1通≤5分钟，Twilio/OpenAI操作预算5美元，不自动重拨或恢复应用内预算/时长代码；目标清值未读取，末4需现有授权者核对。
+- Railway两服务资源3美元提醒/4美元用户决定关停，非硬封顶，电话模型另算；未升级/新建付费资源。未push/PR/部署/改Railway或凭据、未拨号/付费模型；Docker镜像本地检查及完整远端CI未执行。安装/回归结果已先于文档即时回报；完整日志、浏览器证据、独立审查与平台只读摘要在 `/workspace/ai-phone-reference/verification-20261012-109977e`。dot下一步验收候选与范围，用户批准发布及一次试打后由获准执行者完成上线前核验与发布，再由用户验耳麦/实际两方向和挂断，不宣称已打通。
+
+## 最新：云端恢复旧回调修复，正常验证被依赖阻塞（2026-10-12）
+
+- 记录时间2026-10-12 17:11（北京时间）；本云端聊天负责执行，dot负责协调/接口及验收。用户本轮仅授权从精确基线恢复旧修复、独立分支/目录、项目记录及已有依赖下的离线验证；下方旧执行/推送/部署/付费许可及PROJECT_BRIEF历史状态不覆盖此次云端与并行分工，不同时重构字幕、声音、登录或来电。
+- 从精确 `4f34fa313173e62d370e5f78c0780e4506848420` 新建 `codex/ai-phone-cloud-recovery-20261012`，实际独立目录 `/workspace/ai-phone-cloud-recovery-20261012`；创建前名称和目录均不存在。原 `/workspace/live-translation-openai-realtime-api` 保持 `work/5fabf51cd6976131ac829b1b95c87f7239096184`，附件及需求审计资料保留。
+- 原patch `git apply --check --exclude=AGENTS.md` exit0后，恢复6个tracked及1个原untracked文档；七个实际全文SHA-256和大小全部匹配清单。AGENTS旧差异未应用，基线文件SHA仍 `915651d9c86ea2a7e4bdbd64291f65bc76b71a312c19370fddfd23888d0862c7`。各文件哈希、路径、完整差异及命令见[本轮恢复验证报告](docs/CLOUD_PHONE_RECOVERY_VERIFICATION_2026-10-12.md)；原修复文档[只作历史成果](docs/CLOUD_PHONE_CALLBACK_CHAIN_FIX_2026-10-12.md)。
+- 本轮实际通过的是补丁适用性、恢复哈希、`git diff --check`，以及3个修改源码和2个测试文件的 `node --check`（均exit0）。这是静态/语法检查，不是typecheck/build/回调测试。静态安全审查未发现移除Google/Origin/CSRF/controller或Twilio官方签名、nonce/SID边界；全链运行负例仍未复验。
+- 新旧目录没有node_modules；42个直接锁依赖缺失，tsx/typescript/tsc-alias/fastify/twilio/ws等实际解析ERR_MODULE_NOT_FOUND。回调专项、相关授权/清理回归、typecheck、build、全套测试及相关离线浏览器未执行；未产生本轮pass/fail/skip统计，不沿用旧包或旧本机成绩。完整v3锁文件609安装位置全部registry.npmjs.org HTTPS且有integrity；root prepare=husky，四处transitive安装脚本标记见报告。
+- 本轮未安装。待具体安装任务的命令为 `npm ci --include=dev --ignore-scripts --no-audit --no-fund --registry=https://registry.npmjs.org`，实际目录为上述独立worktree；执行后仍须核tsx/esbuild并真实跑离线命令，不能提前记通过。
+- 原状态哈希异常保留记录：LF 257字节/8条的 `9846b97c…0fb9` 与NUL同长记录 `4a60f7ff…ddd0f5` 分别复算，NUL匹配清单，依据HASH_NOTE关闭为分隔符口径未注明；原ZIP未改。
+- 恢复与此进度/验证报告在本分支仅留本地版本，未push/部署/改Railway/凭据/试打或访问付费模型；远端与线上均未同步。完整交付差异、commit回执及保护校验保存在 `/workspace/ai-phone-reference/recovery-20261012`。dot下一步核对恢复交付和依赖阻塞，再下发安装/正常离线复验任务；通话功能、真实403闭合与质量/延迟仍未验收。
+
 ## 最新：固定 Voice 回调普通重复头修复（2026-10-12）
 
 - 从已部署精确 `f26006cb944e02700c32eb0ac7ad1f87105c86ee` 建立 `codex/cloud-phone-conversation-duplicate-header-fix-20261012`。用户自行发布deployment `e571df69-2931-4db6-a19b-d9f5713ba533` 02:28:36 UTC SUCCESS；自动控制权/session/call/voice准备成功，但两次真实回调仍403。02:30:24.994746Z、02:30:31.029782Z固定诊断均为 `INGRESS_DUPLICATE_HEADER`，已确认入口重复头分支；尚无具体原始头名证据。

@@ -9,7 +9,10 @@ import {
 import { isIP, type Socket } from 'node:net';
 
 import { parsePhoneRuntime, type CloudPhoneRuntime } from './cloud-runtime';
-import { reportCloudVoiceClientRejection } from './cloud-voice-diagnostics';
+import {
+  cloudVoiceRoute,
+  reportCloudVoiceRejection,
+} from './cloud-voice-diagnostics';
 
 /** Public source files only. Authentication and controller APIs are separate. */
 export const CLOUD_CONTROLLED_PUBLIC_PATHS = Object.freeze([
@@ -108,7 +111,7 @@ const droppedHeaders = new Set([
   'transfer-encoding',
   'upgrade',
 ]);
-// The fixed Voice form needs only these headers. Ordinary transport metadata
+// Fixed signed Voice transport needs only these headers. Ordinary metadata
 // is discarded, including duplicates; identity and framing stay unambiguous.
 const voiceProtectedHeaders = new Set([
   'host',
@@ -190,25 +193,30 @@ function headersForUpstream(
   healthProbe = false,
 ): Record<string, string> | null {
   // A signature header selects transport handling, never authentication. Only
-  // the fixed Voice form route may discard ordinary metadata; the backend
-  // still verifies the exact public HTTPS URL, account and full parsed form.
+  // fixed Voice callbacks may discard ordinary metadata. The backend verifies
+  // the exact public URL (including query), account and full parsed form; media
+  // separately verifies its pinned HTTPS/WSS URL and the bound start frame.
+  const route = cloudVoiceRoute(req.method, req.url);
+  const signaturePresent =
+    typeof req.headers['x-twilio-signature'] === 'string' &&
+    req.headers['x-twilio-signature'].length > 0;
   const voiceForm =
     !upgrade &&
-    req.method === 'POST' &&
-    req.url === '/voice/client' &&
-    typeof req.headers['x-twilio-signature'] === 'string' &&
-    req.headers['x-twilio-signature'].length > 0 &&
+    route !== undefined &&
+    route !== '/voice/media' &&
+    signaturePresent &&
     /^application\/x-www-form-urlencoded(?:;|$)/i.test(
       req.headers['content-type'] || '',
     );
+  const twilioTransport =
+    voiceForm || (upgrade && route === '/voice/media' && signaturePresent);
   const discardVoiceHeader = (name: string): boolean =>
-    voiceForm &&
+    twilioTransport &&
     !voiceProtectedHeaders.has(name) &&
     !name.startsWith('x-phone-') &&
     !name.startsWith('sec-');
   const reject = (reason: string): null => {
-    if (req.method === 'POST' && req.url === '/voice/client')
-      reportCloudVoiceClientRejection(reason);
+    if (route) reportCloudVoiceRejection(route, reason);
     return null;
   };
   const headers: Record<string, string> = Object.create(null);
@@ -234,7 +242,7 @@ function headersForUpstream(
   }
   if (req.headers.host !== authority) return reject('INGRESS_HOST_MISMATCH');
   if (
-    !voiceForm &&
+    !twilioTransport &&
     (((!healthProbe || req.headers['x-forwarded-proto'] !== undefined) &&
       req.headers['x-forwarded-proto'] !== 'https') ||
       req.headers.forwarded !== undefined ||
@@ -243,7 +251,7 @@ function headersForUpstream(
   )
     return reject('INGRESS_PROXY_METADATA');
   const forwardedFor = req.headers['x-forwarded-for'];
-  if (!voiceForm && forwardedFor !== undefined) {
+  if (!twilioTransport && forwardedFor !== undefined) {
     if (typeof forwardedFor !== 'string' || forwardedFor.length > 1024)
       return reject('INGRESS_PROXY_METADATA');
     const addresses = forwardedFor.split(',');
@@ -519,6 +527,8 @@ export function createCloudIngress(options: {
     }
     const headers = headersForUpstream(req, authority, true);
     if (!headers || head.length > MAX_UPGRADE_HEAD_BYTES) {
+      if (headers)
+        reportCloudVoiceRejection('/voice/media', 'INGRESS_UPGRADE_HEAD_LIMIT');
       rejectUpgrade(socket, 403, 'CLOUD_INGRESS_FORBIDDEN');
       return;
     }
