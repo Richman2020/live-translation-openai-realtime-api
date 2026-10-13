@@ -26,6 +26,7 @@ import {
 import {
   CloudVoiceJoin,
   type CloudVoiceGrant,
+  type CloudVoiceRefreshSigner,
 } from '../src/solo/cloud-voice-join';
 import { ConfigStore, type SoloConfig } from '../src/solo/config';
 import { buildSoloServer } from '../src/solo/server';
@@ -132,6 +133,9 @@ async function fixture(
     voiceReady?: boolean;
     voicePreparation?: () => Promise<void>;
     voiceResponsePause?: () => Promise<void>;
+    refreshResponsePause?: () => Promise<void>;
+    refreshSigner?: CloudVoiceRefreshSigner;
+    maintainAuthentication?: (session: CloudAuthSession, now: number) => void;
     leaseTtlMs?: number;
   } = {},
 ) {
@@ -209,10 +213,17 @@ async function fixture(
     ttlMs: options.leaseTtlMs ?? 30000,
   });
   const grants: unknown[] = [];
+  const refreshGrants: unknown[] = [];
   const voiceJoin = new CloudVoiceJoin({
     policy,
     outgoingApplicationSid: config.TWILIO_TWIML_APP_SID,
     now: () => identity.now,
+    refreshSigner:
+      options.refreshSigner ??
+      (async (grant) => {
+        refreshGrants.push(grant);
+        return `test-only-fake-refresh-${grant.identity}`;
+      }),
     ...(options.voiceReady === false
       ? {}
       : {
@@ -254,6 +265,16 @@ async function fixture(
           };
     },
     revalidationIntervalMs: 10,
+    ...(options.maintainAuthentication
+      ? {
+          maintainAuthentication: () => {
+            options.maintainAuthentication!(
+              identity.sessions.get(tokenA)!,
+              identity.now,
+            );
+          },
+        }
+      : {}),
   });
   let loopbackPort = 0;
   const originalRequest = http.request;
@@ -286,6 +307,12 @@ async function fixture(
     app.addHook('onSend', async (request, _reply, payload) => {
       if (/^\/api\/calls\/[^/]+\/voice$/.test(request.url))
         await options.voiceResponsePause!();
+      return payload;
+    });
+  if (options.refreshResponsePause)
+    app.addHook('onSend', async (request, _reply, payload) => {
+      if (/^\/api\/calls\/[^/]+\/voice\/refresh$/.test(request.url))
+        await options.refreshResponsePause!();
       return payload;
     });
   const clients = new Set<ClientRequest>();
@@ -503,6 +530,7 @@ async function fixture(
     controllerLeases,
     voiceJoin,
     grants,
+    refreshGrants,
     proofs,
     acquire,
     revoke,
@@ -1155,6 +1183,217 @@ async function fakeSdkTelephone(
   );
   return { permission, browser, phone };
 }
+
+test('signal refresh HTTP waits for a matched pong, isolates owners and leaves the initial join single-use', async (t) => {
+  const f = await fixture(t, { listen: true });
+  const call = (await f.call()).json();
+  const { browser, phone, permission } = await fakeSdkTelephone(f, call, false);
+  const refresh = (
+    token = tokenA,
+    proof = f.proofs.get(token),
+    body?: Record<string, unknown>,
+    headers = writeHeaders(token),
+  ) =>
+    f.app.inject({
+      method: 'POST',
+      url: `/api/calls/${call.id}/voice/refresh`,
+      headers,
+      payload: body ?? { controller: proof },
+    });
+  const notReady = await refresh();
+  assert.equal(notReady.statusCode, 409, notReady.body);
+  assert.equal(notReady.json().error, 'VOICE_CONNECTION_NOT_READY');
+  assert.equal(
+    f.manager.activeSession?.status,
+    'active',
+    'An initial pong race does not clean a valid owner',
+  );
+  assert.equal(f.refreshGrants.length, 0);
+  assert.equal((await refresh(tokenB, f.proofs.get(tokenA))).statusCode, 404);
+  assert.equal(
+    (
+      await refresh(tokenA, f.proofs.get(tokenA), undefined, {
+        ...writeHeaders(),
+        'x-phone-csrf': 'wrong',
+      })
+    ).statusCode,
+    403,
+  );
+  assert.equal(
+    (
+      await refresh(tokenA, f.proofs.get(tokenA), {
+        controller: f.proofs.get(tokenA),
+        identity: 'attacker',
+      })
+    ).statusCode,
+    403,
+  );
+  await until(
+    () => f.pings.get(browser)!.length > 0,
+    'initial local challenge',
+  );
+  browser.pong(f.pings.get(browser)!.at(-1)!);
+  await until(
+    () => f.manager.hasFreshControllerPong(call.id),
+    'matching local pong',
+  );
+  const response = await refresh();
+  assert.equal(response.statusCode, 200, response.body);
+  assert.deepEqual(Object.keys(response.json()).sort(), [
+    'authExpiresAt',
+    'callId',
+    'controller',
+    'token',
+    'tokenExpiresAt',
+  ]);
+  assert.deepEqual(response.json().controller, {
+    tabId: 'tab-a',
+    epoch: f.proofs.get(tokenA)!.epoch,
+  });
+  assert.equal(
+    f.created.length,
+    1,
+    'Refresh never dials or reserves another leg',
+  );
+  const wrongSid = await f.signed('/voice/client', {
+    ...permission.params,
+    From: `client:${permission.grant.identity}`,
+    CallSid: `CA${'5'.repeat(32)}`,
+  });
+  assert.equal(wrongSid.statusCode, 403);
+  assert.equal(
+    (await f.voice(call.id)).statusCode,
+    403,
+    'Joined calls cannot mint another ticket',
+  );
+  assert.equal((await f.hangup(call.id)).statusCode, 200);
+  assert.equal((await refresh()).statusCode, 403);
+  browser.terminate();
+  phone.terminate();
+});
+
+for (const reason of ['logout', 'ending'] as const) {
+  test(`signal refresh final delivery refuses ${reason} during asynchronous response hooks`, async (t) => {
+    const entered = deferred();
+    const release = deferred();
+    const f = await fixture(t, {
+      listen: true,
+      refreshResponsePause: () => {
+        entered.resolve();
+        return release.promise;
+      },
+    });
+    const call = (await f.call()).json();
+    const { browser, phone } = await fakeSdkTelephone(f, call);
+    await until(
+      () => f.manager.hasFreshControllerPong(call.id),
+      'matched pong before refresh',
+    );
+    const request = f.app.inject({
+      method: 'POST',
+      url: `/api/calls/${call.id}/voice/refresh`,
+      headers: writeHeaders(),
+      payload: { controller: f.proofs.get(tokenA) },
+    });
+    const pending = Promise.resolve(request);
+    await entered.promise;
+    if (reason === 'logout') f.identity.sessions.get(tokenA)!.revoked = true;
+    else f.manager.beginEndIntent(call.id, 'CALL_END_REQUESTED');
+    release.resolve();
+    const response = await pending;
+    assert.equal(
+      response.statusCode,
+      reason === 'logout' ? 401 : 403,
+      response.body,
+    );
+    assert.doesNotMatch(
+      response.body,
+      /test-only-fake-refresh|tokenExpiresAt|authExpiresAt|controller/,
+    );
+    browser.terminate();
+    phone.terminate();
+  });
+}
+
+test('verified call idle maintenance requires matched media pong and never renews observers or the absolute boundary', async (t) => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  let maintained = 0;
+  const f = await fixture(t, {
+    listen: true,
+    maintainAuthentication: (session, now) => {
+      maintained += 1;
+      assert.ok(
+        now < Math.min(session.idleExpiresAt, session.absoluteExpiresAt),
+      );
+      session.idleExpiresAt = Math.min(session.absoluteExpiresAt, now + 50000);
+    },
+  });
+  f.identity.sessions.get(tokenA)!.absoluteExpiresAt = 500000;
+  const call = (await f.call()).json();
+  const { browser, phone } = await fakeSdkTelephone(f, call, false);
+  const observer = await f.eventsFor(tokenB);
+  await f.status();
+  await f.app.inject({
+    url: '/api/browser-session?tabId=tab-a',
+    headers: readHeaders(),
+  });
+  t.mock.timers.tick(100);
+  assert.equal(
+    maintained,
+    0,
+    'GET/SSE and an open but unproven media connection cannot renew idle',
+  );
+  await until(() => f.pings.get(browser)!.length > 0, 'initial media ping');
+  browser.pong(f.pings.get(browser)!.at(-1)!);
+  await until(() => f.manager.hasFreshControllerPong(call.id), 'verified pong');
+  t.mock.timers.tick(10);
+  assert.ok(maintained > 0);
+  for (let index = 0; index < 26; index += 1) {
+    const previousChallenges = f.pings.get(browser)!.length;
+    f.identity.now += 10000;
+    t.mock.timers.tick(10000);
+    await until(
+      () => f.pings.get(browser)!.length > previousChallenges,
+      'new server challenge',
+    );
+    browser.pong(f.pings.get(browser)!.at(-1)!);
+    await until(
+      () =>
+        f.manager.controllerConnectionDeadline(call.id) ===
+        f.identity.now + 30000,
+      'current matched heartbeat',
+    );
+    assert.equal(f.manager.activeSession?.status, 'active');
+  }
+  assert.ok(
+    f.identity.now > 181000,
+    'Healthy verified media exceeds the observed three-minute window',
+  );
+  assert.ok(
+    f.identity.now > f.voiceGrants.get(call.id)!.grant.tokenExpiresAt,
+    'The original finite signaling token has expired',
+  );
+  assert.ok(f.identity.sessions.get(tokenA)!.idleExpiresAt > 50000);
+  assert.equal(f.identity.sessions.get(tokenA)!.absoluteExpiresAt, 500000);
+  assert.equal(
+    f.identity.sessions.get(tokenB)!.idleExpiresAt,
+    50000,
+    'Read-only observer auth does not advance',
+  );
+  f.identity.now = 500000;
+  t.mock.timers.tick(10);
+  await until(
+    () => f.manager.activeSession === null,
+    'finite absolute auth expiry cleans both legs',
+  );
+  assert.deepEqual([...f.terminated].sort(), [localSid, remoteSid].sort());
+  const stoppedCount = maintained;
+  t.mock.timers.tick(10000);
+  assert.equal(maintained, stoppedCount, 'Retired media cannot revive auth');
+  observer.close();
+  browser.terminate();
+  phone.terminate();
+});
 
 test('server pings keep a silent verified call alive beyond its original lease without browser renewal or SSE', async (t) => {
   t.mock.timers.enable({ apis: ['setInterval'] });

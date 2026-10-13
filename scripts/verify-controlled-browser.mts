@@ -35,8 +35,12 @@ import {
 } from '../src/solo/session-manager';
 import type { TranslationEngine } from '../src/solo/translation-engine';
 import type { NativeContinuousCaption } from '../src/solo/continuous-translation-bridge';
+import { captureControlledCaptionLayout } from './controlled-caption-layout-fixture.mts';
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const layoutPhase = process.env.CONTROLLED_BROWSER_LAYOUT_SNAPSHOT;
+if (layoutPhase !== undefined && !['before', 'after'].includes(layoutPhase)) throw new Error('Layout snapshot must be before or after.');
+const layoutCompleted = Symbol('layout-only-completed');
 const configuredEngine = process.env.CONTROLLED_BROWSER_TRANSLATION_ENGINE;
 if (configuredEngine && !['pocket-prefix', 'continuous-captions'].includes(configuredEngine))
   throw new Error('Offline browser fixture supports pocket-prefix or continuous-captions.');
@@ -126,12 +130,13 @@ let config: SoloConfig;
 // An explicitly substituted Voice SDK, served at the page's normal SDK URL.
 // Its connect travels through the real signed callback and media application.
 const fakeSdk = `(() => {
-  const fixture = window.__offlineVoice = { devices: 0, connects: 0, disconnects: 0, registers: 0, muted: false, hold: false, waiting: null, deferAccept: false, pendingAccept: null, rejectNext: false, mediaTransfers: 0, streams: [] };
+  const fixture = window.__offlineVoice = { devices: 0, connects: 0, disconnects: 0, registers: 0, tokenUpdates: 0, muted: false, hold: false, waiting: null, deferAccept: false, pendingAccept: null, rejectNext: false, mediaTransfers: 0, streams: [] };
   class Emitter { constructor() { this.listeners = new Map(); } on(name, fn) { const all=this.listeners.get(name)||[]; all.push(fn); this.listeners.set(name,all); return this; } off(name, fn) { this.listeners.set(name,(this.listeners.get(name)||[]).filter(item=>item!==fn)); return this; } removeListener(name, fn) { return this.off(name,fn); } emit(name,...args) { for(const fn of this.listeners.get(name)||[]) fn(...args); } }
   class Call extends Emitter { constructor(stream){super();this.stream=stream;} disconnect() { if(this.closed)return;this.closed=true;for(const track of this.stream?.getTracks()||[])track.stop();fixture.disconnects++;this.emit('disconnect'); } mute(value) { fixture.muted=value;this.emit('mute',value); } status() { return this.closed?'closed':'open'; } }
   class Device extends Emitter {
     constructor(token,options={}) { super(); if(!token.startsWith('offline-browser-fake-'))throw new Error('Only fixture tokens are accepted');this.token=token;this.options=options;fixture.devices++;fixture.lastDevice=this; }
     async register() { fixture.registers++;throw new Error('Global registration must not occur'); }
+    updateToken(token) { if(this.destroyed||!token.startsWith('offline-browser-fake-refreshed-'))throw new Error('Only current fixture token updates are accepted');this.token=token;fixture.tokenUpdates++; }
     async connect(options) {
       fixture.connects++;
       if(fixture.rejectNext){fixture.rejectNext=false;throw new Error('Explicit offline SDK failure');}
@@ -555,6 +560,7 @@ try {
       issuedGrants.set(fake, grant);
       return fake;
     },
+    refreshSigner: async () => `offline-browser-fake-refreshed-${Date.now()}`,
     admission: {
       reserve: async () => {
         preparations.voice++;
@@ -681,6 +687,13 @@ try {
     return page;
   }
   const page = await openPage();
+  if (layoutPhase) {
+    await captureControlledCaptionLayout(page, layoutPhase as 'before' | 'after', '/workspace/ai-phone-reference/phone-stability-captions-20261013');
+    assert.equal(providerCreates.length, 0);
+    assert.equal(issuedGrants.size, 0);
+    assert.equal(await page.evaluate('window.__offlineVoice.devices'), 0);
+    throw layoutCompleted;
+  }
   await eventually(
     async () => (await page.state()).start,
     'Idle authenticated page connected',
@@ -817,11 +830,21 @@ try {
   await page.evaluate(
     'window.__offlineVoice.lastDevice.emit("tokenWillExpire")',
   );
-  await pause(30);
+  await eventually(() => page.evaluate('window.__offlineVoice.tokenUpdates === 1'), 'Finite signalling refresh in the current accepted Device');
   check(
     manager.activeSession?.status,
     'active',
     'short join token expiry notification cannot end an already joined call',
+  );
+  check(
+    await page.evaluate('window.__offlineVoice.tokenUpdates'),
+    1,
+    'SDK expiry warning refreshes the finite token in the same Device',
+  );
+  check(
+    await page.evaluate('window.__offlineVoice.connects'),
+    1,
+    'signalling refresh never reconnects or creates another phone call',
   );
   check(
     (await observer.state()).start,
@@ -1925,6 +1948,8 @@ try {
       screenshot: `.runtime/${artifactDirectory}/acceptance.png`,
     }),
   );
+} catch (error) {
+  if (error !== layoutCompleted) throw error;
 } finally {
   refreshRevokeGate?.resolve();
   refreshHangupReplyGate?.resolve();

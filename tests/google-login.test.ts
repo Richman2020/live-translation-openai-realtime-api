@@ -323,6 +323,76 @@ test('login status is non-secret and strictly same-origin, start needs explicit 
   assert.equal(f.tokenRequests, 0);
 });
 
+test('verified call idle maintenance preserves the original identity and finite absolute deadline', async (t) => {
+  const f = await fixture(t, { idleTimeoutMs: 2000, absoluteTimeoutMs: 5000 });
+  const session = await f.signIn();
+  const started = f.now;
+  const context = f.login.policy.authenticate(
+    { ...writeHeaders(session.session), 'x-phone-csrf': session.csrf },
+    'mutate',
+    { surface: 'http', method: 'POST' },
+  );
+  f.login.policy.registerCall(context, 'verified-call');
+  f.setNow(started + 1500);
+  f.login.renewFromVerifiedCall(context, 'verified-call');
+  assert.equal(
+    (await f.current(session.session)).json().deadline,
+    started + 3500,
+  );
+  assert.equal(f.login.policy.expiresAt(context, 'mutate'), started + 3500);
+  f.setNow(started + 3000);
+  f.login.renewFromVerifiedCall(context, 'verified-call');
+  assert.equal(f.login.policy.expiresAt(context, 'mutate'), started + 5000);
+  f.setNow(started + 4500);
+  f.login.renewFromVerifiedCall(context, 'verified-call');
+  assert.equal(f.login.policy.expiresAt(context, 'mutate'), started + 5000);
+  assert.equal(
+    f.tokenRequests,
+    1,
+    'No refresh credentials or provider exchange are added',
+  );
+  f.setNow(started + 5000);
+  assert.throws(() => f.login.renewFromVerifiedCall(context, 'verified-call'), {
+    code: 'UNAUTHORIZED',
+  });
+  assert.equal((await f.current(session.session)).statusCode, 401);
+});
+
+test('verified call idle maintenance cannot revive expired auth, another owner, reads or copied contexts', async (t) => {
+  const f = await fixture(t, { idleTimeoutMs: 2000, absoluteTimeoutMs: 5000 });
+  const session = await f.signIn();
+  const context = f.login.policy.authenticate(
+    { ...writeHeaders(session.session), 'x-phone-csrf': session.csrf },
+    'mutate',
+    { surface: 'http', method: 'POST' },
+  );
+  f.login.policy.registerCall(context, 'verified-call');
+  const other = await f.signIn();
+  const otherContext = f.login.policy.authenticate(
+    { ...writeHeaders(other.session), 'x-phone-csrf': other.csrf },
+    'mutate',
+    { surface: 'http', method: 'POST' },
+  );
+  assert.throws(() =>
+    f.login.renewFromVerifiedCall(otherContext, 'verified-call'),
+  );
+  assert.throws(() =>
+    f.login.renewFromVerifiedCall({ ...context }, 'verified-call'),
+  );
+  const read = f.login.policy.authenticate(
+    readHeaders(session.session),
+    'read',
+    { surface: 'http', method: 'GET' },
+  );
+  assert.throws(() => f.login.renewFromVerifiedCall(read, 'verified-call'));
+  assert.throws(() => f.login.renewFromVerifiedCall(context, 'unknown-call'));
+  f.setNow(f.now + 2000);
+  assert.throws(() => f.login.renewFromVerifiedCall(context, 'verified-call'), {
+    code: 'UNAUTHORIZED',
+  });
+  assert.equal((await f.current(session.session)).statusCode, 401);
+});
+
 test('server-generated independent state nonce and PKCE produce a verified opaque Strict session', async (t) => {
   const f = await fixture(t);
   const login = await f.signIn();

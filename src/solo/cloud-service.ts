@@ -10,6 +10,8 @@ import {
   type CloudVoiceGrant,
   type CloudVoiceAdmission,
   type CloudVoiceSigner,
+  type CloudVoiceRefreshGrant,
+  type CloudVoiceRefreshSigner,
 } from './cloud-voice-join';
 import { CloudPhoneAccess } from './cloud-phone-access';
 import { GoogleBrowserLogin } from './google-login';
@@ -24,6 +26,7 @@ import {
 } from './session-manager';
 import { buildCloudControlledServer } from './server';
 import { createCloudIngress } from './cloud-ingress';
+import { sanitizeTerminationCause } from './call-termination-diagnostics';
 
 const identifier = /^[A-Za-z0-9_-]{1,128}$/;
 
@@ -63,13 +66,17 @@ export function registerCloudServiceSignals(
 /** Locked SDK, local signing only. The signed callback still consumes the
  * separate one-call join capability; this JWT cannot enforce one call itself.
  */
-export function createCloudVoiceSigner(
+function cloudVoiceSigner(
   config: CloudServiceConfig,
   now: () => number = Date.now,
-): CloudVoiceSigner {
-  return async (grant: CloudVoiceGrant) => {
+): (grant: CloudVoiceGrant | CloudVoiceRefreshGrant) => Promise<string> {
+  return async (grant) => {
+    if (!grant || typeof grant !== 'object')
+      throw new Error('CLOUD_VOICE_SIGNING_DENIED');
     const time = now();
     const expiry = grant?.tokenExpiresAt;
+    const refresh = 'purpose' in grant;
+    const signingDeadline = refresh ? grant.signingExpiresAt : grant.expiresAt;
     if (
       !Number.isSafeInteger(time) ||
       time < 0 ||
@@ -91,12 +98,13 @@ export function createCloudVoiceSigner(
       grant.controller.epoch < 0 ||
       !Number.isSafeInteger(grant.issuedAt) ||
       grant.issuedAt > time ||
-      !Number.isSafeInteger(grant.expiresAt) ||
-      grant.expiresAt - grant.issuedAt > 60000 ||
-      grant.expiresAt - time < 1000 ||
+      (refresh && grant.purpose !== 'refresh') ||
+      !Number.isSafeInteger(signingDeadline) ||
+      signingDeadline - grant.issuedAt > 60000 ||
+      signingDeadline - time < 1000 ||
       !Number.isSafeInteger(grant.authExpiresAt) ||
       !Number.isSafeInteger(expiry) ||
-      expiry < grant.expiresAt ||
+      expiry < signingDeadline ||
       expiry > grant.authExpiresAt ||
       expiry - grant.issuedAt > CLOUD_VOICE_SIGNALING_LIFETIME_MS ||
       expiry <= time ||
@@ -132,8 +140,81 @@ export function createCloudVoiceSigner(
       encoded.exp * 1000 <= now()
     )
       throw new Error('CLOUD_VOICE_SIGNING_DENIED');
+    // Fixed numeric protocol metadata only; never serialize a grant or JWT.
+    try {
+      console.log(
+        JSON.stringify({
+          event: 'CLOUD_VOICE_SIGNALING_VALIDITY',
+          purpose: refresh ? 'refresh' : 'initial',
+          observedAtMs: time,
+          jwtExpiresAtEpochSeconds: encoded.exp,
+          authExpiresAtEpochSeconds: Math.floor(grant.authExpiresAt / 1000),
+        }),
+      );
+    } catch {
+      /* Diagnostics cannot alter authorization. */
+    }
     return token;
   };
+}
+
+export function createCloudVoiceSigner(
+  config: CloudServiceConfig,
+  now: () => number = Date.now,
+): CloudVoiceSigner {
+  const sign = cloudVoiceSigner(config, now);
+  return async (grant) => {
+    if (!grant || typeof grant !== 'object' || 'purpose' in grant)
+      throw new Error('CLOUD_VOICE_SIGNING_DENIED');
+    return sign(grant);
+  };
+}
+
+export function createCloudVoiceRefreshSigner(
+  config: CloudServiceConfig,
+  now: () => number = Date.now,
+): CloudVoiceRefreshSigner {
+  const sign = cloudVoiceSigner(config, now);
+  return async (grant) => {
+    if (grant?.purpose !== 'refresh')
+      throw new Error('CLOUD_VOICE_SIGNING_DENIED');
+    return sign(grant);
+  };
+}
+
+export function reportCloudCallTermination(
+  value: unknown,
+  sink: (line: string) => void = (line) => console.log(line),
+): void {
+  const field = (name: string): unknown => {
+    try {
+      return value && typeof value === 'object'
+        ? Object.getOwnPropertyDescriptor(value, name)?.value
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  const observed = field('observedAtMs');
+  const elapsed = field('elapsedMs');
+  const valid = (number: unknown) =>
+    Number.isSafeInteger(number) &&
+    Number(number) >= 0 &&
+    Number(number) <= 4102444800000;
+  const payload = {
+    event: 'CLOUD_CALL_TERMINATION',
+    ...sanitizeTerminationCause(value),
+    observedAtMs: valid(observed) ? observed : null,
+    elapsedMs:
+      valid(elapsed) && valid(observed) && Number(elapsed) <= Number(observed)
+        ? elapsed
+        : null,
+  };
+  try {
+    sink(JSON.stringify(payload));
+  } catch {
+    /* The cleanup path never depends on logging. */
+  }
 }
 
 /** Expiry closes admission synchronously before the asynchronous cleanup. A
@@ -309,12 +390,14 @@ export async function createCloudService(
       maxCallMs: null,
       allowedTarget: config.allowedTarget,
     });
+    manager.on('diagnostic', reportCloudCallTermination);
     const leases = new CloudControllerLeases({ policy: login.policy, now });
     const voice = new CloudVoiceJoin({
       policy: login.policy,
       outgoingApplicationSid: config.providers.TWILIO_TWIML_APP_SID,
       now,
       signer: createCloudVoiceSigner(config, now),
+      refreshSigner: createCloudVoiceRefreshSigner(config, now),
       admission: createPersonalVoiceAdmission(manager),
     });
     const assertSnapshot = (settings: CloudServiceConfig['providers']) => {
@@ -331,6 +414,8 @@ export async function createCloudService(
       allowedTranslationEngines: ['continuous-captions'],
       defaultTranslationEngine: 'continuous-captions',
       outgoingPairedCaptions: config.outgoingPairedCaptions,
+      maintainAuthentication: (context, callId) =>
+        login!.renewFromVerifiedCall(context, callId),
       publicReadinessChecker: async (settings) => {
         if (settings.PUBLIC_BASE_URL !== config.runtime.publicOrigin)
           throw new Error('CLOUD_CONFIG_CHANGED');

@@ -4,7 +4,48 @@
 
 需求见 [PROJECT_BRIEF.md](PROJECT_BRIEF.md)，工作规则见 [AGENTS.md](AGENTS.md)，运行步骤见 [LOCAL_SETUP.md](LOCAL_SETUP.md)，后续执行入口见 [LOCAL_CODEX_HANDOFF.md](LOCAL_CODEX_HANDOFF.md)。
 
-## 最新：初步实测成功后修复自动通话控制，新候选待 dot 验收（2026-10-13）
+## 最新：三项稳定性/字幕修复与离线交付；本轮未推送或部署（2026-10-13）
+
+- 用户最新授权仅取消个人应用金额/固定时长/测试截止强制结束、扩大字幕阅读区、自然增量分段及必要诊断/离线回归。从原分支 `codex/ai-phone-auto-control-fix-20261013` 的完整 `22c81aba16055d950c6049162d40dad36e8ab8d0` 在 `/workspace/ai-phone-cloud-recovery-20261012` 继续，未重建/恢复/安装；本轮开始已有未提交PROGRESS已独立备份，不覆盖附件、旧审计或原工作区。
+- 已更正前一段“22未上线”的过期现场：只读指定AI/staging实际部署 **83536c9b-c8d3-4f17-a84f-16a1460459fa** SUCCESS，source pin及部署meta完整22，2026-10-13北京时间14:38:24创建、14:38:56成功，staged=null。此前工具确认取消的历史保留；后续用户手动完成的部署现已实际回读，本轮未再次提交或部署、不操作portal-test。
+- 本通实际脱敏HTTP证据：14:39:52 Google callback200，14:43:06创建，14:46:10.515/.525两个media连接结束（176.259/181.217秒），14:46:10.708控制renew仍200，14:46:10.739才收到页面hangup。18次renew全200，无Voice4xx/5xx、通话窗runtime无首因。hangup不是手动操作证据；登录默认15min及callback时间不支持“拨号只余3min”的推测。Twilio对应通话详情/关闭原因仍未取得，**本通181秒自动结束根因未确认**，不能把本次静态缺口修复写成已证明真人断线根治。
+- 应用限制逐路径核实：personal factory维持 `maxCallMs:null`、无budget journal/providerUsage、无预算派生Twilio timeLimit；phone配置不读取或装配旧test deadline。平台OAuth仅可见 `CLOUD_TEST_DEADLINE` 名称，现值未读到，存在不等于生效；旧180秒connection-maintenance只作用local空闲，不能保护/结束本通。未发现可删除的personal固定180秒总时限，不声称删了不存在逻辑；金额/测试预算/固定总时长不参与正常personal call。真实媒体/供应商故障仍结束清理。
+- 已修确定缺口：显式拨号先以原CSRF续有限身份；服务器仅有原owner/有效身份/绑定本通/controller/SID及fresh随机匹配pong才续15min idle（GET/SSE/OPEN/观察页不续）。新增同一accepted call有限Voice JWT refresh，同identity/application、incomingAllow=false、原single-use join/nonce/SID不变，签名后/onSend/前端代际复验；Device.updateToken而非重建/重拨。首pong未到409可有限重试，挂断/退出的迟到response丢弃。原8h absolute认证边界保留，达到仍cleanup，不能承诺任意时长；SDK实际updateToken短暂音频影响未实测。
+- 首个结束意图只记固定enum/layer/role、数值时间/elapsed/WS close code及session期限；区分native、caption ASR/text关闭/超时，非fatal caption不污染后来首因。signer只记实际encoded JWT/auth数值期限。无密钥/号码/SID/raw exception/close reason/正文，sink抛错不阻断两腿。CALL_END_REQUESTED只表示应用结束请求，不标用户手动。
+- 字幕层定位：400ms VAD item.completed旧逻辑直接逐条final并按碎片翻译，前端按稳定utteranceId忠实显示。改为同来源累计draft、中文及时修订、可靠自然句终/长source分段；普通字幕idle1.6s，≤3词/未完末词4s，稳定片段立即中文draft、delta350ms。实测离线暂停2050ms的for the不final，续ection同ID且不补s；长source精确子句保全文，旧中文清空重译，stale修订不能错配。当前local/remote来源隔离，不冒称多人声纹识别；native声音/模型/provider/audio send/play/流控保持。
+- 主要字幕同视口净可视面积达标：1280×900高度178.6875→518px、面积**3.4944倍**、可见中文56→112；1366×768高度46.6875→386px、面积9.7498倍；mobile首屏0→464px不计算零基线倍率。中文17px/英文13px、44px挂断首屏及下滚可见命中、历史条/展开状态/无zoom无横溢通过；非controlled原几何不变。当前continuous/paired=false补图单独保留，不用Pocket同稿样例伪装当前生产音频方案；手机字幕优先，首次拨号须下滚到号码卡。
+- **本轮最终统一验证**：`npm test` 1397 total / **1392 pass / 5 Windows条件skip / 0 fail/cancel**；`npm run typecheck`和`npm run build`通过。真实Chrome151/实际本地router DOM：`test:controlled:browser` **84**、`test:controlled:continuous:browser` **90**、paired=false同命令 **87**，Google browser **29**；全部外部请求/真实供应商调用/异常0。新增server维护260秒跨181s/初始JWT/idle、跨后台控制期、第二标签/CSRF/身份拒绝、签名中及最终onSend退出/挂断、手动/真实断线两腿清理；未用旧包、旧22测试或成功CI数量作本轮结果。
+- 失败/跳过保留：字幕分段早期路由timing、auth anti-enumeration测试断言差异均修后专项通过；独立审查发现A→B→A final旧active revision竞态（P2）已修并补修前红/修后绿，最终统一全通过。5 Windows专用PowerShell/process identity/ACL用例本Linux未执行；付费电话/模型、线上新候选与实际刷新听感/字幕语义质量未执行。定向lint无新源码错误；两处固定production console诊断有no-console提示，bridge历史index++提示保留，不为此重构。
+- 独立审查已复核P2闭合、owner/token/nonce/SID/onSend、caption stale/finish和fatal-only diagnostics；独立音频AST审计7定向投影一致、关键音频方法及11配置/worker/Dockerfile全文保持，未把整函数诊断变更说成未修改。冻结输入31/31 bytes/hash一致（清单SHA `e4ed17cab9a8d2cfdfe19ee96c4c4f0fc53d92ff1563acb15cfff84bd14e4142`）；package/lock/AGENTS不变，原工作区44/44、附件/需求资料19/19保护哈希独立通过。旧浏览器产物已备份，新产物另存本轮audit。
+- 收口仅修新增ingress regexp参数换行/尾逗号的格式提示，规范化AST逐节点相等，不改逻辑；受影响ingress15/15复跑通过、定向lint通过，typecheck再次通过。原31输入与全部完整suite/DOM成绩保留，另存最终31输入清单 `verification-inputs.final.json`（SHA `cb390d4f021bd8272faad19fedd729673a59b69c2ba558edffa32d9b99e1c40e`），其余30项字节不变，独立审查补版本绑定。全组scoped lint仍有bridge旧 `++providerConnectionSequence` no-plusplus 1 error及两个安全console warning，非本轮新增功能失败，不宣称全组lint通过；原音频序号逻辑未改。
+- 本地提交候选及完整SHA由本轮最后回执记录，代码/测试已冻结，不夹带休眠或其他业务。文档 [完整修复与边界](docs/CLOUD_PHONE_STABILITY_CAPTIONS_2026-10-13.md)；资料 `/workspace/ai-phone-reference/phone-stability-captions-20261013`。尚未推送/新PR或CI/部署，不使用旧发布批准；由dot核对候选、报告和截图后安排新发布及用户本人实测。线上仍完整22，Twilio通话结束原因待补，离线通过不是真实通话验收。
+
+## 历史：22 发布曾获批并暂存，14:30工具执行确认取消；后来手动部署已由上段更新（2026-10-13）
+
+- 本轮用户明确批准精确 `22c81aba16055d950c6049162d40dad36e8ab8d0` 在指定AI staging发布一次。该聊天授权有效，未重复索取；实际所阻断的是发布工具执行确认。没有重新盘点、安装、测试或供应商配置核验，没有新增本地Codex验收。
+- 发布前回读[PR #5](https://github.com/Richman2020/live-translation-openai-realtime-api/pull/5)仍open/draft、base完整95/head完整22；[成功CI #67](https://github.com/Richman2020/live-translation-openai-realtime-api/actions/runs/38355173233) `38355173233`仍completed/success，远端ls-remote完整22一致。本地HEAD22和另外351 tracked文件全文保持，仅本PROGRESS未提交且已备份至本轮资料目录；没有夹带新业务、休眠或其他未验证内容。
+- 初始平台指定project `145aa27a-3a84-4e4d-91f9-b97f33bf6d42` / staging `c5db5ddb-26b6-48ce-b920-dc1ebbe30fa8` / AI `407bede7-11b6-4260-b055-a8045dc71588`仍实际部署 `887f89bd-1c1a-449b-a545-d92f7641942a`、完整SHA `95ab05593863c004abbf2d355c4bcaa4f8caaf0e`、SUCCESS；staged=null，环境待变更为空，无未知更新或重复发布。
+- 已仅对该AI/staging以 `staged:true` 暂存来源，patch **`4fa3defd-7e66-49fd-99d3-0806064eb8fe`**，2026-10-13 **14:30:37北京时间**创建。随后全环境review确认仅两个字段：`source.branch`原恢复分支→`codex/ai-phone-auto-control-fix-20261013`，`source.commitSha`95→完整22；无其他服务、变量、资源、权限、凭据、套餐、休眠或private networking变化。未操作portal-test或合并main。
+- 仅一次调用 `railway_accept_deploy` 提交此环境现有patch，工具返回 **`Cancelled — the user did not approve this action. No changes were made.`**、`isError=true`、`error_code=INVALID_ARGUMENT`。这是工具执行确认返回的取消，不改写为用户撤回聊天授权，也没有证据断言账户缺少权限或是自动审批审查拒绝。已按用户要求停下：不重试accept、不换CLI/API写入路径、不另建patch，不回滚或重复部署。
+- 取消后只读实际部署列表无新ID；active部署仍887/95，AI **Online、1/1运行、0崩溃/近期失败/通知**。唯一pendingWork为上述patch、status=staged，完整review仍仅这两字段。describe-service配置是“叠加暂存后的配置”，显示22不能当成已经运行22；部署meta和active状态仍95。回退参考887/完整95保留，平台canRollback=true；不自动回退。
+- 新版本构建/启动日志、`/api/health`、公网 `/controlled` 及在线手动控制/倒计时移除验收 **未执行：22尚未部署**。本云环境当前observations_current=true、network restricted/enforced，policy未允许AI公网域名；没有主动GET、绕过代理或新增权限。候选的控制操作移除及倒计时已由上一轮源码/离线CI证实，但不能替代此次在线网页核验。完整测试网址仍 `https://ai-phone-test-staging.up.railway.app/controlled`，没有用户消息里误附的中文尾串，不宣布新修复可试打。
+- 当前具体关口：现有patch4fa3…的工具执行确认已取消，平台尚未应用。用户若亲自在Railway提交同一现有两字段patch，本云端只跟进该次新部署，不重复提交；聊天发布授权不需再次申请。资料及原始工具返回在 `/workspace/ai-phone-reference/deployment-20261013-22c81ab`。PROGRESS继续仅本地记录，不改变候选或推送；真实电话/模型调用0，挂断/翻译/字幕实际效果仍留用户本人后续实测。
+
+## 历史：自动控制候选已精确推送、PR #5 与本轮 CI 全通过；当时待发布（2026-10-13）
+
+- 本轮用户授权推送/PR/CI，不发布、不拨号、不操作portal-test、不加入休眠优化。候选固定 **`22c81aba16055d950c6049162d40dad36e8ab8d0`**，本地HEAD/tree与上一轮独立审查绑定一致；24路径全文核对，无新业务。本轮开始工作区clean，现仅本进度记录本地更新，不提交或夹带进候选。
+- 推送前只读核Railway指定AI staging：source仍 `codex/ai-phone-cloud-recovery-20261012` / 精确 `95ab05593863c004abbf2d355c4bcaa4f8caaf0e`，staged=null，部署 `887f89bd-1c1a-449b-a545-d92f7641942a` SUCCESS。因此推送不同的独立 `codex/ai-phone-auto-control-fix-20261013` 不匹配既有来源；未改变平台配置或将其泛化为全局自动部署开关已关闭。该新远端分支此前不存在，非强制按完整SHA refspec推送，ls-remote回读22完全匹配；恢复远端仍95。
+- 已创建并附加[草稿PR #5](https://github.com/Richman2020/live-translation-openai-realtime-api/pull/5)，open/draft/未合并。实际base为恢复分支/95，head为自动控制修复分支/22，1commit/24paths/1763新增119删除；不使用main或4f交接分支作本轮比较基线。
+- [Offline phone regression #67](https://github.com/Richman2020/live-translation-openai-realtime-api/actions/runs/38355173233)，run `38355173233`、job `115156264712`、attempt1由PR自动触发后最终 **completed/success**，run最终更新时间 **2026-10-13 14:15:38北京时间**（非另造job结束时间）。固定head_sha=22、head tree=`2d7f20ec35d480557c3d28f2e1bb56f18e7a5413`，20个job steps全部success；exact22 check-runs只读亦显示offline completed/success。没有CI失败或修复/新SHA，没有重触发/重跑，PR只补成功验证说明，仍open/draft未合并。
+- Hosted CI实际日志全量 **1324总/1319pass/5既有Windows skip/0fail/0cancel**，七个浏览器 **16/82/88/85/29/48/82** 均passed=true、externalRequests=0、exceptions=[]；后六个供应商fixture realSupplierCalls=0，纯conversation组未输出该字段，不伪补。CI Chrome154.0.8037.97与上一轮local Chrome151分开；安装ignore-scripts、build、typecheck、全部mock回归、JS语法、Docker离线artifact及format/收尾实际success，不借用旧CI或本地成绩。本轮未重跑原本地离线检查、需求或供应商配置核验。
+- 实际job checkout临时merge **`4c8edc7eb843fd04ff8cf14014fdc3c1dfa710c3`**，日志和独立GitData核对父顺序95/22、tree与候选完全相同2d7；独立代理回读最终job/run/log与exact candidate绑定通过。部署仍固定22，不拿临时merge SHA替代。完整joblog SHA256 `2bed43d81889832b67fb763811a783c749a2924931d953abec6f8e6df0a78c96`。workflow只有依赖获取、编译、mock/拦截供应商与无网络Docker检查，无部署/付费电话或模型步骤；常规依赖下载不是全CI禁网。
+- 推送后只读AI部署列表最新仍887/95，当前canRollback=true/canRedeploy=true，没有新候选部署。当前887/95回退参考保留，旧922/4f仍为历史参考；回退计划使用已部署95。本轮无Railway patch/accept/deploy/restart/rollback，无凭据、权限、号码或套餐操作。
+- CI后最终只读服务仍887/95 SUCCESS、来源仍原恢复分支/精确95、staged=null，没有新部署或其他暂存变更。已准备发布：仅在 `ai-phone-portal-trial/145aa27a-3a84-4e4d-91f9-b97f33bf6d42` → staging `c5db5ddb-26b6-48ce-b920-dc1ebbe30fa8` → AI `407bede7-11b6-4260-b055-a8045dc71588` 将source.branch改本次独立分支、source.commitSha固定完整22，审阅仅这两字段后发布一次；不夹带本地未提交PROGRESS。
+- 无新增运行变量、凭据、供应商/身份权限或付费资源，build/start/卷/容量/Hobby均保持；源码指向变化是新版发布操作的一部分，并非本轮已执行。既有Railway构建/运行仍实际计费，两服务合计$3提醒/$4用户决定关停且非硬封顶；Twilio/OpenAI费用另算，本轮真实调用0。
+- 发布后按实际active deployment/SHA22、phone固定启动标记、健康 `/api/health`、`https://ai-phone-test-staging.up.railway.app/controlled` 页面核验，部署SUCCESS/HTTP200不能单独算通话验收。云端公网GET若仍被allowlist阻塞如实分开记录，由用户打开页面，不安排重复本地Codex验收。异常停止，以当前95部署887作精确Rollback参考（本轮canRollback=true）；回退后核实际SHA95/启动/健康及源码指向，若届时不能回滚，先报告并提恢复原分支/精确95再发一次的替代，不自动重发/回滚。
+- 本轮推送、独立CI绑定、全量日志和发布方案保存 `/workspace/ai-phone-reference/publication-20261013-22c81ab`。**CI已通过，已准备好发布，尚缺新候选22的一次指定AI staging发布授权；本轮没有发布。** 发布后由用户本人试打，号码1406确认沿用，次数/时长/电话与模型预算另外确认；旧建议不作授权。电话稳定后再单独处理休眠优化。
+
+## 历史：初步实测成功后修复自动通话控制，本地候选已验证（2026-10-13）
 
 - 用户本人已实际完成开头一句中文和一句英文，对当前声音、翻译满意，随后中断。本轮范围仅自动处理本页控制、取消手动取得/续约/保持及倒计时，不扩展字幕、声音、登录或来电功能。此前部署授权已经使用，本候选不自动推送、部署或付费试打。历史中“真实通话未进行”的描述对应当时状态，现以本次初步实测为准；整通验收仍未通过。
 - 基线及当前线上完整 SHA 为 `95ab05593863c004abbf2d355c4bcaa4f8caaf0e`，运行部署 `887f89bd-1c1a-449b-a545-d92f7641942a`，只读核对仍 SUCCESS。原目录/附件及旧 PROGRESS 均保留；在既有工作目录 `/workspace/ai-phone-cloud-recovery-20261012` 新建 `codex/ai-phone-auto-control-fix-20261013`，沿用现有锁定依赖，没有再次安装。

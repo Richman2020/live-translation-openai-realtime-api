@@ -12,7 +12,12 @@ import {
   type BoundControllerLease,
   type ControllerProof,
 } from './controller-lease';
-import { CloudVoiceJoin, type PreparedCloudVoice } from './cloud-voice-join';
+import {
+  CloudVoiceJoin,
+  CloudVoiceJoinError,
+  type PreparedCloudVoice,
+  type RefreshedCloudVoiceToken,
+} from './cloud-voice-join';
 import type { checkPublicReadiness } from './public-readiness';
 import type { checkTranslationEngine } from './provider-checks';
 import { SessionError, SessionManager, type CallView } from './session-manager';
@@ -82,6 +87,20 @@ export class CloudPhoneAccess {
     }
   >();
 
+  private readonly issuedRefresh = new WeakMap<
+    RefreshedCloudVoiceToken,
+    {
+      context: CloudAccessContext;
+      callId: string;
+      controller: BoundControllerLease;
+    }
+  >();
+
+  private readonly maintainAuthentication?: (
+    context: CloudAccessContext,
+    callId: string,
+  ) => void;
+
   private readonly calls = new Map<
     string,
     {
@@ -119,6 +138,10 @@ export class CloudPhoneAccess {
     outgoingPairedCaptions?: boolean;
     maxCalls?: number;
     revalidationIntervalMs?: number;
+    maintainAuthentication?: (
+      context: CloudAccessContext,
+      callId: string,
+    ) => void;
   }) {
     const maxCalls = options?.maxCalls ?? 100;
     const interval = options?.revalidationIntervalMs ?? 1000;
@@ -141,6 +164,9 @@ export class CloudPhoneAccess {
           options.voiceJoin.policy !== options.policy)) ||
       typeof options.publicReadinessChecker !== 'function' ||
       typeof options.translationReadinessChecker !== 'function' ||
+      (options.maintainAuthentication !== undefined &&
+        Object.prototype.toString.call(options.maintainAuthentication) !==
+          '[object Function]') ||
       !Array.isArray(engines) ||
       engines.length < 1 ||
       engines.length > controlledTranslationEngines.length ||
@@ -168,6 +194,7 @@ export class CloudPhoneAccess {
     this.allowedTranslationEngines = Object.freeze([...engines]);
     this.defaultTranslationEngine = defaultEngine;
     this.outgoingPairedCaptions = outgoingPairedCaptions;
+    this.maintainAuthentication = options.maintainAuthentication;
     this.timer = setInterval(() => this.checkLifecycle(), interval);
     this.timer.unref();
   }
@@ -288,6 +315,49 @@ export class CloudPhoneAccess {
       ['ending', 'completed', 'failed'].includes(active.status)
     )
       throw new CloudAccessError('FORBIDDEN');
+  }
+
+  private assertSignalingConnection(callId: string): void {
+    const state = this.calls.get(callId);
+    if (
+      !state?.joined ||
+      this.manager.activeSession?.id !== callId ||
+      this.manager.hasEndIntent(callId)
+    )
+      throw new CloudAccessError('FORBIDDEN');
+    if (!this.manager.hasFreshControllerPong(callId))
+      throw new CloudVoiceJoinError('VOICE_CONNECTION_NOT_READY', true);
+    this.voiceJoin!.assertJoinedCurrent(callId);
+  }
+
+  async refreshVoiceToken(
+    context: CloudAccessContext,
+    callId: string,
+    proof: ControllerProof,
+  ): Promise<RefreshedCloudVoiceToken> {
+    this.readAccess(context, callId, 'mutate');
+    const controller = this.authorizeController(context, proof, callId);
+    if (!this.voiceJoin)
+      throw new CloudVoiceJoinError('VOICE_CONNECTION_NOT_READY');
+    this.assertSignalingConnection(callId);
+    const result = await this.voiceJoin.refreshToken(context, callId);
+    this.issuedRefresh.set(result, { context, callId, controller });
+    this.assertRefreshResponseCurrent(context, callId, result);
+    return result;
+  }
+
+  assertRefreshResponseCurrent(
+    context: CloudAccessContext,
+    callId: string,
+    response: RefreshedCloudVoiceToken,
+  ): void {
+    const issued = this.issuedRefresh.get(response);
+    if (!issued || issued.context !== context || issued.callId !== callId)
+      throw new CloudAccessError('UNAUTHORIZED');
+    this.readAccess(context, callId, 'mutate');
+    this.controllerLeases.authorizeCurrent(issued.controller);
+    this.assertSignalingConnection(callId);
+    this.voiceJoin!.assertRefreshedCurrent(context, callId, response);
   }
 
   async prepareCreate(
@@ -579,6 +649,14 @@ export class CloudPhoneAccess {
       this.policy.authorizeCall(state.context, active.id, 'mutate');
       this.controllerLeases.authorizeCurrent(state.controller);
       if (state.joined) this.voiceJoin.assertJoinedCurrent(active.id);
+      if (
+        state.joined &&
+        this.maintainAuthentication &&
+        this.manager.hasFreshControllerPong(active.id)
+      )
+        this.policy.runAuthorizedCall(state.context, active.id, 'mutate', () =>
+          this.maintainAuthentication!(state.context, active.id),
+        );
       return;
     } catch {
       // This is private safety cleanup, not a fresh browser mutation permission.

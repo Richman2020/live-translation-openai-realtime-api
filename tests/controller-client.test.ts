@@ -1189,3 +1189,65 @@ test('an SDK connection resolving after successful logout is disconnected and ca
   assert.equal(f.client.state.lease, null); assert.equal(f.client.state.canControl, false);
   assert.equal(f.client.state.canMute, false); assert.equal(f.client.state.phase, 'readonly'); await f.close();
 });
+
+test('explicit Google dialing renews the finite identity before acquiring or creating a call', async () => {
+  const f = fixture(); const sdk = callFixture();
+  f.overrides.set('/auth/session/renew', entry => {
+    assert.deepEqual(entry.body, {}); assert.equal(entry.options.headers['x-phone-csrf'], f.csrf);
+    return response({ ok: true });
+  });
+  await f.client.boot(); f.client.setConnectionState(true);
+  await f.client.dial('+15550000000', { renewIdentity: true, connectVoice: () => sdk.call });
+  const paths = posts(f).map(entry => entry.path);
+  assert.ok(paths.indexOf('/auth/session/renew') < paths.indexOf('/api/controller/acquire'));
+  assert.ok(paths.indexOf('/auth/session/renew') < paths.indexOf('/api/calls'));
+  assert.equal(paths.filter(path => path === '/api/calls').length, 1); await f.close();
+});
+
+test('failed or late identity renewal cannot acquire control or dial after logout', async () => {
+  for (const denied of [true, false]) {
+    const f = fixture(); const renewal = deferred();
+    f.overrides.set('/auth/session/renew', () => denied ? response({ error: 'UNAUTHORIZED' }, 401) : renewal.promise);
+    f.overrides.set('/auth/logout', () => response({ ok: true }));
+    await f.client.boot(); f.client.setConnectionState(true);
+    const dialing = f.client.dial('+15550000000', { renewIdentity: true, connectVoice: () => callFixture().call }).catch((error: any) => error);
+    await flush();
+    if (!denied) { await f.client.logout(); renewal.resolve(response({ ok: true })); }
+    assert.ok(['UNAUTHORIZED', 'CALL_CANCELLED'].includes((await dialing).code));
+    assert.equal(posts(f, '/acquire').length, 0); assert.equal(posts(f).filter(entry => entry.path === '/api/calls').length, 0);
+    assert.equal(f.client.state.authenticated, false); await f.close();
+  }
+});
+
+test('only the accepted owner can refresh its token when background timers and SSE are paused', async () => {
+  const f = fixture(); await f.ready(); const sdk = callFixture();
+  f.overrides.set('/api/calls/call-1/voice/refresh', entry => {
+    assert.deepEqual(entry.body.controller, { tabId: f.client.tabId, leaseId: f.capability, epoch: 1 });
+    assert.equal(entry.options.headers['x-phone-csrf'], f.csrf);
+    return response({ token: 'offline-finite-refreshed', callId: 'call-1', controller: { tabId: f.client.tabId, epoch: 1 },
+      tokenExpiresAt: f.time.now() + 900000, authExpiresAt: f.time.now() + 900000 });
+  });
+  await assert.rejects(f.client.refreshVoiceToken('call-1'), { code: 'CONTROL_REQUIRED' });
+  await f.client.startCall('+15550000000', { connectVoice: () => sdk.call });
+  assert.equal(f.client.markVoiceAccepted('call-1'), true);
+  f.client.setVisible(false); f.client.setConnectionState(false); f.time.jump(181000);
+  const other = f.makeClient(); await other.boot(); other.setConnectionState(true);
+  await assert.rejects(other.refreshVoiceToken('call-1'), { code: 'CONTROL_REQUIRED' });
+  const renewed = await f.client.refreshVoiceToken('call-1');
+  assert.equal(renewed.token, 'offline-finite-refreshed'); assert.ok(renewed.tokenExpiresAt > f.time.now());
+  assert.equal(sdk.count(), 0); assert.equal(posts(f).filter(entry => entry.path === '/api/calls').length, 1); await f.close();
+});
+
+test('a late signalling refresh after manual hangup is discarded while cleanup remains effective', async () => {
+  const f = fixture(); await f.ready(); const sdk = callFixture(); const renewal = deferred();
+  f.overrides.set('/api/calls/call-1/voice/refresh', () => renewal.promise);
+  await f.client.startCall('+15550000000', { connectVoice: () => sdk.call }); f.client.markVoiceAccepted('call-1');
+  const first = f.client.refreshVoiceToken('call-1').catch((error: any) => error);
+  const second = f.client.refreshVoiceToken('call-1').catch((error: any) => error);
+  await flush(); assert.equal(posts(f, '/refresh').length, 1);
+  await f.client.hangup();
+  renewal.resolve(response({ token: 'offline-late', callId: 'call-1', controller: { tabId: f.client.tabId, epoch: 1 },
+    tokenExpiresAt: f.time.now() + 900000, authExpiresAt: f.time.now() + 900000 }));
+  assert.equal((await first).code, 'CALL_CANCELLED'); assert.equal((await second).code, 'CALL_CANCELLED');
+  assert.ok(sdk.count() >= 1); assert.equal(f.client.state.call, null); assert.equal(f.client.state.cleanupPending, false); await f.close();
+});

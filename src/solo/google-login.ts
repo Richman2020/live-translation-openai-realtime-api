@@ -734,12 +734,34 @@ export class GoogleBrowserLogin {
       method: request.method,
     });
     this.policy.runAuthorizedSession(context, 'mutate', () => {
-      const record = this.currentRecord(context);
-      record.idleExpiresAt = Math.min(
-        record.absoluteExpiresAt,
-        this.now() + this.idleTimeout,
-      );
+      this.renewIdle(context);
     });
+  }
+
+  private renewIdle(context: CloudAccessContext): void {
+    const record = this.currentRecord(context);
+    const now = this.now();
+    if (
+      !Number.isSafeInteger(now) ||
+      now < record.issuedAt ||
+      now >= Math.min(record.absoluteExpiresAt, record.idleExpiresAt)
+    )
+      throw new CloudAccessError('UNAUTHORIZED');
+    record.idleExpiresAt = Math.min(
+      record.absoluteExpiresAt,
+      now + this.idleTimeout,
+    );
+  }
+
+  /** Private cloud composition calls this only after a verified current call
+   * and fresh matched media pong. Never invoked by a resolver, GET or SSE.
+   * The existing finite absolute deadline and original identity stay fixed.
+   */
+  renewFromVerifiedCall(context: CloudAccessContext, callId: string): void {
+    if (this.pageLeaseEnabled) throw new GoogleLoginError('FORBIDDEN', 403);
+    this.policy.runAuthorizedCall(context, callId, 'mutate', () =>
+      this.renewIdle(context),
+    );
   }
 
   /** A server-selected page-presence mode; no request can enable it. Each page
@@ -750,7 +772,7 @@ export class GoogleBrowserLogin {
    * this is a connectivity lease, not a user-input idle or eight-hour deadline. */
   page(request: FastifyRequest): { ok: true; expiresAt: number } {
     this.assertRequest(request, 'write');
-    const body = request.body;
+    const { body } = request;
     if (
       !this.pageLeaseEnabled ||
       request.url.includes('?') ||

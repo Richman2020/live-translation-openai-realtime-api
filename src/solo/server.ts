@@ -28,6 +28,7 @@ import { ControllerLeaseError, type ControllerProof } from './controller-lease';
 import {
   CloudVoiceJoinError,
   type PreparedCloudVoice,
+  type RefreshedCloudVoiceToken,
 } from './cloud-voice-join';
 import { createOwnedPhoneEventStreams } from './phone-event-stream';
 import {
@@ -228,6 +229,7 @@ async function buildPhoneApplication(
       proof?: ControllerProof;
       callId?: string;
       voice?: PreparedCloudVoice;
+      refresh?: RefreshedCloudVoiceToken;
       cleanup?: true;
     }
   >();
@@ -240,7 +242,13 @@ async function buildPhoneApplication(
     const issued = controllerResponses.get(req);
     if (!issued || !browserControl) return done(null, payload);
     try {
-      if (issued.voice)
+      if (issued.refresh)
+        browserControl.assertRefreshResponseCurrent(
+          issued.context,
+          issued.callId!,
+          issued.refresh,
+        );
+      else if (issued.voice)
         browserControl.assertVoiceResponseCurrent(
           issued.context,
           issued.callId!,
@@ -397,7 +405,7 @@ async function buildPhoneApplication(
           '/api/calls',
           '/api/events',
         ].includes(path) &&
-        !/^\/api\/calls\/[^/]+\/(?:hangup|voice)$/.test(path) &&
+        !/^\/api\/calls\/[^/]+\/(?:hangup|voice(?:\/refresh)?)$/.test(path) &&
         !/^\/api\/controller\/(?:acquire|renew|revoke)$/.test(path)
       )
         return reply.code(503).send({ error: 'CLOUD_CONTROL_UNAVAILABLE' });
@@ -565,6 +573,33 @@ async function buildPhoneApplication(
       controllerResponses.set(req, { context, callId: req.params.id, voice });
       return voice;
     });
+    app.post<{ Params: { id: string }; Body: { controller: ControllerProof } }>(
+      '/api/calls/:id/voice/refresh',
+      controllerCallRoute(),
+      async (req) => {
+        if (
+          req.url.includes('?') ||
+          !req.body ||
+          typeof req.body !== 'object' ||
+          Array.isArray(req.body) ||
+          Object.keys(req.body).length !== 1 ||
+          !Object.hasOwn(req.body, 'controller')
+        )
+          throw new CloudAccessError('FORBIDDEN');
+        const context = browserTransport.requestContext(req);
+        const refresh = await browserControl.refreshVoiceToken(
+          context,
+          req.params.id,
+          req.body.controller,
+        );
+        controllerResponses.set(req, {
+          context,
+          callId: req.params.id,
+          refresh,
+        });
+        return refresh;
+      },
+    );
   }
   app.post<{ Body: { action: string; lease?: string } }>(
     '/api/connection-maintenance',

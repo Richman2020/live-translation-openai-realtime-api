@@ -46,6 +46,7 @@ function fixture(t: any, abortThrows = false) {
     transcripts: any[] = [],
     diagnostics: any[] = [];
   let aborted = 0;
+  let sectionBreaks = 0;
   const bridge = new ContinuousTranslationBridge({
     apiKey: 'fake',
     model: 'gpt-realtime-1.5',
@@ -75,6 +76,9 @@ function fixture(t: any, abortThrows = false) {
           appended.push(Buffer.from(pcm));
         },
         finish: async () => {},
+        breakSection() {
+          sectionBreaks += 1;
+        },
         abort() {
           aborted += 1;
           if (abortThrows) throw new Error('PRIVATE_ABORT_ERROR');
@@ -117,8 +121,25 @@ function fixture(t: any, abortThrows = false) {
     media,
     bytes,
     aborted: () => aborted,
+    sectionBreaks: () => sectionBreaks,
   };
 }
+
+test('only local source words separate remote subtitle sections without changing media delivery', (t) => {
+  const f = fixture(t);
+  assert.equal(f.caption.semanticSections, true);
+  f.providers[0].onTranscript?.('Generated English does not identify a new source turn.');
+  f.providers[0].onInputTranscript?.('   ');
+  assert.equal(f.sectionBreaks(), 0);
+  f.providers[0].onInputTranscript?.('我来插一句。');
+  assert.equal(f.sectionBreaks(), 1);
+  const audio = Buffer.from([0xff, 0x03, 0x52, 0x81]);
+  f.media(audio);
+  assert.deepEqual(f.bytes(), audio);
+  f.bridge.close();
+  f.providers[0].onInputTranscript?.('迟到原文。');
+  assert.equal(f.sectionBreaks(), 1);
+});
 
 test('original English is immediate byte-identical PCMU before either AI branch is ready', async (t) => {
   const f = fixture(t);

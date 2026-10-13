@@ -19,6 +19,7 @@ export const CLOUD_CONTROLLED_PUBLIC_PATHS = Object.freeze([
   '/controlled',
   '/app.js',
   '/controller-client.js',
+  '/voice-token-maintenance.js',
   '/controlled-workbench.js',
   '/styles.css',
   '/favicon.svg',
@@ -178,7 +179,9 @@ function validTarget(
       (web ? webPostPaths : postPaths).has(path) ||
       (mode === 'web-workbench' && path === '/auth/session/page') ||
       (!web &&
-        /^\/api\/calls\/[A-Za-z0-9_-]{1,128}\/(?:hangup|voice)$/.test(path))
+        /^\/api\/calls\/[A-Za-z0-9_-]{1,128}\/(?:hangup|voice(?:\/refresh)?)$/.test(
+          path,
+        ))
     );
   return false;
 }

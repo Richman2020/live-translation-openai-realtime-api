@@ -4,6 +4,7 @@ import { createConversationModel } from './conversation-model.js';
 import { createConversationView, renderConversationUtterance } from './conversation-view.js';
 import { createMicrophoneInput } from './microphone-input.js';
 import { createAudioOutput } from './audio-output.js';
+import { createVoiceTokenMaintenance } from './voice-token-maintenance.js';
 
 // Loaded only by the server's explicit /controlled surface. The default local
 // workbench does not use session cookies, controller leases or this SDK owner.
@@ -20,6 +21,7 @@ export async function startControlledWorkbench() {
   let sdkCallId = null;
   let sdkAccepted = false;
   let joinDeadline = null;
+  let voiceTokenMaintenance = null;
   let muted = false;
   let model = null;
   let record = null;
@@ -84,6 +86,7 @@ export async function startControlledWorkbench() {
   function note(message) { localError = message || ''; render(client?.state); }
   function clearMedia() {
     clearTimeout(joinDeadline); joinDeadline = null;
+    voiceTokenMaintenance?.stop(); voiceTokenMaintenance = null;
     const oldCall = sdkCall; const oldDevice = device;
     sdkCall = null; device = null; sdkCallId = null; sdkAccepted = false; muted = false;
     lifecycle.cancel(); output.bind(null);
@@ -272,6 +275,7 @@ export async function startControlledWorkbench() {
     let attempt = null;
     await client.dial(to, {
       translationEngine: selectedEngine,
+      renewIdentity: loginAvailable,
       prepareMedia: async ({ isCurrent }) => {
         clearMedia(); attempt = lifecycle.begin();
         const constraints = await microphone.constraints();
@@ -286,6 +290,7 @@ export async function startControlledWorkbench() {
         const mediaOwner = createDeviceMediaOwner(lifecycle);
         const next = new window.Twilio.Device(prepared.token, {
           logLevel: 'silent', closeProtection: true, enableImprovedSignalingErrorPrecision: true,
+          tokenRefreshMs: 60000,
           maxCallSignalingTimeoutMs: 30000, getUserMedia: constraints => mediaOwner.getUserMedia(constraints),
         });
         device = next; attempt.device = next; attempt.mediaOwner = mediaOwner;
@@ -294,6 +299,18 @@ export async function startControlledWorkbench() {
         // Cleanup still belongs to this exact SDK owner; only new admission and
         // success events need visibility and a live status connection.
         const ownsMedia = () => lifecycle.isCurrent(attempt) && device === next && !disposed;
+        const tokens = createVoiceTokenMaintenance({
+          device: next, tokenExpiresAt: prepared.grant.tokenExpiresAt,
+          refreshToken: () => client.refreshVoiceToken(callId),
+          isCurrent: () => ownsMedia() && sdkAccepted && sdkCallId === callId && isCurrent(),
+          onFailure: ({ code }) => {
+            if (!ownsMedia()) return;
+            if (['UNAUTHORIZED', 'FORBIDDEN', 'INVALID_RESPONSE'].includes(code)) {
+              note('电话身份续期未通过；正在确认线路清理。'); clearMedia(); client.cancel().catch(() => {});
+            } else if (code !== 'CALL_CANCELLED') note('电话信令续期尚未确认；请留意连接状态，异常时挂断。');
+          },
+        });
+        voiceTokenMaintenance = tokens;
         next.on?.('error', error => {
           if (!ownsMedia()) return;
           const code = error?.code;
@@ -309,17 +326,14 @@ export async function startControlledWorkbench() {
         };
         joinDeadline = setTimeout(expireJoin, Math.max(1, prepared.grant.expiresAt - Date.now()));
         next.on?.('tokenWillExpire', () => {
-          // The SDK signalling token and short one-use join ticket have
-          // separate deadlines. An accepted call follows server-verified media
-          // and current authentication, rather than the initial join deadline.
-          // This notification never issues or refreshes either capability.
-          expireJoin();
+          if (ownsMedia() && sdkAccepted) void tokens.refresh();
+          else expireJoin();
         });
         output.bind(next.audio || null);
         const call = await mediaOwner.connect(attempt, () => next.connect({ params: prepared.params }));
         if (!call || !owns()) { try { call?.disconnect(); } catch { /* Late results are never usable. */ } try { next.destroy(); } catch { /* Independent server cleanup continues. */ } return null; }
         sdkCall = call; sdkCallId = callId; sdkAccepted = false; muted = false;
-        call.on?.('accept', () => { if (owns() && sdkCall === call) { sdkAccepted = true; clearTimeout(joinDeadline); joinDeadline = null; text('browser-playback', '浏览器音频连接已建立；译音实际播放以线路确认和耳听为准。'); client.markVoiceAccepted(callId); } });
+        call.on?.('accept', () => { if (owns() && sdkCall === call) { sdkAccepted = true; clearTimeout(joinDeadline); joinDeadline = null; text('browser-playback', '浏览器音频连接已建立；译音实际播放以线路确认和耳听为准。'); if (client.markVoiceAccepted(callId)) tokens.start(); } });
         const disconnected = () => {
           if (!ownsMedia() || sdkCall !== call) return;
           clearMedia(); client.handleVoiceDisconnected(callId); render(client.state);
@@ -469,7 +483,7 @@ export async function startControlledWorkbench() {
   $('help-button').addEventListener('click', () => $('help-dialog').showModal());
   $('close-help').addEventListener('click', () => $('help-dialog').close());
   $('help-start').addEventListener('click', () => { $('help-dialog').close(); navigate('workspace'); });
-  document.addEventListener('visibilitychange', () => { client.setVisible(!document.hidden); if (!document.hidden) client.refresh().catch(() => {}); });
+  document.addEventListener('visibilitychange', () => { client.setVisible(!document.hidden); voiceTokenMaintenance?.check(); if (!document.hidden) client.refresh().catch(() => {}); });
   window.addEventListener('offline', () => client.setConnectionState(false));
   window.addEventListener('pagehide', () => {
     if (disposed) return;
