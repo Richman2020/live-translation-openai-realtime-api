@@ -1,6 +1,10 @@
 import WebSocket from 'ws';
 
 import { createOpenAIWebSocket } from './openai-websocket';
+import {
+  sanitizeTerminationCause,
+  type CallTerminationCause,
+} from './call-termination-diagnostics';
 
 export type ContinuousTranslationAudioMetadata = {
   /** Stream alignment only, not a unique delta or sentence identifier. */
@@ -51,6 +55,8 @@ export type ContinuousTranslationOptions = {
     metadata?: ContinuousTranslationAudioMetadata,
   ) => void;
   onError?: (code: string) => void;
+  /** Safe first-failure metadata, independent of audio and cleanup. */
+  onTerminationDiagnostic?: (event: CallTerminationCause) => void;
   createWebSocket?: (
     url: string,
     options: WebSocket.ClientOptions,
@@ -145,6 +151,8 @@ export function createContinuousTranslationClient(
     (options.onInputTranscript !== undefined &&
       typeof options.onInputTranscript !== 'function') ||
     (options.onError !== undefined && typeof options.onError !== 'function') ||
+    (options.onTerminationDiagnostic !== undefined &&
+      typeof options.onTerminationDiagnostic !== 'function') ||
     (options.admitAudio !== undefined &&
       typeof options.admitAudio !== 'function') ||
     (options.onTransportUsage !== undefined &&
@@ -164,6 +172,7 @@ export function createContinuousTranslationClient(
   let timer: ReturnType<typeof setTimeout>;
   let inputPcmBytes = 0;
   let outputPcmBytes = 0;
+  let sessionExpiresAtEpochSeconds: number | undefined;
   const listeners: [string, (...args: any[]) => void][] = [];
   const sessionEventIds = new Set<string>();
 
@@ -185,7 +194,7 @@ export function createContinuousTranslationClient(
     }
   };
 
-  const fail = (code: string, notify = true) => {
+  const fail = (code: string, notify = true, wsCloseCode?: unknown) => {
     if (state === 'closed') return;
     state = 'closed';
     cleanup();
@@ -193,6 +202,18 @@ export function createContinuousTranslationClient(
     ready.reject(error);
     finished.reject(error);
     if (notify) {
+      try {
+        options.onTerminationDiagnostic?.(
+          sanitizeTerminationCause({
+            reason: code,
+            layer: 'provider',
+            wsCloseCode,
+            sessionExpiresAtEpochSeconds,
+          }),
+        );
+      } catch {
+        // Telemetry must never suppress the original error/phone cleanup.
+      }
       try {
         options.onError?.(code);
       } catch {
@@ -301,6 +322,7 @@ export function createContinuousTranslationClient(
       expires > MAX_EXPIRY_SECONDS
     )
       return;
+    sessionExpiresAtEpochSeconds = expires;
     try {
       options.onSessionMetadata?.({
         stage:
@@ -481,7 +503,9 @@ export function createContinuousTranslationClient(
     listen('open', configure);
     listen('message', receive);
     listen('error', () => fail('PROVIDER_CONNECTION_FAILED'));
-    listen('close', () => fail('PROVIDER_CLOSED_UNEXPECTEDLY'));
+    listen('close', (code: unknown) =>
+      fail('PROVIDER_CLOSED_UNEXPECTEDLY', true, code),
+    );
     listen('unexpected-response', (_request, response) => {
       response.resume();
       fail('PROVIDER_HANDSHAKE_REJECTED');

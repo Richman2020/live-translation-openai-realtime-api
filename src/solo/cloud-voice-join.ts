@@ -66,6 +66,23 @@ export type CloudVoiceAdmission = Readonly<{
   reserve: (grant: CloudVoiceGrant) => Promise<CloudVoiceReservation>;
 }>;
 export type CloudVoiceSigner = (grant: CloudVoiceGrant) => Promise<string>;
+export type CloudVoiceRefreshGrant = Readonly<
+  Omit<CloudVoiceGrant, 'expiresAt'> & {
+    purpose: 'refresh';
+    /** A finite signing/response window, never a new callback join ticket. */
+    signingExpiresAt: number;
+  }
+>;
+export type CloudVoiceRefreshSigner = (
+  grant: CloudVoiceRefreshGrant,
+) => Promise<string>;
+export type RefreshedCloudVoiceToken = Readonly<{
+  token: string;
+  callId: string;
+  tokenExpiresAt: number;
+  authExpiresAt: number;
+  controller: Readonly<{ tabId: string; epoch: number }>;
+}>;
 export type PreparedCloudVoice = Readonly<{
   token: string;
   join: string;
@@ -88,13 +105,17 @@ export class CloudVoiceJoinError extends Error {
       | 'INVALID_VOICE_JOIN'
       | 'VOICE_PREPARATION_IN_PROGRESS'
       | 'VOICE_CONNECTION_NOT_READY',
+    retryable = false,
   ) {
     super(code);
-    this.statusCode = {
-      INVALID_VOICE_JOIN: 403,
-      VOICE_PREPARATION_IN_PROGRESS: 409,
-      VOICE_CONNECTION_NOT_READY: 503,
-    }[code] as 403 | 409 | 503;
+    this.statusCode =
+      retryable && code === 'VOICE_CONNECTION_NOT_READY'
+        ? 409
+        : ({
+            INVALID_VOICE_JOIN: 403,
+            VOICE_PREPARATION_IN_PROGRESS: 409,
+            VOICE_CONNECTION_NOT_READY: 503,
+          }[code] as 403 | 409 | 503);
   }
 }
 
@@ -111,6 +132,8 @@ type RecordEntry = {
   reservation?: CloudVoiceReservation;
   sid?: string;
   releaseTask?: Promise<void>;
+  refreshPending?: boolean;
+  refreshSequence?: number;
 };
 const identifier = /^[A-Za-z0-9_-]{1,128}$/;
 const joinCapability = /^[A-Za-z0-9_-]{43}$/;
@@ -177,6 +200,19 @@ export class CloudVoiceJoin {
 
   private readonly signer: CloudVoiceSigner | undefined;
 
+  private readonly refreshSigner: CloudVoiceRefreshSigner | undefined;
+
+  private readonly refreshed = new WeakMap<
+    RefreshedCloudVoiceToken,
+    {
+      context: CloudAccessContext;
+      record: RecordEntry;
+      sequence: number;
+      signingExpiresAt: number;
+      sid: string;
+    }
+  >();
+
   private readonly admission: CloudVoiceAdmission | undefined;
 
   private readonly now: () => number;
@@ -192,6 +228,7 @@ export class CloudVoiceJoin {
   constructor(options: {
     policy: CloudAccessPolicy;
     signer?: CloudVoiceSigner;
+    refreshSigner?: CloudVoiceRefreshSigner;
     admission?: CloudVoiceAdmission;
     outgoingApplicationSid?: string;
     now?: () => number;
@@ -203,6 +240,8 @@ export class CloudVoiceJoin {
     if (
       !(options?.policy instanceof CloudAccessPolicy) ||
       (options.signer !== undefined && typeof options.signer !== 'function') ||
+      (options.refreshSigner !== undefined &&
+        typeof options.refreshSigner !== 'function') ||
       (options.now !== undefined && typeof options.now !== 'function') ||
       (options.outgoingApplicationSid !== undefined &&
         !/^AP[0-9a-fA-F]{32}$/.test(options.outgoingApplicationSid)) ||
@@ -219,6 +258,7 @@ export class CloudVoiceJoin {
     this.policy = options.policy;
     this.outgoingApplicationSid = options.outgoingApplicationSid;
     this.signer = options.signer;
+    this.refreshSigner = options.refreshSigner;
     this.admission = options.admission;
     this.now = options.now ?? Date.now;
     this.maxTokenLifetimeMs = lifetime;
@@ -562,6 +602,142 @@ export class CloudVoiceJoin {
       record,
       record.reservation,
       () => undefined,
+    );
+  }
+
+  /** Refresh one already-joined signaling connection. Its original nonce,
+   * ticket, SID and reservation are untouched; no second join is issued.
+   */
+  async refreshToken(
+    context: CloudAccessContext,
+    id: string,
+  ): Promise<RefreshedCloudVoiceToken> {
+    this.policy.authorizeCall(context, id, 'mutate');
+    const record = this.calls.get(id);
+    if (!record?.sid || !record.prepared || !record.reservation)
+      throw new CloudVoiceJoinError('INVALID_VOICE_JOIN');
+    if (!this.refreshSigner)
+      throw new CloudVoiceJoinError('VOICE_CONNECTION_NOT_READY');
+    if (record.refreshPending)
+      throw new CloudVoiceJoinError('VOICE_PREPARATION_IN_PROGRESS');
+    const held = record.reservation;
+    const sequence = (record.refreshSequence ?? 0) + 1;
+    record.refreshSequence = sequence;
+    record.refreshPending = true;
+    try {
+      const grant: CloudVoiceRefreshGrant = this.authorizedReservation(
+        context,
+        record,
+        held,
+        (controller) => {
+          const now = this.time();
+          const authExpiresAt = this.policy.expiresAt(context, 'mutate');
+          return Object.freeze({
+            version: 1 as const,
+            purpose: 'refresh' as const,
+            authSessionId: context.authSessionId,
+            principalId: context.principalId,
+            browserOwnerId: context.browserOwnerId,
+            authEpoch: context.epoch,
+            controller: Object.freeze({
+              leaseId: controller.leaseId,
+              tabId: controller.tabId,
+              epoch: controller.epoch,
+            }),
+            callId: id,
+            identity: record.call.identity,
+            issuedAt: now,
+            signingExpiresAt: Math.min(
+              controller.expiresAt,
+              authExpiresAt,
+              now + this.maxTokenLifetimeMs,
+            ),
+            authExpiresAt,
+            tokenExpiresAt: Math.min(
+              authExpiresAt,
+              now + CLOUD_VOICE_SIGNALING_LIFETIME_MS,
+            ),
+            incomingAllow: false as const,
+            outgoingApplicationSid: this.outgoingApplicationSid!,
+            outgoing: Object.freeze({
+              callId: id,
+              identity: record.call.identity,
+            }),
+          });
+        },
+      );
+      const { sid } = record;
+      let signing: Promise<string>;
+      this.authorizedReservation(context, record, held, () => {
+        signing = this.refreshSigner!(grant);
+      });
+      const token = await signing!;
+      if (typeof token !== 'string' || !token || token.length > 16384)
+        throw new CloudVoiceJoinError('VOICE_CONNECTION_NOT_READY');
+      const response = Object.freeze({
+        token,
+        callId: id,
+        tokenExpiresAt: grant.tokenExpiresAt,
+        authExpiresAt: grant.authExpiresAt,
+        controller: Object.freeze({
+          tabId: grant.controller.tabId,
+          epoch: grant.controller.epoch,
+        }),
+      });
+      this.refreshed.set(response, {
+        context,
+        record,
+        sequence,
+        signingExpiresAt: grant.signingExpiresAt,
+        sid,
+      });
+      this.assertRefreshedCurrent(context, id, response);
+      return response;
+    } catch (error) {
+      if (
+        error instanceof CloudAccessError ||
+        error instanceof CloudVoiceJoinError
+      )
+        throw error;
+      throw new CloudVoiceJoinError('VOICE_CONNECTION_NOT_READY');
+    } finally {
+      record.refreshPending = false;
+    }
+  }
+
+  assertRefreshedCurrent(
+    context: CloudAccessContext,
+    id: string,
+    response: RefreshedCloudVoiceToken,
+  ): void {
+    const issued = this.refreshed.get(response);
+    if (
+      !issued ||
+      issued.context !== context ||
+      issued.record.call.callId !== id
+    )
+      throw new CloudAccessError('UNAUTHORIZED');
+    const { record } = issued;
+    if (
+      !record.reservation ||
+      record.sid !== issued.sid ||
+      record.refreshSequence !== issued.sequence
+    )
+      throw new CloudVoiceJoinError('INVALID_VOICE_JOIN');
+    this.authorizedReservation(
+      context,
+      record,
+      record.reservation,
+      (controller) => {
+        if (
+          this.time() >= issued.signingExpiresAt ||
+          response.tokenExpiresAt <= this.time() ||
+          response.tokenExpiresAt > this.policy.expiresAt(context, 'mutate') ||
+          response.controller.tabId !== controller.tabId ||
+          response.controller.epoch !== controller.epoch
+        )
+          throw new CloudVoiceJoinError('INVALID_VOICE_JOIN');
+      },
     );
   }
 

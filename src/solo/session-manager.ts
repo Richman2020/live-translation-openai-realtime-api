@@ -10,6 +10,12 @@ import type { SoloConfig } from './config';
 import { safeEqual } from './security';
 import { ConversationEventAdapter } from './conversation-events';
 import {
+  classifyCallTermination,
+  createCallTerminationDiagnostic,
+  sanitizeTerminationCause,
+  type CallTerminationCause,
+} from './call-termination-diagnostics';
+import {
   createCloudCallUsageBudget,
   type CloudProviderAdmission,
 } from './cloud-call-usage';
@@ -69,6 +75,7 @@ export type BridgeOptions = ConstructorParameters<
   outgoingCaptions?: boolean;
   /** Trusted cloud policy: caption model failure also terminates the call. */
   captionFailureEndsCall?: boolean;
+  onTerminationDiagnostic?: (event: CallTerminationCause) => void;
   admitAudio?: (event: ContinuousBridgeAudioAdmission) => boolean;
   admitProviderUsage?: (event: CloudProviderAdmission) => boolean;
   onOutgoingCaptionState?: (event: {
@@ -154,6 +161,8 @@ export function createSessionBridge(
   return new TranslationBridge(settings);
 }
 type Session = {
+  diagnosticStartedAtMs: number | null;
+  providerTerminationCause?: CallTerminationCause;
   browserIdentity: string;
   admission?: Readonly<OutboundCallAdmission>;
   conversation: ConversationEventAdapter;
@@ -179,6 +188,8 @@ type Session = {
   ended: boolean;
   controllerConnection?: {
     socket: WebSocket;
+    callSid: string;
+    lastMatchedPongAt?: number;
     issuedAt: number;
     observedAt: number;
     expiresAt: number;
@@ -374,6 +385,36 @@ export class SessionManager extends EventEmitter {
     return this.sessions.get(id)?.ended === true;
   }
 
+  /** A transport witness only; callers must independently validate the original
+   * authenticated owner. OPEN, reads and audio cannot manufacture a pong. */
+  hasFreshControllerPong(id: string): boolean {
+    const session = this.sessions.get(id);
+    const connection = session?.controllerConnection;
+    if (!session || session.ended || !connection) return false;
+    const now = this.diagnosticTime();
+    return (
+      now !== null &&
+      connection.lastMatchedPongAt !== undefined &&
+      now >= connection.lastMatchedPongAt &&
+      now >= connection.observedAt &&
+      now < connection.expiresAt &&
+      session.sockets.local === connection.socket &&
+      session.callSids.local === connection.callSid &&
+      connection.socket.readyState === WebSocket.OPEN
+    );
+  }
+
+  private diagnosticTime(): number | null {
+    try {
+      const time = this.now();
+      return Number.isSafeInteger(time) && time >= 0 && time <= 4102444800000
+        ? time
+        : null;
+    } catch {
+      return null;
+    }
+  }
+
   get activeSession(): CallView | null {
     const session = this.activeId && this.sessions.get(this.activeId);
     return session ? { ...session.view } : null;
@@ -394,7 +435,13 @@ export class SessionManager extends EventEmitter {
       connection.socket.readyState !== WebSocket.OPEN ||
       now >= connection.expiresAt
     ) {
-      this.track(this.end(id, 'PHONE_STREAM_TIMEOUT'));
+      this.track(
+        this.end(id, 'PHONE_STREAM_TIMEOUT', {
+          reason: 'PHONE_STREAM_TIMEOUT',
+          layer: 'media',
+          role: 'local',
+        }),
+      );
       throw new SessionError('PHONE_STREAM_TIMEOUT', 403);
     }
     connection.observedAt = now;
@@ -425,6 +472,7 @@ export class SessionManager extends EventEmitter {
       throw new SessionError('INVALID_MEDIA_STREAM', 403);
     const connection: NonNullable<Session['controllerConnection']> = {
       socket,
+      callSid: session.callSids.local!,
       issuedAt,
       observedAt: issuedAt,
       expiresAt: issuedAt + CONTROLLER_CONNECTION_MS,
@@ -436,7 +484,13 @@ export class SessionManager extends EventEmitter {
       session.sockets.local === socket;
     const failed = () => {
       if (current())
-        this.track(this.end(session.view.id, 'PHONE_STREAM_TIMEOUT'));
+        this.track(
+          this.end(session.view.id, 'PHONE_STREAM_TIMEOUT', {
+            reason: 'PHONE_STREAM_TIMEOUT',
+            layer: 'media',
+            role: 'local',
+          }),
+        );
     };
     connection.pong = (data) => {
       if (
@@ -457,6 +511,7 @@ export class SessionManager extends EventEmitter {
         return;
       }
       connection.challenge = undefined;
+      connection.lastMatchedPongAt = now;
       connection.observedAt = now;
       connection.expiresAt = now + CONTROLLER_CONNECTION_MS;
     };
@@ -733,6 +788,7 @@ export class SessionManager extends EventEmitter {
       });
     }
     const session: Session = {
+      diagnosticStartedAtMs: this.diagnosticTime(),
       browserIdentity: trusted?.browserIdentity || 'ai-phone',
       ...(trusted ? { admission: trusted } : {}),
       conversation: new ConversationEventAdapter(id, this.now),
@@ -1185,13 +1241,33 @@ export class SessionManager extends EventEmitter {
       }
       session.sockets[role] = socket;
       const finish = () => {
-        if (!session.ended) this.end(session.view.id);
+        if (!session.ended)
+          this.end(session.view.id, undefined, {
+            reason: 'PHONE_STREAM_STOPPED',
+            layer: 'media',
+            role,
+          });
       };
-      socket.once('close', () => {
-        if (!session.ended) this.end(session.view.id, 'PHONE_STREAM_CLOSED');
+      socket.once('close', (code: unknown) => {
+        if (!session.ended)
+          this.end(
+            session.view.id,
+            'PHONE_STREAM_CLOSED',
+            sanitizeTerminationCause({
+              reason: 'PHONE_STREAM_CLOSED',
+              layer: 'media',
+              role,
+              wsCloseCode: code,
+            }),
+          );
       });
       socket.once('error', () => {
-        if (!session.ended) this.end(session.view.id, 'PHONE_STREAM_ERROR');
+        if (!session.ended)
+          this.end(session.view.id, 'PHONE_STREAM_ERROR', {
+            reason: 'PHONE_STREAM_ERROR',
+            layer: 'media',
+            role,
+          });
       });
       socket.on('message', (data) => {
         try {
@@ -1268,6 +1344,11 @@ export class SessionManager extends EventEmitter {
           },
           onFailure: (reason) => {
             if (this.liveAdmission(session)) this.end(session.view.id, reason);
+          },
+          onTerminationDiagnostic: (cause) => {
+            if (!session.ended && !session.providerTerminationCause)
+              session.providerTerminationCause =
+                sanitizeTerminationCause(cause);
           },
           onConnection: (connection) => {
             if (this.liveAdmission(session)) {
@@ -1565,6 +1646,14 @@ export class SessionManager extends EventEmitter {
         fields.StreamEvent === 'stream-error'
           ? 'MEDIA_STREAM_FAILED'
           : undefined,
+        {
+          reason:
+            fields.StreamEvent === 'stream-error'
+              ? 'MEDIA_STREAM_FAILED'
+              : 'PHONE_STREAM_STOPPED',
+          layer: 'supplier',
+          role,
+        },
       );
       return;
     }
@@ -1574,6 +1663,11 @@ export class SessionManager extends EventEmitter {
         ['completed', 'canceled'].includes(fields.CallStatus)
           ? undefined
           : `CALL_${fields.CallStatus.toUpperCase().replace(/-/g, '_')}`,
+        {
+          reason: `CALL_${fields.CallStatus.toUpperCase().replace(/-/g, '_')}`,
+          layer: 'supplier',
+          role,
+        } as CallTerminationCause,
       );
     }
   }
@@ -1624,11 +1718,35 @@ export class SessionManager extends EventEmitter {
   }
 
   /** Accept a termination synchronously; provider cleanup belongs to end(). */
-  beginEndIntent(id: string, error?: string): void {
+  beginEndIntent(
+    id: string,
+    error?: string,
+    cause?: CallTerminationCause,
+  ): void {
     const session = this.sessions.get(id);
     if (!session) throw new SessionError('SESSION_NOT_FOUND', 404);
     if (session.ended) return;
     session.ended = true;
+    const classified = classifyCallTermination(error);
+    const firstCause =
+      cause ||
+      (['CONTINUOUS_PROVIDER_FAILED', 'REMOTE_CAPTIONS_UNAVAILABLE'].includes(
+        classified.reason,
+      )
+        ? session.providerTerminationCause || classified
+        : classified);
+    try {
+      this.emit(
+        'diagnostic',
+        createCallTerminationDiagnostic(
+          firstCause,
+          this.diagnosticTime(),
+          session.diagnosticStartedAtMs,
+        ),
+      );
+    } catch {
+      // An observability failure cannot stop media retirement or either leg.
+    }
     this.stopControllerConnection(session);
     session.providerUsage?.close();
     session.view.translationReady = false;
@@ -1659,11 +1777,15 @@ export class SessionManager extends EventEmitter {
     }
   }
 
-  async end(id: string, error?: string): Promise<void> {
+  async end(
+    id: string,
+    error?: string,
+    cause?: CallTerminationCause,
+  ): Promise<void> {
     const session = this.sessions.get(id);
     if (!session) throw new SessionError('SESSION_NOT_FOUND', 404);
     if (session.ending) return session.ending;
-    this.beginEndIntent(id, error);
+    this.beginEndIntent(id, error, cause);
     // Publish the shared task before any async provider work can re-enter end.
     const ending = Promise.resolve().then(async () => {
       await Promise.all(
@@ -1685,7 +1807,12 @@ export class SessionManager extends EventEmitter {
   async close(): Promise<void> {
     this.closing = true;
     this.availableUntil = 0;
-    if (this.activeId) await this.end(this.activeId);
+    if (this.activeId)
+      await this.end(this.activeId, undefined, {
+        reason: 'SERVICE_SHUTDOWN',
+        layer: 'application',
+        role: 'unknown',
+      });
     while (this.backgroundTasks.size)
       // eslint-disable-next-line no-await-in-loop -- Settling pending creates may enqueue more cleanup work.
       await Promise.all([...this.backgroundTasks]);

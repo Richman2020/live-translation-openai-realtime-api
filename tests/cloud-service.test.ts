@@ -18,9 +18,14 @@ import {
   createCloudService,
   createCloudTestDeadline,
   createCloudVoiceSigner,
+  createCloudVoiceRefreshSigner,
+  reportCloudCallTermination,
   registerCloudServiceSignals,
 } from '../src/solo/cloud-service';
-import type { CloudVoiceGrant } from '../src/solo/cloud-voice-join';
+import type {
+  CloudVoiceGrant,
+  CloudVoiceRefreshGrant,
+} from '../src/solo/cloud-voice-join';
 
 function configuration(
   time: number,
@@ -189,6 +194,115 @@ test('real locked Twilio signer scopes the outgoing app and identity, disables i
   assert.ok(payload.exp * 1000 <= voice.tokenExpiresAt);
   assert.ok(payload.exp * 1000 <= voice.authExpiresAt);
   assert.deepEqual(Object.keys(payload.grants).sort(), ['identity', 'voice']);
+});
+
+test('signal refresh signs only the same outgoing identity with finite auth-scoped JWT and numeric diagnostics', async (t) => {
+  const time = Date.now();
+  const { expiresAt, ...initial } = grant(time);
+  const refresh: CloudVoiceRefreshGrant = {
+    ...initial,
+    purpose: 'refresh',
+    signingExpiresAt: expiresAt,
+  };
+  const lines: string[] = [];
+  t.mock.method(console, 'log', (line: string) => lines.push(line));
+  const signer = createCloudVoiceRefreshSigner(configuration(time), () => time);
+  const token = await signer(refresh);
+  const payload = JSON.parse(
+    Buffer.from(token.split('.')[1], 'base64url').toString('utf8'),
+  );
+  assert.equal(payload.grants.identity, refresh.identity);
+  assert.equal(
+    payload.grants.voice.outgoing.application_sid,
+    refresh.outgoingApplicationSid,
+  );
+  assert.equal(payload.grants.voice.incoming?.allow ?? false, false);
+  assert.ok(payload.exp * 1000 <= refresh.authExpiresAt);
+  assert.ok(payload.exp * 1000 <= time + 900000);
+  assert.deepEqual(JSON.parse(lines[0]), {
+    event: 'CLOUD_VOICE_SIGNALING_VALIDITY',
+    purpose: 'refresh',
+    observedAtMs: time,
+    jwtExpiresAtEpochSeconds: payload.exp,
+    authExpiresAtEpochSeconds: Math.floor(refresh.authExpiresAt / 1000),
+  });
+  assert.doesNotMatch(
+    lines.join(''),
+    /offline|eyJ|fixture|identity|callId|leaseId/,
+  );
+  for (const invalid of [
+    { ...refresh, purpose: 'initial' },
+    { ...refresh, incomingAllow: true },
+    { ...refresh, signingExpiresAt: time - 1 },
+    { ...refresh, tokenExpiresAt: refresh.authExpiresAt + 1000 },
+    {
+      ...refresh,
+      tokenExpiresAt: time + 900001,
+      authExpiresAt: time + 1000000,
+    },
+  ])
+    await assert.rejects(
+      signer(invalid as CloudVoiceRefreshGrant),
+      /CLOUD_VOICE_SIGNING_DENIED/,
+    );
+  await assert.rejects(
+    createCloudVoiceSigner(configuration(time))(
+      refresh as unknown as CloudVoiceGrant,
+    ),
+    /CLOUD_VOICE_SIGNING_DENIED/,
+  );
+});
+
+test('signal refresh termination sink emits only fixed sanitized metadata and never interrupts cleanup', () => {
+  const lines: string[] = [];
+  reportCloudCallTermination(
+    {
+      event: 'untrusted',
+      reason: 'BROWSER_AUTH_EXPIRED',
+      layer: 'authorization',
+      role: 'local',
+      observedAtMs: 5000,
+      elapsedMs: 3000,
+      wsCloseCode: 1000,
+      sessionExpiresAtEpochSeconds: 1000,
+      callId: 'private-call',
+      token: 'private-token',
+      closeReason: 'private-close',
+      text: 'private-text',
+    },
+    (line) => lines.push(line),
+  );
+  assert.deepEqual(JSON.parse(lines[0]), {
+    event: 'CLOUD_CALL_TERMINATION',
+    reason: 'BROWSER_AUTH_EXPIRED',
+    layer: 'authorization',
+    role: 'local',
+    wsCloseCode: 1000,
+    sessionExpiresAtEpochSeconds: 1000,
+    observedAtMs: 5000,
+    elapsedMs: 3000,
+  });
+  assert.doesNotMatch(lines[0], /private|callId|token|closeReason|text/);
+  const unsafe = {
+    get reason() {
+      throw new Error('private-accessor');
+    },
+    observedAtMs: NaN,
+    elapsedMs: Infinity,
+    wsCloseCode: 999,
+    sessionExpiresAtEpochSeconds: Infinity,
+  };
+  assert.doesNotThrow(() =>
+    reportCloudCallTermination(unsafe, () => {
+      throw new Error('sink-failed');
+    }),
+  );
+  reportCloudCallTermination(unsafe, (line) => lines.push(line));
+  const invalid = JSON.parse(lines[1]);
+  assert.equal(invalid.observedAtMs, null);
+  assert.equal(invalid.elapsedMs, null);
+  assert.equal(invalid.wsCloseCode, undefined);
+  assert.equal(invalid.sessionExpiresAtEpochSeconds, undefined);
 });
 
 test('Twilio signer refuses subsecond TTL, stale or wrong app/identity grants without widening default lifetime', async () => {

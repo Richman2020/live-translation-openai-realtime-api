@@ -340,6 +340,14 @@ export function createControllerClient({
       let acquired = false;
       const isCurrent = () => !disposed && pendingDial === item && item.generation === generation && connected && visible;
       try {
+        // An explicit dial may renew the existing Google identity before a
+        // short remaining idle deadline is copied into its Voice token. Reads,
+        // observer tabs and SSE reconnects never take this path.
+        if (options.renewIdentity === true) {
+          const renewed = await request('/auth/session/renew', {});
+          if (!isCurrent()) throw fail('CALL_CANCELLED');
+          if (renewed?.ok !== true) throw fail('INVALID_RESPONSE');
+        }
         if (!snapshot().canStart) {
           await client.acquire(); acquired = true;
           if (!isCurrent()) throw fail('CALL_CANCELLED');
@@ -355,6 +363,9 @@ export function createControllerClient({
         pendingDial = null;
         return await client.startCall(to, { ...options, translationEngine: selected });
       } catch (failure) {
+        if (!disposed && item.generation === generation && failure?.code === 'UNAUTHORIZED') {
+          authenticated = false; csrf = ''; loseControl(failure);
+        }
         if (acquired && !disposed && item.generation === generation && !attempt && lease) await client.cancel(failure?.code || 'REQUEST_FAILED');
         throw failure;
       } finally { if (pendingDial === item) pendingDial = null; if (!disposed) emit(); }
@@ -415,6 +426,33 @@ export function createControllerClient({
       // so they cannot disconnect an accepted SDK after a background delay.
       if (!attempt.voiceAccepted) readSequence += 1;
       attempt.voiceAccepted = true; phase = 'active'; emit(); return true;
+    },
+    async refreshVoiceToken(callId) {
+      const item = attempt;
+      if (!acceptedOwner() || item.callId !== callId) throw fail('CONTROL_REQUIRED');
+      // Only this accepted owner's captured private proof can refresh its
+      // finite signalling token. Background/SSE state is not new admission.
+      if (item.tokenRefresh) return item.tokenRefresh;
+      const pending = (async () => {
+        try {
+          const value = await request(`/api/calls/${encodeURIComponent(callId)}/voice/refresh`,
+            { controller: item.proof }, { item, capturedCsrf: item.capturedCsrf });
+          if (attempt !== item || !acceptedOwner() || !current(item)) throw fail('CALL_CANCELLED');
+          if (typeof value?.token !== 'string' || !value.token || value.callId !== callId ||
+              value.controller?.tabId !== tabId || value.controller?.epoch !== item.proof.epoch ||
+              !Number.isSafeInteger(value.tokenExpiresAt) || value.tokenExpiresAt <= now() ||
+              !Number.isSafeInteger(value.authExpiresAt) || value.tokenExpiresAt > value.authExpiresAt) throw fail('INVALID_RESPONSE');
+          return Object.freeze({ token: value.token, tokenExpiresAt: value.tokenExpiresAt });
+        } catch (failure) {
+          if (attempt === item && acceptedOwner() && ['UNAUTHORIZED', 'FORBIDDEN', 'INVALID_RESPONSE'].includes(failure?.code)) {
+            if (failure.code === 'UNAUTHORIZED') { authenticated = false; csrf = ''; }
+            loseControl(failure);
+          }
+          throw failure;
+        }
+      })();
+      item.tokenRefresh = pending;
+      try { return await pending; } finally { if (item.tokenRefresh === pending) item.tokenRefresh = null; }
     },
     handleVoiceDisconnected(callId) {
       if (!attempt || attempt.cancelled || callId !== attempt.callId) return false;

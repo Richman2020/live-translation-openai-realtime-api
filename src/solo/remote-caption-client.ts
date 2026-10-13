@@ -1,7 +1,16 @@
 import WebSocket from 'ws';
 
 import { createOpenAIWebSocket } from './openai-websocket';
+import {
+  sanitizeTerminationCause,
+  type CallTerminationCause,
+} from './call-termination-diagnostics';
 import type { TranscriptEvent } from './translation-bridge';
+import {
+  createCaptionSections,
+  captionNeedsContinuation,
+  type CaptionSection,
+} from './caption-sections';
 
 export const REMOTE_CAPTION_TRANSCRIPTION_MODEL = 'gpt-4o-transcribe';
 export type RemoteCaptionTranscriptionModel =
@@ -33,17 +42,21 @@ export type RemoteCaptionOptions = {
     options: WebSocket.ClientOptions,
   ) => WebSocket;
   onTranscript: (event: TranscriptEvent) => void;
-  onError: (code: string) => void;
+  onError: (code: string, diagnostic?: CallTerminationCause) => void;
   onState?: (event: RemoteCaptionState) => void;
   onInputDiagnostic?: (event: RemoteCaptionInputDiagnostic) => void;
   timeoutMs?: number;
   now?: () => number;
+  /** Internal caption policy; does not change audio, models or provider VAD. */
+  semanticSections?: true;
 };
 export type RemoteCaptionClient = {
   ready: Promise<void>;
   append(pcm24k: Buffer): void;
   finish(): Promise<void>;
   abort(): void;
+  /** A source-speaker change separates captions without changing audio flow. */
+  breakSection?(): void;
 };
 
 const MAX_EVENT_BYTES = 64 * 1024;
@@ -58,6 +71,8 @@ const SILENCE_END_BYTES = 38400; // 800 ms: preserve brief in-clause pauses; dra
 // not the previous RMS160 threshold that discarded quiet telephone speech.
 const ENDPOINT_SILENCE_RMS = 12;
 const DRAFT_INTERVAL_MS = 350;
+const SECTION_IDLE_MS = 1600;
+const INCOMPLETE_SECTION_IDLE_MS = 4000;
 const ASR_TRANSCRIPTION_INSTRUCTIONS = [
   "English telephone conversation. Transcribe only the caller's actual speech faithfully, including incomplete phrases, questions, negation, quantities, dates and times.",
   'Preserve negative words and corrections. Do not answer questions, add explanations, invent missing words, or silently turn a quantity into a time.',
@@ -82,6 +97,8 @@ type Turn = {
   revision: number;
   hasVisibleTranslation?: boolean;
   queuedText?: string;
+  translatedSource?: string;
+  translatedText?: string;
   draftTimer?: Timer;
 };
 type Job = {
@@ -156,6 +173,8 @@ export function createRemoteCaptionClient(
     (options.onInputDiagnostic !== undefined &&
       typeof options.onInputDiagnostic !== 'function') ||
     typeof now !== 'function' ||
+    (options.semanticSections !== undefined &&
+      options.semanticSections !== true) ||
     !/^gpt-realtime(?:-[a-zA-Z0-9.]+)*$/.test(model) ||
     !['gpt-4o-transcribe', 'gpt-live-transcribe'].includes(
       transcriptionModel,
@@ -171,6 +190,10 @@ export function createRemoteCaptionClient(
   const sockets: WebSocket[] = [];
   const listeners: [WebSocket, string, (...args: any[]) => void][] = [];
   const turns = new Map<string, Turn>();
+  const sections = options.semanticSections
+    ? createCaptionSections()
+    : undefined;
+  const sourceTurns = sections ? new Map<string, Turn>() : turns;
   const completedIds = new Set<string>();
   const queued = new Map<string, Job>();
   const pendingCommits: { timer: Timer; at: number }[] = [];
@@ -203,6 +226,7 @@ export function createRemoteCaptionClient(
   let inputFrames = 0;
   let serverFinishConfigPending = false;
   let serverActiveSpeechId: string | undefined;
+  let sectionIdleTimer: Timer | undefined;
   const isClosed = () => state === 'closed';
 
   const inputDiagnostic = (
@@ -236,6 +260,7 @@ export function createRemoteCaptionClient(
   const cleanup = () => {
     clearTimeout(lifecycleTimer);
     clearTimeout(active?.timer);
+    clearTimeout(sectionIdleTimer);
     for (const turn of turns.values()) clearTimeout(turn.draftTimer);
     for (const pending of pendingCommits) clearTimeout(pending.timer);
     for (const timer of committed.values()) clearTimeout(timer);
@@ -251,6 +276,7 @@ export function createRemoteCaptionClient(
     }
     listeners.length = 0;
     turns.clear();
+    sourceTurns.clear();
     queued.clear();
     committed.clear();
     completedIds.clear();
@@ -262,7 +288,11 @@ export function createRemoteCaptionClient(
     frameTail = Buffer.alloc(0);
     preRoll = Buffer.alloc(0);
   };
-  const fail = (code: string, notify = true) => {
+  const fail = (
+    code: string,
+    notify = true,
+    diagnostic?: CallTerminationCause,
+  ) => {
     if (state === 'closed') return;
     state = 'closed';
     cleanup();
@@ -271,7 +301,15 @@ export function createRemoteCaptionClient(
     if (notify) {
       notifyState({ state: 'failed', code });
       try {
-        options.onError(code);
+        options.onError(
+          code,
+          sanitizeTerminationCause(
+            diagnostic || {
+              reason: code,
+              layer: 'provider',
+            },
+          ),
+        );
       } catch {
         /* Never expose callbacks or transport errors. */
       }
@@ -311,7 +349,7 @@ export function createRemoteCaptionClient(
         id: `remote:${kind}:${turn.id}:0`,
         utteranceId: `remote:${turn.id}:0`,
         pairing: 'explicit',
-        boundary: 'utterance',
+        boundary: sections ? 'semantic' : 'utterance',
         role: 'remote',
         kind,
         text,
@@ -335,7 +373,8 @@ export function createRemoteCaptionClient(
       committed.size ||
       active ||
       queued.size ||
-      turns.size
+      turns.size ||
+      sourceTurns.size
     )
       return;
     state = 'closed';
@@ -399,11 +438,26 @@ export function createRemoteCaptionClient(
   };
   const enqueue = (turn: Turn) => {
     if (state === 'closed' || !turn.text.trim()) return;
-    // An unchanged final can upgrade the in-flight draft without paid duplication.
+    if (
+      sections &&
+      turn.final &&
+      turn.translatedSource === turn.text &&
+      turn.translatedText &&
+      active?.turn !== turn
+    ) {
+      publish(turn, 'translation', turn.translatedText, true);
+      queued.delete(turn.id);
+      turns.delete(turn.id);
+      rememberCompleted(turn.id);
+      return;
+    }
+    // Only the current in-flight revision can be upgraded. A -> B -> A may
+    // repeat text while an older A response no longer matches the current fence.
     if (
       turn.final &&
       active?.turn === turn &&
       active.text === turn.text &&
+      active.revision === turn.revision &&
       !active.cancelled
     ) {
       active.final = true;
@@ -420,7 +474,11 @@ export function createRemoteCaptionClient(
       revision: turn.revision,
       text: turn.text,
       context: recentFinals
-        .filter((prior) => prior.at < turn.at && prior.id !== turn.id)
+        .filter(
+          (prior) =>
+            (sections ? prior.at <= turn.at : prior.at < turn.at) &&
+            prior.id !== turn.id,
+        )
         .map((prior) => prior.text),
       final: turn.final,
       output: '',
@@ -433,17 +491,114 @@ export function createRemoteCaptionClient(
     pump();
   };
   const getTurn = (id: string, at = now()) => {
-    let turn = turns.get(id);
+    let turn = sourceTurns.get(id);
     if (!turn) {
-      if (turns.size >= MAX_TURNS) {
+      if (sourceTurns.size >= MAX_TURNS) {
         fail('CAPTION_TURN_BACKLOG');
         return undefined;
       }
       lastTurnAt = Math.max(at, lastTurnAt + 1);
       turn = { id, at: lastTurnAt, text: '', final: false, revision: 0 };
-      turns.set(id, turn);
+      sourceTurns.set(id, turn);
+      try {
+        sections?.register(id, turn.at);
+      } catch {
+        fail('CAPTION_TURN_BACKLOG');
+        return undefined;
+      }
     }
     return turn;
+  };
+  const rememberFinalContext = (turn: Turn) => {
+    if (turn.text.length > 800) recentFinals = [];
+    else {
+      recentFinals = recentFinals.filter((prior) => prior.id !== turn.id);
+      recentFinals.push({ id: turn.id, at: turn.at, text: turn.text });
+      recentFinals.sort((left, right) => left.at - right.at);
+      while (
+        recentFinals.length > 2 ||
+        recentFinals.reduce((sum, prior) => sum + prior.text.length, 0) > 800
+      )
+        recentFinals.shift();
+    }
+  };
+  const applySections = (updates: CaptionSection[], sourceStable = false) => {
+    for (const section of updates) {
+      if (isClosed()) return;
+      let turn = turns.get(section.id);
+      const previousText = turn?.text;
+      if (!turn) {
+        if (turns.size >= MAX_TURNS) {
+          fail('CAPTION_TURN_BACKLOG');
+          return;
+        }
+        turn = { ...section, revision: 0 };
+        turns.set(turn.id, turn);
+      } else {
+        turn.text = section.text;
+        turn.final = section.final;
+      }
+      if (updates.length > 1 && previousText && previousText !== turn.text) {
+        // A confirmed multi-sentence source partitions its old whole draft.
+        // The old Chinese rendering belongs to that whole, not its first slice.
+        publish(turn, 'translation', '', false);
+        turn.hasVisibleTranslation = false;
+      }
+      publish(turn, 'original', turn.text, turn.final);
+      if (isClosed()) return;
+      if (!turn.text.trim()) {
+        clearTimeout(turn.draftTimer);
+        turn.draftTimer = undefined;
+        queued.delete(turn.id);
+        if (active?.turn === turn) {
+          active.cancelled = true;
+          cancelActive();
+        }
+        publish(turn, 'translation', '', turn.final);
+        if (turn.final) turns.delete(turn.id);
+      } else if (turn.final) {
+        clearTimeout(turn.draftTimer);
+        turn.draftTimer = undefined;
+        enqueue(turn);
+        rememberFinalContext(turn);
+      } else if (sourceStable) {
+        clearTimeout(turn.draftTimer);
+        turn.draftTimer = undefined;
+        enqueue(turn);
+      } else if (!turn.draftTimer) {
+        turn.draftTimer = setTimeout(() => {
+          turn.draftTimer = undefined;
+          enqueue(turn);
+        }, DRAFT_INTERVAL_MS);
+      }
+    }
+    maybeFinish();
+  };
+  const sealSections = (speakerChange = false) => {
+    clearTimeout(sectionIdleTimer);
+    sectionIdleTimer = undefined;
+    if (!sections || isClosed()) return;
+    try {
+      applySections(speakerChange ? sections.break() : sections.seal());
+    } catch {
+      fail('CAPTION_TURN_BACKLOG');
+    }
+  };
+  const scheduleSectionIdle = () => {
+    clearTimeout(sectionIdleTimer);
+    sectionIdleTimer = undefined;
+    if (!sections?.hasOpen() || state !== 'ready' || serverActiveSpeechId)
+      return;
+    const unfinished = [...turns.values()].filter((turn) => !turn.final);
+    // Brief endpoint pauses must not turn "for the" into a final sentence.
+    // This changes only caption grouping; Chinese drafts remain available.
+    const incomplete = unfinished.some((turn) =>
+      captionNeedsContinuation(turn.text),
+    );
+    sectionIdleTimer = setTimeout(
+      () => sealSections(),
+      incomplete ? INCOMPLETE_SECTION_IDLE_MS : SECTION_IDLE_MS,
+    );
   };
   const commit = () => {
     if (!turnBytes || state === 'closed') return;
@@ -532,6 +687,8 @@ export function createRemoteCaptionClient(
         return;
       }
       if (completedIds.has(event.item_id)) return;
+      clearTimeout(sectionIdleTimer);
+      sectionIdleTimer = undefined;
       serverActiveSpeechId = event.item_id;
       getTurn(event.item_id);
       return;
@@ -543,6 +700,7 @@ export function createRemoteCaptionClient(
       }
       if (serverActiveSpeechId === event.item_id)
         serverActiveSpeechId = undefined;
+      scheduleSectionIdle();
       return;
     }
     if (event.type === 'input_audio_buffer.committed') {
@@ -618,7 +776,7 @@ export function createRemoteCaptionClient(
     const hadOriginal = Boolean(turn.text);
     turn.text = final ? text : turn.text + text;
     turn.final = final;
-    if (turn.text || (final && hadOriginal))
+    if (!sections && (turn.text || (final && hadOriginal)))
       publish(turn, 'original', turn.text, final);
     if (state === 'closed') return;
     if (final) {
@@ -627,6 +785,20 @@ export function createRemoteCaptionClient(
       turn.draftTimer = undefined;
       clearTimeout(committed.get(turn.id));
       committed.delete(turn.id);
+      if (sections) {
+        try {
+          applySections(sections.update(turn.id, turn.text, true), true);
+        } catch {
+          fail('CAPTION_TURN_BACKLOG');
+          return;
+        }
+        sourceTurns.delete(turn.id);
+        rememberCompleted(turn.id);
+        if (state === 'draining') sealSections();
+        else scheduleSectionIdle();
+        maybeFinish();
+        return;
+      }
       if (!turn.text.trim()) {
         queued.delete(turn.id);
         if (active?.turn === turn) {
@@ -642,19 +814,15 @@ export function createRemoteCaptionClient(
         // Keep complete originals only: slicing a context fragment could remove
         // its negation. Long turns discard old context instead of retaining stale
         // fragments; the current source remains complete in its own request.
-        if (turn.text.length > 800) recentFinals = [];
-        else {
-          recentFinals.push({ id: turn.id, at: turn.at, text: turn.text });
-          recentFinals.sort((left, right) => left.at - right.at);
-          while (
-            recentFinals.length > 2 ||
-            recentFinals.reduce((sum, prior) => sum + prior.text.length, 0) >
-              800
-          )
-            recentFinals.shift();
-        }
+        rememberFinalContext(turn);
       }
       maybeFinish();
+    } else if (sections) {
+      try {
+        applySections(sections.update(turn.id, turn.text, false));
+      } catch {
+        fail('CAPTION_TURN_BACKLOG');
+      }
     } else if (!turn.draftTimer && turn.text.trim()) {
       turn.draftTimer = setTimeout(() => {
         turn.draftTimer = undefined;
@@ -721,7 +889,12 @@ export function createRemoteCaptionClient(
         fail('CAPTION_INVALID_TRANSLATION');
         return;
       }
-      if (job.output && job.streamInitial)
+      if (
+        job.output &&
+        job.streamInitial &&
+        (!sections ||
+          (job.text === job.turn.text && job.revision === job.turn.revision))
+      )
         publish(job.turn, 'translation', job.output, false);
       return;
     }
@@ -752,7 +925,15 @@ export function createRemoteCaptionClient(
         return;
       }
       // A newer ASR final always wins over a superseded draft response.
-      if (!job.turn.final || job.text === job.turn.text) {
+      if (
+        sections
+          ? job.text === job.turn.text && job.revision === job.turn.revision
+          : !job.turn.final || job.text === job.turn.text
+      ) {
+        if (sections) {
+          job.turn.translatedSource = job.text;
+          job.turn.translatedText = job.output;
+        }
         publish(job.turn, 'translation', job.output, job.final);
         if (job.final) {
           turns.delete(job.turn.id);
@@ -867,8 +1048,33 @@ export function createRemoteCaptionClient(
         notifyState({ state: 'ready' });
       }
     });
-    listen('error', () => fail('CAPTION_CONNECTION_FAILED'));
-    listen('close', () => fail('CAPTION_CLOSED_UNEXPECTEDLY'));
+    listen('error', () =>
+      fail(
+        'CAPTION_CONNECTION_FAILED',
+        true,
+        sanitizeTerminationCause({
+          reason:
+            kind === 'asr'
+              ? 'CAPTION_ASR_CONNECTION_FAILED'
+              : 'CAPTION_TRANSLATION_CONNECTION_FAILED',
+          layer: 'provider',
+        }),
+      ),
+    );
+    listen('close', (code: unknown) =>
+      fail(
+        'CAPTION_CLOSED_UNEXPECTEDLY',
+        true,
+        sanitizeTerminationCause({
+          reason:
+            kind === 'asr'
+              ? 'CAPTION_ASR_CLOSED'
+              : 'CAPTION_TRANSLATION_CLOSED',
+          layer: 'provider',
+          wsCloseCode: code,
+        }),
+      ),
+    );
     listen('unexpected-response', (_request, response) => {
       response.resume();
       fail('CAPTION_HANDSHAKE_REJECTED');
@@ -1008,12 +1214,16 @@ export function createRemoteCaptionClient(
             },
           });
         } else commit();
+        sealSections();
         maybeFinish();
       }
       return finished.promise;
     },
     abort() {
       fail('CLIENT_ABORTED', false);
+    },
+    breakSection() {
+      sealSections(true);
     },
   };
 }

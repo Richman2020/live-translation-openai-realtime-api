@@ -15,6 +15,8 @@ import {
   type CloudVoiceGrant,
   type CloudVoiceReservation,
   type CloudVoiceSigner,
+  type CloudVoiceRefreshGrant,
+  type CloudVoiceRefreshSigner,
 } from '../src/solo/cloud-voice-join';
 import { CloudControllerLeases } from '../src/solo/controller-lease';
 
@@ -41,6 +43,7 @@ function fixture(
     noAdmission?: boolean;
     noApplication?: boolean;
     signer?: CloudVoiceSigner;
+    refreshSigner?: CloudVoiceRefreshSigner;
     admission?: CloudVoiceAdmission;
     ttlMs?: number;
     maxTokenLifetimeMs?: number;
@@ -99,6 +102,7 @@ function fixture(
     releaseFails: false,
   };
   const grants: CloudVoiceGrant[] = [];
+  const refreshGrants: CloudVoiceRefreshGrant[] = [];
   const held: CloudVoiceReservation = {
     assertCurrent: () => {
       if (!effects.reservationLive) throw new Error('synthetic budget revoked');
@@ -124,6 +128,12 @@ function fixture(
     policy,
     now: () => now,
     signer: options.noSigner ? undefined : (options.signer ?? signer),
+    refreshSigner:
+      options.refreshSigner ??
+      (async (grant) => {
+        refreshGrants.push(grant);
+        return `fake.offline.refresh.${grant.callId}.${refreshGrants.length}`;
+      }),
     admission: options.noAdmission
       ? undefined
       : (options.admission ?? admission),
@@ -152,6 +162,7 @@ function fixture(
     bound,
     effects,
     grants,
+    refreshGrants,
     held,
     voice,
     call,
@@ -183,6 +194,112 @@ function accessError(code: CloudAccessError['code']) {
     return true;
   };
 }
+
+test('signal refresh preserves the single joined SID, identity and reservation beyond the original join deadline', async () => {
+  const f = fixture();
+  const prepared = await f.voice.prepareGrant(f.context, f.call.callId);
+  assert.equal(f.voice.consume(f.fields(prepared.join)), 'join');
+  f.leases.bindCallConnection(f.bound, f.call.callId, () => 85000);
+  f.advance(45000);
+  f.session.idleExpiresAt = 100000; // Simulated separately verified auth maintenance.
+  const refreshed = await f.voice.refreshToken(f.context, f.call.callId);
+  assert.deepEqual(Object.keys(refreshed).sort(), [
+    'authExpiresAt',
+    'callId',
+    'controller',
+    'token',
+    'tokenExpiresAt',
+  ]);
+  assert.deepEqual(refreshed.controller, {
+    tabId: f.proof.tabId,
+    epoch: f.proof.epoch,
+  });
+  assert.equal(refreshed.authExpiresAt, 100000);
+  assert.equal(refreshed.tokenExpiresAt, 100000);
+  assert.equal(f.refreshGrants[0].identity, prepared.grant.identity);
+  assert.equal(f.refreshGrants[0].outgoingApplicationSid, applicationSid);
+  assert.equal(f.refreshGrants[0].incomingAllow, false);
+  assert.equal('expiresAt' in f.refreshGrants[0], false);
+  assert.deepEqual([f.effects.reserves, f.effects.signs], [1, 1]);
+  f.voice.assertRefreshedCurrent(f.context, f.call.callId, refreshed);
+  assert.throws(
+    () =>
+      f.voice.assertRefreshedCurrent(f.context, f.call.callId, {
+        ...refreshed,
+      }),
+    accessError('UNAUTHORIZED'),
+  );
+  assert.throws(
+    () => f.voice.consume(f.fields(prepared.join, sidB)),
+    voiceError('INVALID_VOICE_JOIN'),
+  );
+  const second = await f.voice.refreshToken(f.context, f.call.callId);
+  f.voice.assertRefreshedCurrent(f.context, f.call.callId, second);
+  assert.throws(
+    () => f.voice.assertRefreshedCurrent(f.context, f.call.callId, refreshed),
+    voiceError('INVALID_VOICE_JOIN'),
+  );
+});
+
+test('signal refresh denies unjoined, read-only and foreign owners without signing or new admission', async () => {
+  const f = fixture();
+  await assert.rejects(
+    f.voice.refreshToken(f.context, f.call.callId),
+    voiceError('INVALID_VOICE_JOIN'),
+  );
+  const prepared = await f.voice.prepareGrant(f.context, f.call.callId);
+  f.voice.consume(f.fields(prepared.join));
+  await assert.rejects(
+    f.voice.refreshToken(f.otherContext, f.call.callId),
+    accessError('NOT_FOUND'),
+  );
+  await assert.rejects(
+    f.voice.refreshToken({ ...f.context }, f.call.callId),
+    accessError('UNAUTHORIZED'),
+  );
+  const read = f.policy.authenticate(
+    {
+      host: 'phone.example.com',
+      cookie: `${CLOUD_SESSION_COOKIE}=${tokenA}`,
+      'sec-fetch-site': 'same-origin',
+      'sec-fetch-mode': 'cors',
+      'sec-fetch-dest': 'empty',
+    },
+    'read',
+    { surface: 'http', method: 'GET' },
+  );
+  await assert.rejects(f.voice.refreshToken(read, f.call.callId));
+  assert.equal(f.refreshGrants.length, 0);
+  assert.deepEqual([f.effects.reserves, f.effects.signs], [1, 1]);
+});
+
+test('signal refresh signing races cannot deliver after logout, end disposal, control revocation or finite signing expiry', async () => {
+  for (const invalidation of ['logout', 'end', 'control', 'expiry'] as const) {
+    const signing = deferred<string>();
+    const entered = deferred<void>();
+    const f = fixture({
+      refreshSigner: () => {
+        entered.resolve();
+        return signing.promise;
+      },
+    });
+    const prepared = await f.voice.prepareGrant(f.context, f.call.callId);
+    f.voice.consume(f.fields(prepared.join));
+    const result = f.voice.refreshToken(f.context, f.call.callId);
+    await entered.promise;
+    await assert.rejects(
+      f.voice.refreshToken(f.context, f.call.callId),
+      voiceError('VOICE_PREPARATION_IN_PROGRESS'),
+    );
+    if (invalidation === 'logout') f.session.revoked = true;
+    if (invalidation === 'end') f.dispose();
+    if (invalidation === 'control') f.leases.revoke(f.context, f.proof);
+    if (invalidation === 'expiry') f.advance(40000);
+    signing.resolve('offline-late-refresh');
+    await assert.rejects(result);
+    assert.equal(f.effects.reserves, 1);
+  }
+});
 
 test('Voice connection has no signer, durable admission or application fallback', async () => {
   for (const options of [

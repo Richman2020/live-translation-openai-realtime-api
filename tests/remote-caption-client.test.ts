@@ -210,6 +210,383 @@ test('remote caption uses verified ASR protocol and a separate text-only session
   }
 });
 
+test('semantic captions keep short provider finals in one revisable pair and translate cumulative source only', async () => {
+  const f = fixture({
+    transcriptionModel: 'gpt-4o-transcribe',
+    semanticSections: true,
+  });
+  await f.ready();
+  try {
+    f.asr.receive({
+      type: 'input_audio_buffer.speech_started',
+      item_id: 'clause_a',
+    });
+    f.committed('clause_a');
+    f.transcript('clause_a', 'for the', true);
+    assert.equal(f.transcripts.at(-1).final, false);
+    await delay(370);
+    const first = f.createResponse('prefix');
+    assert.equal(
+      JSON.parse(first.response.input[0].content[0].text)
+        .current_english_transcript,
+      'for the',
+    );
+    f.output('prefix', '对于');
+    f.complete('prefix', '对于');
+    assert.equal(f.transcripts.at(-1).final, false);
+    f.asr.receive({
+      type: 'input_audio_buffer.speech_started',
+      item_id: 'clause_b',
+    });
+    f.transcript('clause_b', 'ection');
+    assert.equal(f.transcripts.at(-1).text, 'for the ection');
+    assert.equal(f.transcripts.at(-1).utteranceId, 'remote:clause_a:0');
+    f.committed('clause_b');
+    // Only the provider correction supplies the missing letters; the caption
+    // reducer must never guess them from a partial fragment.
+    f.transcript('clause_b', 'section we discussed today.', true);
+    const request = f.createResponse('whole');
+    const input = JSON.parse(request.response.input[0].content[0].text);
+    assert.equal(
+      input.current_english_transcript,
+      'for the section we discussed today.',
+    );
+    assert.deepEqual(input.preceding_final_english_context, []);
+    f.complete('whole', '关于我们今天讨论的部分。');
+    const originals = f.transcripts.filter(
+      (event) => event.kind === 'original',
+    );
+    const translations = f.transcripts.filter(
+      (event) => event.kind === 'translation',
+    );
+    assert.deepEqual(
+      [...new Set(originals.map((event) => event.utteranceId))],
+      ['remote:clause_a:0'],
+    );
+    assert.deepEqual(
+      [...new Set(translations.map((event) => event.utteranceId))],
+      ['remote:clause_a:0'],
+    );
+    assert.equal(originals.at(-1).final, true);
+    assert.equal(translations.at(-1).text, '关于我们今天讨论的部分。');
+    assert.equal(translations.at(-1).final, true);
+    assert.deepEqual(f.errors, []);
+  } finally {
+    f.client.abort();
+  }
+});
+
+test('semantic captions separate an explicit other-speaker turn and discard late cancelled draft output', async () => {
+  const f = fixture({
+    transcriptionModel: 'gpt-4o-transcribe',
+    semanticSections: true,
+  });
+  await f.ready();
+  try {
+    f.asr.receive({
+      type: 'input_audio_buffer.speech_started',
+      item_id: 'before',
+    });
+    f.committed('before');
+    f.transcript('before', 'three', true);
+    await delay(370);
+    f.createResponse('draft');
+    f.output('draft', '三个');
+    f.client.breakSection?.();
+    f.complete('draft', '三个');
+    assert.equal(f.transcripts.at(-1).final, true);
+    f.asr.receive({
+      type: 'input_audio_buffer.speech_started',
+      item_id: 'after',
+    });
+    f.committed('after');
+    f.transcript('after', 'not four', true);
+    assert.equal(f.transcripts.at(-1).utteranceId, 'remote:after:0');
+    assert.equal(f.transcripts.at(-1).text, 'not four');
+    assert.equal(f.transcripts.at(-1).final, false);
+    f.client.breakSection?.();
+    f.createResponse('after_final');
+    f.complete('after_final', '不是四个');
+    assert.equal(f.transcripts.at(-1).utteranceId, 'remote:after:0');
+    assert.equal(f.transcripts.at(-1).final, true);
+    assert.deepEqual(f.errors, []);
+  } finally {
+    f.client.abort();
+  }
+});
+
+test('an asynchronous older section translation cannot overwrite a newer source revision or its final', async () => {
+  const f = fixture({
+    transcriptionModel: 'gpt-4o-transcribe',
+    semanticSections: true,
+  });
+  await f.ready();
+  try {
+    f.asr.receive({
+      type: 'input_audio_buffer.speech_started',
+      item_id: 'quantity',
+    });
+    f.committed('quantity');
+    f.transcript('quantity', 'I need two rooms', true);
+    await delay(370);
+    f.createResponse('old');
+    f.output('old', '我需要两间房');
+    f.asr.receive({
+      type: 'input_audio_buffer.speech_started',
+      item_id: 'negation',
+    });
+    f.committed('negation');
+    f.transcript('negation', 'not three', true);
+    const before = f.transcripts.filter(
+      (event) => event.kind === 'translation',
+    );
+    f.output('old', '错误迟到文本');
+    f.complete('old', '错误迟到最终文本');
+    assert.deepEqual(
+      f.transcripts.filter((event) => event.kind === 'translation'),
+      before,
+    );
+    await delay(370);
+    const newest = f.createResponse('new');
+    assert.equal(
+      JSON.parse(newest.response.input[0].content[0].text)
+        .current_english_transcript,
+      'I need two rooms not three',
+    );
+    f.output('new', '我需要');
+    assert.deepEqual(
+      f.transcripts.filter((event) => event.kind === 'translation'),
+      before,
+    );
+    f.client.breakSection?.();
+    f.complete('new', '我需要两间房，不是三间');
+    assert.equal(f.transcripts.at(-1).text, '我需要两间房，不是三间');
+    assert.equal(f.transcripts.at(-1).final, true);
+    const final = f.transcripts.at(-1);
+    f.output('old', '再次迟到');
+    f.complete('old', '再次迟到');
+    assert.equal(f.transcripts.at(-1), final);
+    assert.deepEqual(f.errors, []);
+  } finally {
+    f.client.abort();
+  }
+});
+
+test('an A-to-B-to-A final safely replaces a stale in-flight revision and drains exactly one final translation', async () => {
+  const f = fixture({
+    transcriptionModel: 'gpt-4o-transcribe',
+    semanticSections: true,
+  });
+  await f.ready();
+  try {
+    f.asr.receive({
+      type: 'input_audio_buffer.speech_started',
+      item_id: 'reverted',
+    });
+    const original = 'I need two rooms.';
+    f.transcript('reverted', original);
+    await delay(370);
+    f.createResponse('old_a');
+    f.output('old_a', '我需要两间房。');
+    f.transcript('reverted', ' Please check availability.');
+    await delay(370);
+    assert.equal(
+      f.text.sent.filter((event) => event.type === 'response.create').length,
+      1,
+    );
+    f.committed('reverted');
+    f.transcript('reverted', original, true);
+    assert.equal(f.text.sent.at(-1).type, 'response.cancel');
+    f.complete('old_a', '旧修订不应产生定稿。');
+    assert.equal(
+      f.text.sent.filter((event) => event.type === 'response.create').length,
+      2,
+    );
+    const current = f.createResponse('final_a');
+    assert.equal(
+      JSON.parse(current.response.input[0].content[0].text)
+        .current_english_transcript,
+      original,
+    );
+    let resolved = false;
+    const finished = f.client.finish().then(() => {
+      resolved = true;
+    });
+    f.asr.receive(asrSession('gpt-4o-transcribe', true));
+    await delay(0);
+    assert.equal(resolved, false);
+    f.complete('final_a', '我需要两间房。');
+    await finished;
+    assert.deepEqual(
+      f.transcripts
+        .filter((event) => event.kind === 'translation' && event.final)
+        .map((event) => [event.utteranceId, event.text]),
+      [['remote:reverted:0', '我需要两间房。']],
+    );
+    assert.equal(resolved, true);
+    assert.deepEqual(f.errors, []);
+  } finally {
+    f.client.abort();
+  }
+});
+
+test('semantic captions finalize an incomplete source on a bounded pause or finish without changing ASR audio', async () => {
+  const f = fixture({
+    transcriptionModel: 'gpt-4o-transcribe',
+    semanticSections: true,
+  });
+  await f.ready();
+  try {
+    f.asr.receive({
+      type: 'input_audio_buffer.speech_started',
+      item_id: 'short',
+    });
+    f.asr.receive({
+      type: 'input_audio_buffer.speech_stopped',
+      item_id: 'short',
+    });
+    f.committed('short');
+    f.transcript('short', 'The room has two beds', true);
+    assert.equal(f.transcripts.at(-1).final, false);
+    await delay(370);
+    f.createResponse('hello');
+    f.complete('hello', '房间有两张床。');
+    await delay(1260);
+    assert.equal(f.transcripts.at(-1).kind, 'translation');
+    assert.equal(f.transcripts.at(-1).final, true);
+    assert.equal(
+      f.text.sent.filter((event) => event.type === 'response.create').length,
+      1,
+    );
+    const finished = f.client.finish();
+    f.asr.receive(asrSession('gpt-4o-transcribe', true));
+    await finished;
+    assert.equal(
+      f.asr.sent.filter((event) => event.type === 'input_audio_buffer.commit')
+        .length,
+      0,
+    );
+    assert.deepEqual(f.errors, []);
+  } finally {
+    f.client.abort();
+  }
+});
+
+test('an incomplete for-the fragment remains draft across two seconds and continues in the same source row', async () => {
+  const f = fixture({
+    transcriptionModel: 'gpt-4o-transcribe',
+    semanticSections: true,
+  });
+  await f.ready();
+  try {
+    f.asr.receive({
+      type: 'input_audio_buffer.speech_started',
+      item_id: 'for_the',
+    });
+    f.asr.receive({
+      type: 'input_audio_buffer.speech_stopped',
+      item_id: 'for_the',
+    });
+    f.committed('for_the');
+    f.transcript('for_the', 'for the', true);
+    f.createResponse('fragment');
+    f.complete('fragment', '对于');
+    await delay(2050);
+    assert.equal(f.transcripts.at(-1).final, false);
+    assert.equal(
+      f.transcripts.some((event) => event.final),
+      false,
+    );
+    f.asr.receive({
+      type: 'input_audio_buffer.speech_started',
+      item_id: 'continuation',
+    });
+    f.committed('continuation');
+    f.transcript('continuation', 'ection we discussed today.', true);
+    const request = f.createResponse('continuation');
+    assert.equal(
+      JSON.parse(request.response.input[0].content[0].text)
+        .current_english_transcript,
+      'for the ection we discussed today.',
+    );
+    f.complete('continuation', '对于我们今天讨论的 ection。');
+    assert.deepEqual(
+      [...new Set(f.transcripts.map((event) => event.utteranceId))],
+      ['remote:for_the:0'],
+    );
+    assert.equal(f.transcripts.at(-1).final, true);
+    assert.equal(
+      f.transcripts.filter((event) => event.kind === 'original').at(-1).text,
+      'for the ection we discussed today.',
+    );
+    assert.deepEqual(f.errors, []);
+  } finally {
+    f.client.abort();
+  }
+});
+
+test('a confirmed multi-sentence source replaces its whole draft with exact separately translated sections', async () => {
+  const f = fixture({
+    transcriptionModel: 'gpt-4o-transcribe',
+    semanticSections: true,
+  });
+  await f.ready();
+  try {
+    f.asr.receive({
+      type: 'input_audio_buffer.speech_started',
+      item_id: 'long_source',
+    });
+    const source =
+      'I need two rooms tomorrow. Please do not book three rooms. The meeting starts at four.';
+    f.transcript('long_source', source);
+    await delay(370);
+    f.createResponse('whole_draft');
+    f.output('whole_draft', '两间房。不要三间房。会议四点开始。');
+    f.committed('long_source');
+    f.transcript('long_source', source, true);
+    const cleared = f.transcripts
+      .filter((event) => event.kind === 'translation')
+      .at(-1);
+    assert.equal(cleared.text, '');
+    assert.equal(cleared.final, false);
+    f.complete('whole_draft', '旧整段译文不得变成第一句译文。');
+    const expected = [
+      ['I need two rooms tomorrow.', '明天我需要两间房。'],
+      ['Please do not book three rooms.', '请不要订三间房。'],
+      ['The meeting starts at four.', '会议四点开始。'],
+    ];
+    const ids = [];
+    for (const [index, [english, chinese]] of expected.entries()) {
+      const request = f.createResponse(`piece_${index}`);
+      const input = JSON.parse(request.response.input[0].content[0].text);
+      assert.equal(input.current_english_transcript, english);
+      assert.deepEqual(
+        input.preceding_final_english_context,
+        expected
+          .slice(Math.max(0, index - 2), index)
+          .map(([original]) => original),
+      );
+      f.complete(`piece_${index}`, chinese);
+      const translated = f.transcripts.at(-1);
+      ids.push(translated.utteranceId);
+      assert.equal(translated.text, chinese);
+      assert.equal(translated.final, true);
+    }
+    assert.deepEqual(ids, [
+      'remote:long_source:0',
+      'remote:caption:long_source:2:0',
+      'remote:caption:long_source:3:0',
+    ]);
+    const final = f.transcripts.at(-1);
+    f.complete('whole_draft', '迟到旧整段');
+    f.transcript('long_source', '迟到旧识别草稿');
+    assert.equal(f.transcripts.at(-1), final);
+    assert.deepEqual(f.errors, []);
+  } finally {
+    f.client.abort();
+  }
+});
+
 test('silence only sends no audio or commit and finishes without hallucinated captions', async () => {
   const f = fixture();
   await f.ready();

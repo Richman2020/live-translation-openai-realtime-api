@@ -1,8 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import WebSocket from 'ws';
-import type { CloudProviderAdmission } from './cloud-call-usage';
 
+import type { CloudProviderAdmission } from './cloud-call-usage';
+import {
+  sanitizeTerminationCause,
+  type CallTerminationCause,
+} from './call-termination-diagnostics';
 import {
   createContinuousTranslationClient,
   type ContinuousTranslationAudioMetadata,
@@ -67,6 +71,7 @@ export type ContinuousTranslationBridgeOptions = TranslationBridgeOptions & {
   outgoingCaptions?: boolean;
   /** Personal cloud calls end both legs when any required model fails. */
   captionFailureEndsCall?: boolean;
+  onTerminationDiagnostic?: (event: CallTerminationCause) => void;
   onOutgoingCaptionState?: (event: {
     role: 'local';
     state: 'connecting' | 'ready' | 'failed';
@@ -537,6 +542,24 @@ export class ContinuousTranslationBridge {
     }
   }
 
+  private providerFailureDiagnostic(
+    role: TranslationRole,
+    cause: unknown,
+  ): void {
+    if (this.closed) return;
+    try {
+      this.options.onTerminationDiagnostic?.(
+        sanitizeTerminationCause({
+          ...sanitizeTerminationCause(cause),
+          layer: 'provider',
+          role,
+        }),
+      );
+    } catch {
+      // A diagnostic sink cannot suppress the original cleanup path.
+    }
+  }
+
   private startProvider(role: TranslationRole): void {
     if (!this.admit(role, 'native_translation', 'connect', 0, 0)) return;
     const provider: Provider = {
@@ -582,6 +605,8 @@ export class ContinuousTranslationBridge {
               onTranscript: (delta) => this.onTranscript(role, provider, delta),
               onInputTranscript: (delta) =>
                 this.onTranscript(role, provider, delta, 'original'),
+              onTerminationDiagnostic: (cause) =>
+                this.providerFailureDiagnostic(role, cause),
               onTransportUsage: (event) => {
                 if (this.closed || this.providers.get(role) !== provider)
                   return;
@@ -598,8 +623,10 @@ export class ContinuousTranslationBridge {
                   }
                 : {}),
               // Never expose provider errors, credentials, audio or transcripts.
-              onError: () =>
-                this.shutdown(`continuous_provider_failed:${role}`),
+              onError: (code) => {
+                this.providerFailureDiagnostic(role, { reason: code });
+                this.shutdown(`continuous_provider_failed:${role}`);
+              },
             });
       provider.client = client;
       if (this.closed) {
@@ -744,6 +771,7 @@ export class ContinuousTranslationBridge {
         timeoutMs: this.options.sessionTimeoutMs,
         createWebSocket: this.guardedSocketFactory('remote', 'remote_captions'),
         now: this.options.now,
+        semanticSections: true,
         onTranscript: (event) => {
           if (!this.closed && !this.captionFailed) {
             this.separateNativeDisplay(event);
@@ -755,7 +783,16 @@ export class ContinuousTranslationBridge {
             }
           }
         },
-        onError: () => this.failCaptions(),
+        onError: (code, diagnostic) => {
+          if (this.options.captionFailureEndsCall)
+            this.providerFailureDiagnostic(
+              'remote',
+              diagnostic || {
+                reason: code,
+              },
+            );
+          this.failCaptions();
+        },
         onInputDiagnostic: (event) => {
           if (!this.closed && !this.captionFailed)
             this.options.onCaptionInputDiagnostic?.(event);
@@ -1765,6 +1802,8 @@ export class ContinuousTranslationBridge {
     kind: TranscriptEvent['kind'] = 'translation',
   ): void {
     if (this.closed || this.providers.get(role) !== provider) return;
+    if (role === 'local' && kind === 'original' && delta.trim())
+      this.captionClient?.breakSection?.();
     // The protocol has no final-sentence boundary. Bounded cumulative display
     // segments are visual excerpts, not ASR-final or paired utterances. Source
     // and target are separate namespaces even when elapsed alignment matches.
