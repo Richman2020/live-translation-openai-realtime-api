@@ -1307,11 +1307,14 @@ for (const engine of ['nano-captions', 'continuous-captions', 'pocket-captions']
   const ids = () => f.element('transcript').children.map((row: any) => row.dataset.utteranceId);
   emit('first', 'original', 'First', 1000); emit('first', 'translation', '第一', 3000);
   emit('second', 'original', 'Second', 2000); emit('second', 'translation', '第二', 2000);
+  const second = f.element('transcript').children[1];
   emit('first', 'original', '', 1000); emit('second', 'translation', '第二修订', 2000);
-  assert.deepEqual(ids(), ['remote:first:0', 'remote:second:0'], 'empty original retains a valid translation and stable source order');
-  const first = f.element('transcript').children[0];
+  assert.deepEqual(ids(), ['remote:second:0'], 'a final empty original withdraws its old translated card');
+  assert.equal(f.element('transcript').children[0], second, 'withdrawing one source preserves the other visible paragraph');
   emit('first', 'original', 'First restored', 1000);
-  assert.equal(f.element('transcript').children[0], first); assert.equal(partText(first, 'original'), 'First restored');
+  assert.deepEqual(ids(), ['remote:first:0', 'remote:second:0'], 'a newer valid raw restores the original source order');
+  const first = f.element('transcript').children[0];
+  assert.equal(f.element('transcript').children[1], second); assert.equal(partText(first, 'original'), 'First restored');
   emit('second', 'translation', '第二再修订', 2000);
   assert.equal(partText(f.element('transcript').children[1], 'translation'), '第二再修订');
   emit('first', 'original', 'Metadata changed', 1000, { kind: 'translation' });

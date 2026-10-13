@@ -77,12 +77,19 @@ test('invalidated unspoken prefix sections are tombstoned and late response toke
   await client.ready;
   asr.receive({ type: 'conversation.item.input_audio_transcription.delta', item_id: 'turn', content_index: 0, delta: '我想预约明天下午' });
   const oldId = model.snapshot()[0].id;
+  const oldRevision = model.getUtterance(oldId)!.original!.revision;
   const request = text.sent.find(event => event.type === 'response.create');
   text.receive({ type: 'response.created', response: { id: 'old', metadata: request.response.metadata } });
   asr.receive({ type: 'conversation.item.input_audio_transcription.completed', item_id: 'turn', content_index: 0, transcript: '我不想预约明天下午三点。' });
-  assert.equal(model.getUtterance(oldId), null);
+  const withdrawn = model.getUtterance(oldId);
+  assert.equal(withdrawn?.sourceWithdrawn, true);
+  assert.equal(withdrawn?.original?.text, '');
+  assert.equal(withdrawn?.original?.final, true);
+  assert.ok(withdrawn!.original!.revision > oldRevision);
+  assert.ok(model.getUtterances().every(row => row.id !== oldId));
   text.receive({ type: 'response.output_text.delta', response_id: 'old', output_index: 0, content_index: 0, delta: 'obsolete translation' });
-  assert.equal(model.getUtterance(oldId), null);
+  assert.equal(model.getUtterance(oldId), withdrawn, 'late obsolete tokens cannot alter the retained raw tombstone');
+  assert.ok(model.getUtterances().every(row => row.id !== oldId));
   assert.ok(model.snapshot().every(row => row.translation?.text !== 'obsolete translation'));
 });
 

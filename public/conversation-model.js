@@ -4,11 +4,20 @@ const statuses = new Set(['queued', 'sent', 'played', 'cancelled', 'unconfirmed'
 const validId = value => typeof value === 'string' && value.length > 0 && value.length <= 1024;
 const validRevision = value => Number.isSafeInteger(value) && value >= 1;
 const sourceTime = value => typeof value === 'number' ? value : Date.parse(value);
+// Text evidence only, matching the speaker registry; not an acoustic noise test.
+const hasSourceText = text => typeof text === 'string' && /[\p{L}\p{N}]/u.test(text);
+const withdrawnSource = row => row?.original?.final === true && !hasSourceText(row.original.text);
+const turnMetadata = value => value.speakerTurnId === undefined && value.speakerTurnSequence === undefined && value.speakerTurnRevision === undefined && value.speakerSourceSequence === undefined
+  || validId(value.speakerTurnId) && Number.isSafeInteger(value.speakerTurnSequence) && value.speakerTurnSequence > 0
+    && (value.speakerTurnRevision === undefined || validRevision(value.speakerTurnRevision))
+    && (value.speakerSourceSequence === undefined || validRevision(value.speakerSourceSequence));
+const compareSources = (a, b) => a.at - b.at || (a.speakerSourceSequence ?? a.sequence) - (b.speakerSourceSequence ?? b.sequence) || a.id.localeCompare(b.id);
 
 /** Older providers pair only IDs that explicitly share the same source turn. */
 export function adaptTranscriptEvent(value, options = {}) {
   if (!value || !validId(value.id) || !roles.has(value.role)
     || !['original', 'translation'].includes(value.kind) || typeof value.text !== 'string'
+    || !turnMetadata(value)
     || (value.conversationVisible === false && !['native_output', 'native_input'].includes(value.captionSource))) return null;
   const native = ['native_output', 'native_input'].includes(value.captionSource);
   const nativeOutput = value.captionSource === 'native_output';
@@ -32,7 +41,51 @@ export function adaptTranscriptEvent(value, options = {}) {
     pairing: value.pairing || (paired ? 'explicit' : 'unpaired'),
     boundary: value.boundary || (paired ? 'utterance' : 'diagnostic'),
     ...(value.captionSource ? { captionSource: value.captionSource, audioCorrespondence: value.audioCorrespondence } : {}),
+    ...(value.speakerTurnId !== undefined ? { speakerTurnId: value.speakerTurnId, speakerTurnSequence: value.speakerTurnSequence, speakerTurnRevision: value.speakerTurnRevision, speakerSourceSequence: value.speakerSourceSequence } : {}),
+    ...(value.sourceRevision !== undefined ? { sourceRevision: value.sourceRevision } : {}),
+    ...(value.displayText !== undefined ? { displayText: value.displayText, normalization: value.normalization } : {}),
   };
+}
+
+/** Speaker blocks are a display projection. Individual source IDs and revisions
+ * stay intact; provider finals and semantic sections never create speaker turns. */
+export function groupConversationUtterances(utterances) {
+  const ordered = utterances.filter(row => !withdrawnSource(row)).sort(compareSources);
+  const blocks = new Map();
+  const owners = new Map();
+  let previousSource = null;
+  const make = (id, row, unassigned = false) => {
+    let block = blocks.get(id);
+    if (!block) {
+      block = { id, role: row.role, at: row.at, sequence: row.speakerTurnSequence ?? row.sequence,
+        speakerTurnSequence: row.speakerTurnSequence,
+        sourceUnassigned: unassigned, utterances: [] };
+      blocks.set(id, block);
+    }
+    return block;
+  };
+  for (const row of ordered) {
+    const source = hasSourceText(row.original?.text);
+    if (row.speakerTurnId !== undefined) {
+      const block = make(`turn:${row.role}:${row.speakerTurnId}`, row);
+      owners.set(row.id, block);
+      if (source) previousSource = block;
+    } else if (source) {
+      const block = previousSource?.role === row.role ? previousSource : make(`source:${row.id}`, row);
+      owners.set(row.id, block); previousSource = block;
+    }
+  }
+  for (const row of ordered) {
+    let block = owners.get(row.id);
+    // A different utterance's same role/time cannot prove source association.
+    // Keep each unbound excerpt separate; late output never seizes an A-B-A run.
+    if (!block) block = make(`unassigned:${row.id}`, row, true);
+    block.utterances.push(row);
+  }
+  return [...blocks.values()].filter(block => block.utterances.length)
+    .sort((a, b) => Number(a.sourceUnassigned) - Number(b.sourceUnassigned)
+      || (a.speakerTurnSequence !== undefined && b.speakerTurnSequence !== undefined ? a.speakerTurnSequence - b.speakerTurnSequence : a.at - b.at)
+      || a.sequence - b.sequence || a.id.localeCompare(b.id));
 }
 
 /** Display segmentation only: never align two languages by punctuation count. */
@@ -64,7 +117,7 @@ export function createConversationModel(options) {
   let orderedRows = [];
   let changedOrder = false;
   let lastChange = null;
-  const visible = row => !!row && [row.original, row.translation]
+  const visible = row => !!row && !withdrawnSource(row) && [row.original, row.translation]
     .some(part => part && (part.text.trim() || !part.final));
   function rowFor(event) {
     let row = utterances.get(event.utteranceId);
@@ -95,7 +148,10 @@ export function createConversationModel(options) {
       if (!['original', 'translation'].includes(event.kind) || typeof event.text !== 'string'
         || event.text.length > 32000 || typeof event.final !== 'boolean'
         || !['explicit', 'unpaired'].includes(event.pairing)
-        || !['utterance', 'semantic', 'diagnostic'].includes(event.boundary)) return false;
+        || !['utterance', 'semantic', 'diagnostic'].includes(event.boundary)
+        || !turnMetadata(event) || (event.sourceRevision !== undefined && !validRevision(event.sourceRevision))
+        || (event.displayText !== undefined && (event.kind !== 'original' || typeof event.displayText !== 'string' || event.displayText.length > 32000))
+        || (event.normalization !== undefined && (event.normalization !== 'conservative' || event.displayText === undefined))) return false;
       if (event.captionSource !== undefined && !['native_output', 'native_input', 'independent_text'].includes(event.captionSource)) return false;
       if (['native_output', 'native_input'].includes(event.captionSource) && (event.role !== 'local'
         || event.kind !== (event.captionSource === 'native_output' ? 'translation' : 'original')
@@ -105,9 +161,34 @@ export function createConversationModel(options) {
       const row = rowFor(event);
       if (!row) return false;
       const part = row[event.kind];
-      if (part && (event.revision <= part.revision || (part.final && part.text.trim() && !event.final))) return false;
+      if (event.sourceRevision === undefined && (part?.sourceRevision !== undefined
+        || event.kind === 'translation' && row.original?.sourceRevision !== undefined)) return false;
+      // A versioned binding cannot be erased by an unversioned/partial replay.
+      if (row.speakerTurnRevision !== undefined && (event.speakerTurnId === undefined
+        || event.speakerTurnSequence === undefined || event.speakerTurnRevision === undefined
+        || row.speakerSourceSequence !== undefined && event.speakerSourceSequence === undefined)) return false;
+      if (event.speakerTurnRevision !== undefined && row.speakerTurnRevision !== undefined && event.speakerTurnRevision < row.speakerTurnRevision) return false;
+      const bindingChanged = event.speakerTurnId !== undefined && (row.speakerTurnId !== event.speakerTurnId || row.speakerTurnSequence !== event.speakerTurnSequence || row.speakerSourceSequence !== event.speakerSourceSequence);
+      if (bindingChanged && row.speakerTurnId !== undefined && !(event.speakerTurnRevision > (row.speakerTurnRevision || 0))) return false;
+      const rebinding = event.speakerTurnRevision > (row.speakerTurnRevision || 0) && part
+        && event.revision === part.revision && event.text === part.text && event.final === part.final
+        && event.sourceRevision === part.sourceRevision && event.displayText === part.displayText && event.normalization === part.normalization;
+      const sourceAdvanced = event.sourceRevision !== undefined && part?.sourceRevision !== undefined && event.sourceRevision > part.sourceRevision;
+      if (part && !rebinding && (event.revision <= part.revision || (part.final && part.text.trim() && !event.final && !sourceAdvanced))) return false;
+      if (event.sourceRevision !== undefined && (event.sourceRevision < (part?.sourceRevision || 0)
+        || event.kind === 'translation' && event.sourceRevision < (row.original?.sourceRevision || 0)
+        || event.kind === 'original' && event.sourceRevision === part?.sourceRevision && event.text !== part.text)) return false;
       const wasVisible = visible(row);
-      row[event.kind] = { text: event.text, final: event.final, revision: event.revision };
+      const hadSource = hasSourceText(row.original?.text);
+      row[event.kind] = { text: event.text, final: event.final, revision: event.revision,
+        ...(event.sourceRevision !== undefined ? { sourceRevision: event.sourceRevision } : {}),
+        ...(event.displayText !== undefined ? { displayText: event.displayText, normalization: event.normalization } : {}) };
+      if (event.speakerTurnId !== undefined) {
+        if (bindingChanged) { orderDirty = true; changedOrder = true; }
+        row.speakerTurnId = event.speakerTurnId; row.speakerTurnSequence = event.speakerTurnSequence;
+        row.speakerTurnRevision = event.speakerTurnRevision;
+        row.speakerSourceSequence = event.speakerSourceSequence;
+      }
       row.snapshot = null;
       // Provider source time is preserved across late translations. A source
       // event can correct a translation-only placeholder's ordering.
@@ -120,6 +201,7 @@ export function createConversationModel(options) {
       }
       row.pairing = event.pairing;
       row.boundary = event.boundary;
+      if (hadSource !== hasSourceText(row.original?.text)) changedOrder = true;
       if (wasVisible !== visible(row)) changedOrder = true;
       lastChange = { id: row.id, orderChanged: changedOrder, event: Object.freeze({ ...event }) };
       return true;
@@ -169,7 +251,7 @@ export function createConversationModel(options) {
   function getUtterances() {
     if (orderDirty) {
       orderedRows = [...utterances.values()]
-        .sort((a, b) => a.at - b.at || a.sequence - b.sequence || a.id.localeCompare(b.id));
+        .sort(compareSources);
       orderDirty = false;
     }
     return orderedRows.filter(visible).map(rowSnapshot);
@@ -179,15 +261,20 @@ export function createConversationModel(options) {
       id: row.id, sessionId, role: row.role, at: row.at, sequence: row.sequence,
       pairing: row.pairing, boundary: row.boundary,
       ...(row.captionSource ? { captionSource: row.captionSource, audioCorrespondence: row.audioCorrespondence } : {}),
+      ...(row.speakerTurnId !== undefined ? { speakerTurnId: row.speakerTurnId, speakerTurnSequence: row.speakerTurnSequence, speakerTurnRevision: row.speakerTurnRevision, speakerSourceSequence: row.speakerSourceSequence } : {}),
+      ...(withdrawnSource(row) ? { sourceWithdrawn: true } : {}),
       original: row.original && Object.freeze({ ...row.original }),
-      translation: row.translation && Object.freeze({ ...row.translation }),
+      translation: row.translation && row.translation.sourceRevision === row.original?.sourceRevision
+        ? Object.freeze({ ...row.translation }) : null,
+      ...(row.translation && row.translation.sourceRevision !== row.original?.sourceRevision ? { translationPending: true } : {}),
       playback: Object.freeze(playbackFor(row)),
     });
     return row.snapshot;
   }
   function getUtterance(id) {
     const row = utterances.get(id);
-    return visible(row) ? rowSnapshot(row) : null;
+    // Keep withdrawn raw/version/binding evidence available without listing a card.
+    return visible(row) || withdrawnSource(row) ? rowSnapshot(row) : null;
   }
   function applyTranscript(value) {
     receiptSequence += 1;

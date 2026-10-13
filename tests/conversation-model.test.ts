@@ -190,7 +190,9 @@ test('semantic display sections preserve decimals, negations and every input cha
 test('a higher-revision caption correction can restore an empty-final tombstone as a draft', () => {
   const model = createConversationModel('call-a');
   model.apply(text({ text: '', final: true }));
-  assert.equal(model.getUtterance('local:u1:0'), null);
+  assert.deepEqual(model.snapshot(), []);
+  assert.equal(model.getUtterance('local:u1:0')?.sourceWithdrawn, true);
+  assert.equal(model.getUtterance('local:u1:0')?.original?.text, '');
   assert.equal(model.apply(text({ revision: 2, text: '新的正确字幕', final: false })), true);
   assert.equal(model.getUtterance('local:u1:0')?.original?.text, '新的正确字幕');
   assert.equal(model.getLastChange()?.orderChanged, true);

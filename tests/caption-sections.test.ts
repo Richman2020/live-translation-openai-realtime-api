@@ -530,3 +530,39 @@ test('invalid and unregistered inputs fail with fixed errors', () => {
     /INVALID_CAPTION_SOURCE/,
   );
 });
+
+test('section context endpoints require every contributing source and retain their maximum across exact splits', () => {
+  const sections = createCaptionSections();
+  sections.register('first', 10);
+  const draft = sections.update('first', 'We should ask for', true, 15);
+  assert.equal(draft[0].sourceEndAt, 15);
+  assert.equal(draft[0].final, false);
+  sections.register('second', 20);
+  const final = sections.update(
+    'second',
+    'two rooms. We should not ask for three.',
+    true,
+    30,
+  );
+  assert.ok(final.every((row) => row.sourceEndAt === 30));
+  assert.ok(final.every((row) => row.at === 10));
+  assert.equal(
+    final.map((row) => row.text).join(' '),
+    'We should ask for two rooms. We should not ask for three.',
+  );
+  const incompleteProof = createCaptionSections();
+  incompleteProof.register('first', 10);
+  incompleteProof.update('first', 'We should ask for', true);
+  incompleteProof.register('second', 20);
+  assert.ok(
+    incompleteProof
+      .update('second', 'two rooms.', true, 30)
+      .every((row) => row.sourceEndAt === undefined),
+  );
+  const invalid = createCaptionSections();
+  invalid.register('first', 10);
+  assert.throws(
+    () => invalid.update('first', 'text', true, 9),
+    /INVALID_CAPTION_SOURCE/,
+  );
+});

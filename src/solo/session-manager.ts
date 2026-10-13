@@ -1324,16 +1324,24 @@ export class SessionManager extends EventEmitter {
                 )
               ) {
                 const event = session.conversation.transcript(transcript);
-                if (event)
+                if (event && this.liveAdmission(session))
                   this.emit('event', { event: 'conversation', data: event });
+                for (const update of session.conversation.takeTurnUpdates()) {
+                  if (!this.liveAdmission(session)) break;
+                  this.emit('event', { event: 'conversation', data: update });
+                }
               }
             }
           },
           onConversationTranscript: (transcript) => {
             if (!this.liveAdmission(session)) return;
             const event = session.conversation.transcript(transcript);
-            if (event)
+            if (event && this.liveAdmission(session))
               this.emit('event', { event: 'conversation', data: event });
+            for (const update of session.conversation.takeTurnUpdates()) {
+              if (!this.liveAdmission(session)) break;
+              this.emit('event', { event: 'conversation', data: update });
+            }
           },
           onUtterancePlayback: (playback) => {
             if (playback.status !== 'cancelled' && !this.liveAdmission(session))

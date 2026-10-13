@@ -18,6 +18,19 @@ export type TranscriptEvent = {
   pairing?: 'explicit' | 'unpaired';
   boundary?: 'utterance' | 'semantic' | 'diagnostic';
   revision?: number;
+  /** Raw-source version shared by original and its text translation. */
+  sourceRevision?: number;
+  /** Confirmed ASR stop/commit boundary; never final-result arrival time. */
+  sourceEndAt?: number;
+  /** Display-only speaker block; does not assert audio/text correspondence. */
+  speakerTurnId?: string;
+  speakerTurnSequence?: number;
+  speakerTurnRevision?: number;
+  /** Source registration order, independent of a later result's arrival. */
+  speakerSourceSequence?: number;
+  /** Conservative disfluency display; text remains the recognizer's raw text. */
+  displayText?: string;
+  normalization?: 'conservative';
 };
 
 export type UtterancePlaybackEvent = {

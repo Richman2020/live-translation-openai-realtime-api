@@ -3,11 +3,18 @@ export type CaptionSection = {
   text: string;
   at: number;
   final: boolean;
+  /** Present only when every contributing ASR source has a trusted endpoint. */
+  sourceEndAt?: number;
 };
 
 export type CaptionSections = {
   register(id: string, at: number): void;
-  update(id: string, text: string, sourceFinal: boolean): CaptionSection[];
+  update(
+    id: string,
+    text: string,
+    sourceFinal: boolean,
+    sourceEndAt?: number,
+  ): CaptionSection[];
   hasOpen(): boolean;
   seal(): CaptionSection[];
   break(): CaptionSection[];
@@ -28,6 +35,7 @@ type Source = {
   final: boolean;
   completed: boolean;
   section?: Section;
+  sourceEndAt?: number;
 };
 type Section = {
   id: string;
@@ -127,11 +135,17 @@ export function createCaptionSections(): CaptionSections {
         (text.length >= NATURAL_SECTION_CHARACTERS &&
           !captionNeedsContinuation(text)));
     const parts = final ? splitSealedText(text) : [text];
+    const sourceEndAt = section.sources.every(
+      (source) => source.sourceEndAt !== undefined,
+    )
+      ? Math.max(...section.sources.map((source) => source.sourceEndAt!))
+      : undefined;
     const snapshot = {
       id: section.id,
       text: parts[0],
       at: section.at,
       final,
+      ...(sourceEndAt === undefined ? {} : { sourceEndAt }),
     };
     const changed =
       !section.emitted ||
@@ -149,6 +163,7 @@ export function createCaptionSections(): CaptionSections {
         text: part,
         at: section.at,
         final: true,
+        ...(sourceEndAt === undefined ? {} : { sourceEndAt }),
       })),
     ];
   };
@@ -185,19 +200,22 @@ export function createCaptionSections(): CaptionSections {
       });
       pending += 1;
     },
-    update(id, text, sourceFinal) {
+    update(id, text, sourceFinal, sourceEndAt) {
       const source = sources.get(id);
       if (
         !source ||
         typeof text !== 'string' ||
         text.length > MAX_SOURCE_TEXT ||
-        typeof sourceFinal !== 'boolean'
+        typeof sourceFinal !== 'boolean' ||
+        (sourceEndAt !== undefined &&
+          (!Number.isSafeInteger(sourceEndAt) || sourceEndAt < source.at))
       )
         throw new Error('INVALID_CAPTION_SOURCE');
       if (source.completed || (source.final && !sourceFinal)) return [];
       if (source.text === text && source.final === sourceFinal) return [];
       source.text = text;
       source.final = sourceFinal;
+      source.sourceEndAt = sourceEndAt;
 
       if (!source.section) {
         if (!text.trim()) {

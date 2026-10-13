@@ -898,6 +898,18 @@ try {
     at: at + 1,
     pairing: 'explicit',
   });
+  if (continuous) {
+    bridge.onTranscript?.({
+      id: 'browser-remote-next', utteranceId: 'browser-remote-next', role: 'remote',
+      kind: 'original', text: 'Please confirm the address.', final: true, at: at + 2,
+      pairing: 'explicit', boundary: 'semantic',
+    });
+    bridge.onTranscript?.({
+      id: 'browser-remote-next', utteranceId: 'browser-remote-next', role: 'remote',
+      kind: 'translation', text: '请确认地址。', final: true, at: at + 2,
+      pairing: 'explicit', boundary: 'semantic',
+    });
+  }
   bridge.onTranscript?.({
     id: 'browser-remote',
     utteranceId: 'browser-remote',
@@ -917,16 +929,15 @@ try {
   await eventually(
     () =>
       page.evaluate(
-        `document.querySelectorAll('article[data-utterance-id]').length===${(outgoingPairedCaptions ? 2 : 1) + (continuous ? 2 : 0)}`,
+        `document.querySelectorAll('.conversation-segment[data-utterance-id]').length===${(outgoingPairedCaptions ? 2 : 1) + (continuous ? 3 : 0)}`,
       ),
     'Native SSE paired captions',
   );
   check(
     await page.evaluate(
-      `[...document.querySelectorAll('article[data-utterance-id]')].map(row=>({id:row.dataset.utteranceId,original:row.querySelector('.conversation-original .transcript-text').textContent,translation:row.querySelector('.conversation-translation .transcript-text').textContent}))`,
+      `[...document.querySelectorAll('.conversation-segment[data-utterance-id]')].map(row=>({id:row.dataset.utteranceId,original:row.querySelector('.conversation-original .transcript-text').textContent,translation:row.querySelector('.conversation-translation .transcript-text').textContent}))`,
     ),
     [
-      ...(continuous ? [{ id: 'native:native-output', original: '', translation: nativeTranscript.text }] : []),
       ...(outgoingPairedCaptions ? [{
         id: 'browser-local',
         original: '不是十五美元，是五十美元以内。',
@@ -937,27 +948,34 @@ try {
         original: 'We can do that.',
         translation: '我们可以做到。',
       },
+      ...(continuous ? [{ id: 'browser-remote-next', original: 'Please confirm the address.', translation: '请确认地址。' }] : []),
+      ...(continuous ? [{ id: 'native:native-output', original: '', translation: nativeTranscript.text }] : []),
       ...(continuous ? [{ id: 'native:native-output-after-interruption', original: '', translation: ' below fifty dollars, not fifteen.' }] : []),
     ],
-    outgoingPairedCaptions ? 'native text and sentence reference pairs remain separate in chronological conversation' : 'default shows native English and paired remote captions without inventing a local source pair',
+    outgoingPairedCaptions ? 'source-ordered speaker blocks and unbound native auxiliary text remain separate' : 'default shows paired remote captions and unbound native English without inventing a local source pair',
   );
   if (continuous) check(
-    await page.evaluate(`[...document.querySelectorAll('article[data-caption-source="native_output"] .conversation-translation .transcript-text')].map(node=>node.textContent).join('')`),
+    await page.evaluate(`({blocks:[...document.querySelectorAll('.conversation-block')].map(block=>[...block.querySelectorAll('.conversation-segment')].map(row=>row.dataset.utteranceId)),auxiliary:document.querySelectorAll('.conversation-auxiliary').length,repeatedSpeakerHeaders:document.querySelectorAll('.conversation-segment .utterance-meta').length})`),
+    { blocks: [...(outgoingPairedCaptions ? [['browser-local']] : []), ['browser-remote', 'browser-remote-next']], auxiliary: 2, repeatedSpeakerHeaders: 0 },
+    'actual cloud SSE keeps same-speaker completed semantic paragraphs in one block and native text in separate unbound auxiliary entries',
+  );
+  if (continuous) check(
+    await page.evaluate(`[...document.querySelectorAll('.conversation-segment[data-caption-source="native_output"] .conversation-translation .transcript-text')].map(node=>node.textContent).join('')`),
     nativeText,
     'native fragments preserve all characters across the intervening remote utterance',
   );
   if (continuous) check(
-    await page.evaluate(`(() => { const row=document.querySelector('article[data-caption-source="native_output"]'); return {label:row.querySelector('.conversation-translation .conversation-language').textContent,originalHidden:row.querySelector('.conversation-original').hidden,status:row.querySelector('.utterance-playback').dataset.playbackStatus,playback:row.querySelector('.utterance-playback').textContent}; })()`),
+    await page.evaluate(`(() => { const row=document.querySelector('.conversation-segment[data-caption-source="native_output"]'); return {label:row.querySelector('.conversation-translation .conversation-language').textContent,originalHidden:row.querySelector('.conversation-original').hidden,status:row.querySelector('.utterance-playback').dataset.playbackStatus,playback:row.querySelector('.utterance-playback').textContent}; })()`),
     { label: '原生英文译音文字', originalHidden: true, status: 'unknown', playback: '英文译音生成文字 · 未与原文配对 · 播放未确认' },
     'actual native text stays visible without a fabricated Chinese pair or played claim',
   );
   if (continuous && outgoingPairedCaptions) check(
-    await page.evaluate(`document.querySelector('article[data-caption-source="independent_text"] .conversation-translation .conversation-language').textContent`),
+    await page.evaluate(`document.querySelector('.conversation-segment[data-caption-source="independent_text"] .conversation-translation .conversation-language').textContent`),
     'English 参考翻译',
     'independent English wording is labelled reference translation alongside different native text',
   );
   if (continuous && outgoingPairedCaptions) check(
-    await page.evaluate(`document.querySelector('article[data-utterance-id="browser-local"] .utterance-playback').dataset.playbackStatus`),
+    await page.evaluate(`document.querySelector('.conversation-segment[data-utterance-id="browser-local"] .utterance-playback').dataset.playbackStatus`),
     'unknown',
     'paired independent text cannot invent native translated audio playback confirmation',
   );

@@ -144,6 +144,76 @@ try {
   const expectedSourceHeaders = [{ method: 'GET', origin: null, secFetchSite: 'same-origin', secFetchMode: 'cors', secFetchDest: 'empty' }];
   equal(browserSourceHeaders.fetch, expectedSourceHeaders, 'actual Chrome same-origin fetch GET omits Origin and sends same-origin Fetch Metadata');
   equal(browserSourceHeaders.eventSource, expectedSourceHeaders, 'actual Chrome same-origin EventSource GET omits Origin and sends same-origin Fetch Metadata');
+  const legacyScreenshot = await send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false });
+  await evaluate(`(async () => {
+    const { createConversationModel } = await import('/conversation-model.js');
+    const { createConversationView } = await import('/conversation-view.js');
+    document.documentElement.dataset.phoneSurface = 'controlled';
+    document.body.innerHTML = '<section class="transcript-card card" style="height:700px;width:960px;margin:24px auto"><div class="transcript-header"><h2>连续发言块 · 离线事件验收</h2></div><div class="conversation-follow-bar"><span id="block-history" hidden></span><button id="block-latest" hidden>回到最新</button></div><div class="transcript-scroll" id="block-scroll"><div id="block-transcript"></div></div></section>';
+    let model = createConversationModel('block-browser');
+    const view = createConversationView({ container: document.getElementById('block-transcript'), scrollContainer: document.getElementById('block-scroll'), latestButton: document.getElementById('block-latest'), historyStatus: document.getElementById('block-history') });
+    window.blockBrowser = { model, view,
+      source(id, role, at, changes = {}) { return { type:'text',sessionId:'block-browser',utteranceId:id,role,kind:'original',text:role==='remote'?'Please confirm two rooms.':'我需要两间房。',final:true,revision:1,sourceRevision:1,at,sequence:at,pairing:'explicit',boundary:'semantic',speakerTurnId:role==='remote'?'remote-one':'local-one',speakerTurnSequence:role==='remote'?1:2,speakerTurnRevision:1,speakerSourceSequence:at,...changes }; },
+      apply(event) { const accepted=model.apply(event); if(accepted) { const change=model.getLastChange(); if(change.orderChanged || !view.update(model.getUtterance(change.id))) view.render(model.getUtterances()); } return accepted; },
+      reset() { model=createConversationModel('block-browser');this.model=model;view.reset(); },
+      ids() { return [...document.querySelectorAll('.conversation-block')].map(block=>[...block.querySelectorAll('[data-utterance-id]')].map(row=>row.dataset.utteranceId)); }
+    };
+    for(let index=1;index<=3;index+=1) blockBrowser.apply(blockBrowser.source('remote-'+index,'remote',index*100));
+    window.firstBlock=document.querySelector('.conversation-block');
+  })()`);
+  equal(await evaluate(`({ids:blockBrowser.ids(),headers:document.querySelectorAll('.conversation-block .utterance-meta').length,segments:document.querySelectorAll('.conversation-segment').length})`),
+    { ids: [['remote-1', 'remote-2', 'remote-3']], headers: 1, segments: 3 }, 'completed events and semantic paragraphs share one speaker block with one speaker header');
+  await evaluate(`window.laterSource=blockBrowser.source('remote-after','remote',500);blockBrowser.apply(laterSource);window.laterRow=document.querySelector('[data-utterance-id="remote-after"]');blockBrowser.apply(blockBrowser.source('local-between','local',400));blockBrowser.apply({...laterSource,speakerTurnId:'remote-after-local',speakerTurnSequence:3,speakerTurnRevision:2});`);
+  equal(await evaluate(`({ids:blockBrowser.ids(),same:laterRow===document.querySelector('[data-utterance-id="remote-after"]'),first:firstBlock===document.querySelector('.conversation-block')})`),
+    { ids: [['remote-1', 'remote-2', 'remote-3'], ['local-between'], ['remote-after']], same: true, first: true }, 'late source insertion and newer binding epoch relocate a paragraph while preserving stable block and row nodes');
+  await evaluate(`blockBrowser.apply({...blockBrowser.source('remote-1','remote',100),kind:'translation',text:'请确认两间房。'});`);
+  equal(await evaluate(`({first:document.querySelector('[data-utterance-id="remote-1"] .translation-text').textContent,last:document.querySelector('[data-utterance-id="remote-after"] .translation-text').textContent})`),
+    { first: '请确认两间房。', last: '等待译文…' }, 'late translation updates the earlier A block without taking the later A after B');
+  await evaluate(`blockBrowser.apply(blockBrowser.source('remote-2','remote',200,{revision:2,sourceRevision:2,text:'I I need two rooms',displayText:'I need two rooms',normalization:'conservative'}));`);
+  equal(await evaluate(`(() => {const row=document.querySelector('[data-utterance-id="remote-2"]');return {label:row.querySelector('.conversation-original .conversation-language').textContent,display:row.querySelector('.original-text').textContent,raw:row.querySelector('.conversation-raw-text').textContent,rawHidden:row.querySelector('.conversation-raw').hidden};})()`),
+    { label: 'English 整理显示', display: 'I need two rooms', raw: 'I I need two rooms', rawHidden: false }, 'conservative display is labelled and the exact original recognition remains inspectable');
+  await evaluate(`blockBrowser.apply({...blockBrowser.source('remote-3','remote',300),kind:'translation',sourceRevision:2,text:'对应新版原文的临时字幕',final:false});`);
+  equal(await evaluate(`document.querySelector('[data-utterance-id="remote-3"] .translation-text').textContent`), '译文待对应原文更新后显示…', 'future-source translation is visibly pending instead of paired with older original text');
+  await evaluate(`blockBrowser.apply(blockBrowser.source('remote-3','remote',300,{revision:2,sourceRevision:2,text:'for the ection',final:false}));`);
+  equal(await evaluate(`({raw:document.querySelector('[data-utterance-id="remote-3"] .original-text').textContent,translation:document.querySelector('[data-utterance-id="remote-3"] .translation-text').textContent,status:document.querySelector('[data-utterance-id="remote-3"] .conversation-translation .draft-label').textContent})`),
+    { raw: 'for the ection', translation: '对应新版原文的临时字幕', status: '临时 · 更新中' }, 'a newer raw source exposes its matching Chinese draft without completing or guessing a clipped word');
+  equal(await evaluate(`blockBrowser.apply({...laterSource,revision:99,text:'旧绑定正文不能覆盖',speakerTurnRevision:1})`), false, 'late old binding cannot overwrite a relocated source body');
+  equal(await evaluate(`(() => {const corrected={...laterSource,speakerTurnId:'remote-after-local',speakerTurnSequence:3,speakerTurnRevision:2,revision:20};const accepted=[{speakerTurnId:undefined,speakerTurnSequence:undefined,speakerTurnRevision:undefined,speakerSourceSequence:undefined},{speakerTurnRevision:undefined},{speakerSourceSequence:undefined}].map(omitted=>blockBrowser.apply({...corrected,...omitted}));const old=blockBrowser.apply({...laterSource,revision:99});const row=blockBrowser.model.getUtterance('remote-after');return {accepted,old,epoch:row.speakerTurnRevision,turn:row.speakerTurnId,textRevision:row.original.revision};})()`),
+    { accepted: [false, false, false], old: false, epoch: 2, turn: 'remote-after-local', textRevision: 1 }, 'omitted or partial binding metadata cannot erase a corrected epoch or let an older turn reclaim the displayed paragraph');
+  equal(await evaluate(`blockBrowser.apply({...blockBrowser.source('remote-3','remote',300),kind:'translation',revision:99,sourceRevision:1,text:'旧的字幕'})`), false, 'old-source translation cannot overwrite the latest visible Chinese revision');
+  await evaluate(`for(const [id,at,text] of [['native-before',100,'Earlier generated English.'],['native-after',600,'Later generated English.']])blockBrowser.apply({type:'text',sessionId:'block-browser',utteranceId:id,role:'local',kind:'translation',text,final:false,revision:1,at,sequence:at,pairing:'unpaired',boundary:'diagnostic',captionSource:'native_output',audioCorrespondence:'generated_only'});`);
+  equal(await evaluate(`({ids:blockBrowser.ids(),aux:[...document.querySelectorAll('.conversation-auxiliary')].map(block=>({ids:[...block.querySelectorAll('[data-utterance-id]')].map(row=>row.dataset.utteranceId),label:block.querySelector('.conversation-auxiliary-label strong').textContent,headers:block.querySelectorAll('.utterance-meta').length}))})`),
+    { ids: [['remote-1', 'remote-2', 'remote-3'], ['local-between'], ['remote-after']], aux: [{ ids: ['native-before'], label: '未关联来源轮次的文字', headers: 0 }, { ids: ['native-after'], label: '未关联来源轮次的文字', headers: 0 }] }, 'unbound native excerpts remain separate auxiliary entries and do not claim or merge A-B-A speaker turns');
+  equal(await evaluate(`({chinese:getComputedStyle(document.querySelector('[data-utterance-id="remote-1"] .translation-text')).fontSize,english:getComputedStyle(document.querySelector('[data-utterance-id="remote-1"] .original-text')).fontSize,innerPadding:getComputedStyle(document.querySelector('.conversation-segment>.speech-bubble')).padding})`),
+    { chinese: '17px', english: '13px', innerPadding: '0px' }, 'grouped paragraphs retain prominent Chinese and secondary English inside one outer speech bubble');
+  await evaluate(`window.versionedLateSource=blockBrowser.source('translation-first','remote',700,{speakerTurnId:'remote-after-local',speakerTurnSequence:3,speakerTurnRevision:2,sourceRevision:3,text:'not three rooms, two rooms'});blockBrowser.apply({...versionedLateSource,kind:'translation',text:'三间房',sourceRevision:undefined,speakerTurnId:undefined,speakerTurnSequence:undefined,speakerTurnRevision:undefined,speakerSourceSequence:undefined});blockBrowser.apply(versionedLateSource);`);
+  equal(await evaluate(`({raw:document.querySelector('[data-utterance-id="translation-first"] .original-text').textContent,translation:document.querySelector('[data-utterance-id="translation-first"] .translation-text').textContent})`),
+    { raw: 'not three rooms, two rooms', translation: '译文待对应原文更新后显示…' }, 'unknown-version translation received first is hidden when a newer versioned original arrives');
+  await evaluate(`blockBrowser.apply({...versionedLateSource,kind:'translation',revision:2,text:'不是三间房，是两间房。'});`);
+  equal(await evaluate(`document.querySelector('[data-utterance-id="translation-first"] .translation-text').textContent`), '不是三间房，是两间房。', 'matching-source translation replaces the pending unknown-version wording in the same source paragraph');
+  for (const withdrawnText of ['', '？！ …']) {
+    await evaluate(`blockBrowser.reset();window.withdrawA1=blockBrowser.source('withdraw-a1','local',100,{speakerTurnId:'withdraw-a1',speakerTurnSequence:1,speakerTurnRevision:1});window.withdrawB=blockBrowser.source('withdraw-b','remote',200,{text:'misheard fragment',final:false,speakerTurnId:'withdraw-b',speakerTurnSequence:2,speakerTurnRevision:2});window.withdrawA2=blockBrowser.source('withdraw-a2','local',300,{speakerTurnId:'withdraw-a2',speakerTurnSequence:3,speakerTurnRevision:3});blockBrowser.apply(withdrawA1);blockBrowser.apply(withdrawB);blockBrowser.apply({...withdrawB,kind:'translation',text:'已经显示的旧中文字幕',final:true});blockBrowser.apply(withdrawA2);blockBrowser.apply({...withdrawB,text:${JSON.stringify(withdrawnText)},final:true,revision:2,sourceRevision:2});blockBrowser.apply({...withdrawA2,speakerTurnId:'withdraw-a1',speakerTurnSequence:1,speakerTurnRevision:4});`);
+    equal(await evaluate(`(() => {const evidence=blockBrowser.model.getUtterance('withdraw-b');return {ids:blockBrowser.ids(),ghost:document.querySelector('[data-utterance-id="withdraw-b"]')!==null,raw:evidence.original.text,sourceRevision:evidence.original.sourceRevision,withdrawn:evidence.sourceWithdrawn};})()`),
+      { ids: [['withdraw-a1', 'withdraw-a2']], ghost: false, raw: withdrawnText, sourceRevision: 2, withdrawn: true }, `final ${withdrawnText ? 'punctuation-only' : 'empty'} raw removes the already translated B card and merges the continuous A source block while retaining audit evidence`);
+    equal(await evaluate(`blockBrowser.apply({...withdrawB,kind:'translation',revision:99,text:'晚到旧字幕',final:true})`), false, 'a late older-source translation cannot restore a withdrawn speaker card');
+    await evaluate(`blockBrowser.apply({...blockBrowser.source('withdraw-orphan','remote',400),kind:'translation',text:'仅翻译来源未知',sourceRevision:undefined,speakerTurnId:undefined,speakerTurnSequence:undefined,speakerTurnRevision:undefined,speakerSourceSequence:undefined});`);
+    equal(await evaluate(`({ghost:document.querySelector('[data-utterance-id="withdraw-b"]')!==null,aux:[...document.querySelectorAll('.conversation-auxiliary [data-utterance-id]')].map(row=>row.dataset.utteranceId)})`),
+      { ghost: false, aux: ['withdraw-orphan'] }, 'withdrawal filtering preserves legacy translation-only auxiliary text without reopening B');
+    await evaluate(`blockBrowser.apply({...withdrawB,text:'Please confirm two rooms.',revision:3,sourceRevision:3,speakerTurnRevision:5});blockBrowser.apply({...withdrawA2,speakerTurnRevision:5});`);
+    equal(await evaluate(`({ids:blockBrowser.ids(),at:blockBrowser.model.getUtterance('withdraw-b').at,translation:document.querySelector('[data-utterance-id="withdraw-b"] .translation-text').textContent})`),
+      { ids: [['withdraw-a1'], ['withdraw-b'], ['withdraw-a2']], at: 200, translation: '译文待对应原文更新后显示…' }, 'a newer valid raw reactivates the original source position without displaying its withdrawn older Chinese');
+  }
+  await evaluate(`blockBrowser.reset();for(let index=0;index<40;index+=1)blockBrowser.apply(blockBrowser.source('long-'+index,'remote',1000+index,{text:'Please confirm the room, date and address. '.repeat(3)}));`);
+  await pause(100);
+  equal(await evaluate(`({blocks:document.querySelectorAll('.conversation-block').length,paragraphs:document.querySelectorAll('.conversation-segment').length,following:blockBrowser.view.following})`),
+    { blocks: 1, paragraphs: 40, following: true }, 'a long uninterrupted source turn retains one large block with independently versioned paragraphs');
+  await evaluate(`(() => {const box=document.getElementById('block-scroll');box.scrollTop=350;box.dispatchEvent(new Event('scroll'));window.blockReadingTop=box.scrollTop;window.blockReadingRow=[...document.querySelectorAll('.conversation-segment')].find(row=>row.getBoundingClientRect().bottom>box.getBoundingClientRect().top);window.blockReadingOffset=blockReadingRow.getBoundingClientRect().top-box.getBoundingClientRect().top;blockBrowser.apply(blockBrowser.source('long-40','remote',1040,{text:'Next paragraph after a short pause.'}));})()`);
+  await pause(100);
+  equal(await evaluate(`({blocks:document.querySelectorAll('.conversation-block').length,following:blockBrowser.view.following,anchor:Math.abs(blockReadingRow.getBoundingClientRect().top-document.getElementById('block-scroll').getBoundingClientRect().top-blockReadingOffset)<2,button:!document.getElementById('block-latest').hidden})`),
+    { blocks: 1, following: false, anchor: true, button: true }, 'appending to the same long speaker block preserves the history paragraph anchor and return-to-latest control');
+  await evaluate(`document.getElementById('block-latest').click()`);
+  equal(await evaluate(`blockBrowser.view.following && document.getElementById('block-latest').hidden`), true, 'return-to-latest resumes following for a continuously growing block');
+  await evaluate(`document.getElementById('block-scroll').scrollTop=0;`);
   const result = { passed: true, checks, browserSourceHeaders };
   assert.deepEqual(faults, []);
   assert.equal(requests.some(url => /^https?:/.test(url) && !url.startsWith(`${origin}/`)), false, 'Browser contacted an external endpoint');
@@ -151,6 +221,7 @@ try {
   await mkdir(output, { recursive: true });
   const screenshot = await send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false });
   await writeFile(join(output, 'acceptance.png'), Buffer.from(screenshot.data, 'base64'));
+  await writeFile(join(output, 'legacy-acceptance.png'), Buffer.from(legacyScreenshot.data, 'base64'));
   await writeFile(join(output, 'acceptance.json'), `${JSON.stringify({ ...result, browser: await send('Browser.getVersion'), externalRequests: 0, exceptions: faults }, null, 2)}\n`);
   console.log(JSON.stringify({ ...result, screenshot: '.runtime/conversation-browser/acceptance.png', externalRequests: 0, exceptions: faults }));
 } finally {

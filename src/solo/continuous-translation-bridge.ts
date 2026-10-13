@@ -3,6 +3,7 @@ import { performance } from 'node:perf_hooks';
 import WebSocket from 'ws';
 
 import type { CloudProviderAdmission } from './cloud-call-usage';
+import { createCallContext } from './call-context';
 import {
   sanitizeTerminationCause,
   type CallTerminationCause,
@@ -285,6 +286,15 @@ export class ContinuousTranslationBridge {
   private captionPendingBytes = 0;
 
   private readonly captionUtterances = new Set<string>();
+
+  private readonly callContext = createCallContext();
+
+  private readonly contextSources = new Map<
+    string,
+    { at: number; order: number; revision: number }
+  >();
+
+  private contextSourceSequence = 0;
 
   private outgoingCaptionClient?: OutgoingPrefixClient;
 
@@ -772,8 +782,17 @@ export class ContinuousTranslationBridge {
         createWebSocket: this.guardedSocketFactory('remote', 'remote_captions'),
         now: this.options.now,
         semanticSections: true,
+        getContext: (query) =>
+          this.callContext.snapshot({
+            beforeAt: query.at,
+            ...(query.observedBeforeAt === undefined
+              ? {}
+              : { observedBeforeAt: query.observedBeforeAt }),
+            ...(query.allowLateFinal ? { allowLateFinal: true } : {}),
+          }),
         onTranscript: (event) => {
           if (!this.closed && !this.captionFailed) {
+            this.observeCallContext(event);
             this.separateNativeDisplay(event);
             if (this.captionFailed) return;
             try {
@@ -1844,6 +1863,7 @@ export class ContinuousTranslationBridge {
               audioCorrespondence: 'generated_only' as const,
             }),
       };
+      this.observeCallContext(event);
       try {
         this.options.onTranscript(event);
       } catch {
@@ -1858,6 +1878,61 @@ export class ContinuousTranslationBridge {
           provider.transcriptSequence += 1;
         }
       }
+    }
+  }
+
+  private observeCallContext(
+    event: TranscriptEvent & {
+      captionSource?: 'native_input' | 'native_output';
+    },
+  ): void {
+    if (
+      this.closed ||
+      !this.options.remoteCaptions ||
+      (event.kind !== 'original' && event.captionSource !== 'native_output')
+    )
+      return;
+    // Native translated text is generated/provisional context, never evidence
+    // of the caller's exact original. The ASR prompt excludes it entirely.
+    let sourceKind: 'native_output' | 'native_source' | 'asr' = 'asr';
+    if (event.captionSource === 'native_output') sourceKind = 'native_output';
+    else if (event.captionSource === 'native_input')
+      sourceKind = 'native_source';
+    const id = event.utteranceId ?? event.id;
+    const key = `${event.role}:${sourceKind}:${id}`;
+    let source = this.contextSources.get(key);
+    if (!source) {
+      this.contextSourceSequence = Math.min(
+        this.contextSourceSequence + 1,
+        Number.MAX_SAFE_INTEGER,
+      );
+      source = {
+        at: event.at,
+        order: this.contextSourceSequence,
+        revision: 0,
+      };
+      this.contextSources.set(key, source);
+      if (this.contextSources.size > 64)
+        this.contextSources.delete(this.contextSources.keys().next().value!);
+    }
+    source.revision = Math.min(source.revision + 1, Number.MAX_SAFE_INTEGER);
+    try {
+      this.callContext.observe({
+        role: event.role,
+        sourceId: id,
+        sourceKind,
+        at: source.at,
+        order: source.order,
+        revision: event.sourceRevision ?? source.revision,
+        ...(event.sourceEndAt === undefined
+          ? {}
+          : { sourceEndAt: event.sourceEndAt }),
+        observedAt: (this.options.now || Date.now)(),
+        text: event.text,
+        final: event.final,
+      });
+    } catch {
+      // Optional text context is never an audio or call-lifecycle gate.
     }
   }
 
@@ -1895,6 +1970,8 @@ export class ContinuousTranslationBridge {
   private shutdown(reason?: string): void {
     if (this.closed) return;
     this.closed = true;
+    this.callContext.close();
+    this.contextSources.clear();
     for (const id of this.pendingUtterances)
       this.utterancePlayback(id, 'cancelled');
     this.pendingUtterances.clear();

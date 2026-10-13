@@ -3,7 +3,12 @@ import {
   createConversationModel,
   type ConversationEvent,
   type ConversationPlaybackEvent,
+  type ConversationTextEvent,
 } from '../../public/conversation-model.js';
+import {
+  ConversationSpeakerTurns,
+  type ConversationSpeakerTurnBinding,
+} from './conversation-speaker-turns';
 import type {
   TranscriptEvent,
   TranslationAudioDiagnostic,
@@ -22,6 +27,15 @@ export class ConversationEventAdapter {
   >();
 
   private readonly model: ReturnType<typeof createConversationModel>;
+
+  private readonly speakerTurns = new ConversationSpeakerTurns();
+
+  private readonly latestText = new Map<
+    string,
+    Partial<Record<'original' | 'translation', ConversationTextEvent>>
+  >();
+
+  private turnUpdates: ConversationTextEvent[] = [];
 
   constructor(
     private readonly sessionId: string,
@@ -46,7 +60,7 @@ export class ConversationEventAdapter {
     return origin;
   }
 
-  transcript(transcript: TranscriptEvent): ConversationEvent | null {
+  transcript(transcript: TranscriptEvent): ConversationTextEvent | null {
     const event = adaptTranscriptEvent(transcript, {
       sessionId: this.sessionId,
     });
@@ -59,7 +73,95 @@ export class ConversationEventAdapter {
     event.revision =
       transcript.revision ??
       this.revision(`text:${event.utteranceId}:${event.kind}`);
-    return this.model.apply(event) ? event : null;
+    // Validate text/version/provenance before a source is allowed to change
+    // display ownership. A rejected stale original cannot seize the turn.
+    delete event.speakerTurnId;
+    delete event.speakerTurnSequence;
+    delete event.speakerTurnRevision;
+    delete event.speakerSourceSequence;
+    const previousRow = this.model.getUtterance(event.utteranceId);
+    const previousBinding = this.speakerTurns.lookup(
+      event.utteranceId,
+      event.role,
+    );
+    if (previousBinding)
+      Object.assign(event, this.withBinding(event, previousBinding));
+    else if (
+      previousRow?.role === event.role &&
+      previousRow.speakerTurnId !== undefined
+    ) {
+      // Retired source metadata stays frozen, never rebound to a current turn.
+      // Preserve the established fence while validating a newer text revision.
+      Object.assign(event, {
+        speakerTurnId: previousRow.speakerTurnId,
+        speakerTurnSequence: previousRow.speakerTurnSequence,
+        speakerTurnRevision: previousRow.speakerTurnRevision,
+        speakerSourceSequence: previousRow.speakerSourceSequence,
+      });
+    }
+    this.turnUpdates = [];
+    if (!this.model.apply(event)) return null;
+
+    const result =
+      event.kind === 'original'
+        ? this.speakerTurns.acceptOriginal({
+            sourceId: event.utteranceId,
+            role: event.role,
+            at: event.at,
+            text: event.text,
+            revision: event.revision,
+            final: event.final,
+          })
+        : undefined;
+    const binding =
+      result?.binding ??
+      this.speakerTurns.lookup(event.utteranceId, event.role);
+    const bound = this.withBinding(event, binding);
+    if (binding) this.model.apply(bound);
+    const latest = this.latestText.get(event.utteranceId) ?? {};
+    latest[event.kind] = bound;
+    this.latestText.set(event.utteranceId, latest);
+    if (this.latestText.size > 1024)
+      this.latestText.delete(this.latestText.keys().next().value!);
+
+    for (const update of result?.updates ?? []) {
+      const cached = this.latestText.get(update.sourceId);
+      if (cached) {
+        for (const kind of ['original', 'translation'] as const) {
+          const previous = cached[kind];
+          if (previous && previous.role === update.role) {
+            const corrected = this.withBinding(previous, update.binding);
+            if (this.model.apply(corrected)) {
+              cached[kind] = corrected;
+              this.turnUpdates.push(corrected);
+            }
+          }
+        }
+      }
+    }
+    return bound;
+  }
+
+  /** Metadata-only revisions of the exact accepted text, never audio replay. */
+  takeTurnUpdates(): ConversationTextEvent[] {
+    const updates = this.turnUpdates;
+    this.turnUpdates = [];
+    return updates;
+  }
+
+  private withBinding(
+    event: ConversationTextEvent,
+    binding?: ConversationSpeakerTurnBinding,
+  ): ConversationTextEvent {
+    return binding
+      ? {
+          ...event,
+          speakerTurnId: binding.speakerTurnId,
+          speakerTurnSequence: binding.speakerTurnSequence,
+          speakerTurnRevision: binding.speakerTurnRevision,
+          speakerSourceSequence: binding.sourceSequence,
+        }
+      : event;
   }
 
   audio(audio: TranslationAudioDiagnostic): ConversationEvent | null {

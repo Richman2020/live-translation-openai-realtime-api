@@ -1,4 +1,5 @@
-export type TextPart = { text: string; final: boolean; revision: number };
+export type TextPart = { text: string; final: boolean; revision: number; sourceRevision?: number; displayText?: string; normalization?: 'conservative' };
+export type SpeakerTurnBinding = { speakerTurnId?: string; speakerTurnSequence?: number; speakerTurnRevision?: number; speakerSourceSequence?: number };
 export type CaptionProvenance = {
   captionSource?: 'native_output' | 'native_input' | 'independent_text';
   audioCorrespondence?: 'generated_only' | 'none';
@@ -8,7 +9,8 @@ export type ConversationTextEvent = {
   kind: 'original' | 'translation'; text: string; final: boolean; revision: number;
   at: number; sequence: number; pairing: 'explicit' | 'unpaired';
   boundary: 'utterance' | 'semantic' | 'diagnostic';
-} & CaptionProvenance;
+  sourceRevision?: number; displayText?: string; normalization?: 'conservative';
+} & CaptionProvenance & SpeakerTurnBinding;
 export type ConversationPlaybackEvent = {
   type: 'playback'; sessionId: string; utteranceId: string; role: 'local' | 'remote';
   deliveryId?: string; status: 'queued' | 'sent' | 'played' | 'cancelled' | 'unconfirmed';
@@ -20,11 +22,15 @@ export type ConversationUtterance = {
   id: string; sessionId: string; role: 'local' | 'remote'; at: number; sequence: number;
   pairing: 'explicit' | 'unpaired'; boundary: 'utterance' | 'semantic' | 'diagnostic';
   original: TextPart | null; translation: TextPart | null;
+  translationPending?: boolean;
+  sourceWithdrawn?: true;
   playback: { status: 'unknown' | ConversationPlaybackEvent['status'];
     evidence: ConversationPlaybackEvent['evidence']; sealed: boolean; deliveryCount: number; playedCount: number };
-} & CaptionProvenance;
+} & CaptionProvenance & SpeakerTurnBinding;
+export type ConversationBlock = { id: string; role: 'local' | 'remote'; at: number; sequence: number; speakerTurnSequence?: number; sourceUnassigned: boolean; utterances: ConversationUtterance[] };
 export function adaptTranscriptEvent(value: any, options?: { sessionId?: string; revision?: number; sequence?: number }): ConversationTextEvent | null;
 export function splitSemanticText(text: string): string[];
+export function groupConversationUtterances(utterances: ConversationUtterance[]): ConversationBlock[];
 export function createConversationModel(options: string | { sessionId: string }): {
   apply(event: ConversationEvent): boolean; applyTranscript(value: any): boolean;
   getUtterances(): ConversationUtterance[]; snapshot(): ConversationUtterance[];

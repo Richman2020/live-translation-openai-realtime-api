@@ -1,4 +1,5 @@
 /** Paired conversation rendering shared by the workbench and offline replay. */
+import { groupConversationUtterances } from './conversation-model.js';
 const playbackLabels = {
   unknown: '译音播放尚未关联',
   queued: '译音待播放',
@@ -15,8 +16,8 @@ function node(document, tag, className, text) {
   return result;
 }
 
-export function renderConversationUtterance(utterance, document = globalThis.document) {
-  const article = node(document, 'article', `utterance conversation-utterance ${utterance.role === 'remote' ? 'their' : 'mine'}`);
+export function renderConversationUtterance(utterance, document = globalThis.document, segment = false) {
+  const article = node(document, segment ? 'section' : 'article', `${segment ? 'conversation-segment' : 'utterance conversation-utterance'} ${utterance.role === 'remote' ? 'their' : 'mine'}`);
   article.dataset.utteranceId = utterance.id;
   const meta = node(document, 'div', 'utterance-meta');
   const speaker = node(document, 'strong', '', utterance.role === 'remote' ? '对方' : '你');
@@ -32,10 +33,18 @@ export function renderConversationUtterance(utterance, document = globalThis.doc
     const status = node(document, 'span', 'draft-label');
     const text = node(document, 'p', `transcript-text ${kind === 'original' ? 'original-text' : 'translation-text'}`);
     heading.append(label, status); row.append(heading, text); bubble.append(row);
-    parts[kind] = { row, label, status, text };
+    let raw = null;
+    if (kind === 'original') {
+      const details = node(document, 'details', 'conversation-raw');
+      const summary = node(document, 'summary', '', '核对原始识别');
+      const rawText = node(document, 'p', 'conversation-raw-text');
+      details.append(summary, rawText); row.append(details); raw = { details, text: rawText };
+    }
+    parts[kind] = { row, label, status, text, raw };
   }
   const delivery = node(document, 'p', 'utterance-playback');
-  article.append(meta, bubble, delivery);
+  if (!segment) article.append(meta);
+  article.append(bubble, delivery);
   article._conversationNodes = { boundary, time, parts, delivery };
   updateConversationUtterance(article, utterance);
   return article;
@@ -61,15 +70,19 @@ export function updateConversationUtterance(article, utterance) {
       ? utterance.role === 'local' ? '中文原文' : 'English 原文'
       : utterance.role === 'local' ? 'English 译文' : '中文译文';
     const hiddenNativePart = native && kind === (nativeOutput ? 'original' : 'translation');
+    const organized = kind === 'original' && value?.displayText !== undefined && value.displayText !== value.text;
     part.row.hidden = hiddenNativePart;
-    part.label.textContent = native ? nativeOutput ? '原生英文译音文字' : '原生中文识别文字' : reference && kind === 'translation' ? 'English 参考翻译' : language;
+    part.label.textContent = organized ? `${utterance.role === 'local' ? '中文' : 'English'} 整理显示`
+      : native ? nativeOutput ? '原生英文译音文字' : '原生中文识别文字' : reference && kind === 'translation' ? 'English 参考翻译' : language;
     part.status.textContent = value ? native ? '持续更新' : value.final ? '已确定' : '临时 · 更新中' : '';
     part.row.classList.toggle('conversation-draft', !!value && !value.final);
     part.text.classList.toggle('conversation-pending', !value);
-    const text = hiddenNativePart ? '' : value ? value.text : utterance.pairing === 'unpaired'
+    const text = hiddenNativePart ? '' : value ? organized ? value.displayText : value.text
+      : kind === 'translation' && utterance.translationPending ? '译文待对应原文更新后显示…' : utterance.pairing === 'unpaired'
       ? kind === 'original' ? '当前事件未提供对应原文' : '当前事件未提供对应译文'
       : kind === 'original' ? '等待原文…' : '等待译文…';
     if (part.text.textContent !== text) part.text.textContent = text;
+    if (part.raw) { part.raw.details.hidden = !organized; part.raw.text.textContent = value?.text || ''; }
   }
   const status = utterance.playback?.status || 'unknown';
   delivery.dataset.playbackStatus = status;
@@ -84,9 +97,11 @@ export function updateConversationUtterance(article, utterance) {
 }
 
 /** Retains article nodes and the reader's visible anchor across late text and order changes. */
-export function createConversationView({ container, scrollContainer, emptyNode, latestButton, historyStatus }) {
+export function createConversationView({ container, scrollContainer, emptyNode, latestButton, historyStatus,
+  groupSpeakers = container.ownerDocument.documentElement?.dataset?.phoneSurface === 'controlled' }) {
   const document = container.ownerDocument;
   const rows = new Map();
+  const blocks = new Map();
   let following = true;
   let renderedIds = [];
   const nearBottom = () => !scrollContainer || scrollContainer.scrollHeight - scrollContainer.scrollTop - scrollContainer.clientHeight < 64;
@@ -124,14 +139,44 @@ export function createConversationView({ container, scrollContainer, emptyNode, 
       const scrollTop = scrollContainer?.scrollTop || 0;
       const nextIds = new Set(utterances.map(item => item.id));
       for (const [id, row] of rows) if (!nextIds.has(id)) { row.remove(); rows.delete(id); }
-      for (let index = 0; index < utterances.length; index += 1) {
-        const utterance = utterances[index];
-        let row = rows.get(utterance.id);
-        if (!row) { row = renderConversationUtterance(utterance, document); rows.set(utterance.id, row); }
-        else updateConversationUtterance(row, utterance);
-        if (container.children[index] !== row) container.insertBefore(row, container.children[index] || null);
+      if (!groupSpeakers) {
+        for (let index = 0; index < utterances.length; index += 1) {
+          const utterance = utterances[index];
+          let row = rows.get(utterance.id);
+          if (!row) { row = renderConversationUtterance(utterance, document); rows.set(utterance.id, row); }
+          else updateConversationUtterance(row, utterance);
+          if (container.children[index] !== row) container.insertBefore(row, container.children[index] || null);
+        }
+        renderedIds = utterances.map(item => item.id);
+      } else {
+        const grouped = groupConversationUtterances(utterances);
+        const nextBlocks = new Set(grouped.map(block => block.id));
+        for (let index = 0; index < grouped.length; index += 1) {
+          const block = grouped[index];
+          let element = blocks.get(block.id);
+          if (!element) {
+            element = node(document, block.sourceUnassigned ? 'div' : 'article', `utterance ${block.sourceUnassigned ? 'conversation-auxiliary' : 'conversation-block'} ${block.role === 'remote' ? 'their' : 'mine'}`);
+            element.dataset.speakerBlockId = block.id;
+            const meta = node(document, 'div', block.sourceUnassigned ? 'conversation-auxiliary-label' : 'utterance-meta');
+            meta.append(node(document, 'strong', '', block.sourceUnassigned ? '未关联来源轮次的文字' : block.role === 'remote' ? '对方' : '你'));
+            element._blockTime = node(document, 'time'); meta.append(element._blockTime);
+            element._blockBody = node(document, 'div', 'speech-bubble conversation-block-body');
+            element.append(meta, element._blockBody); blocks.set(block.id, element);
+          }
+          const date = new Date(block.at);
+          element._blockTime.textContent = Number.isFinite(date.getTime()) ? date.toLocaleTimeString('zh-CN', { hour12: false }) : '';
+          for (let segmentIndex = 0; segmentIndex < block.utterances.length; segmentIndex += 1) {
+            const utterance = block.utterances[segmentIndex];
+            let row = rows.get(utterance.id);
+            if (!row) { row = renderConversationUtterance(utterance, document, true); rows.set(utterance.id, row); }
+            else updateConversationUtterance(row, utterance);
+            if (element._blockBody.children[segmentIndex] !== row) element._blockBody.insertBefore(row, element._blockBody.children[segmentIndex] || null);
+          }
+          if (container.children[index] !== element) container.insertBefore(element, container.children[index] || null);
+        }
+        for (const [id, element] of blocks) if (!nextBlocks.has(id)) { element.remove(); blocks.delete(id); }
+        renderedIds = grouped.flatMap(block => block.utterances.map(item => item.id));
       }
-      renderedIds = utterances.map(item => item.id);
       if (emptyNode) emptyNode.hidden = utterances.length > 0;
       if (scrollContainer) {
         if (following) scrollContainer.scrollTop = scrollContainer.scrollHeight;
@@ -143,6 +188,7 @@ export function createConversationView({ container, scrollContainer, emptyNode, 
       showFollowState();
     },
     update(utterance) {
+      if (utterance?.sourceWithdrawn) return false;
       const row = utterance && rows.get(utterance.id);
       if (!row) return false;
       const readingAnchor = anchor();
@@ -157,9 +203,9 @@ export function createConversationView({ container, scrollContainer, emptyNode, 
       showFollowState(); return true;
     },
     get count() { return renderedIds.length; },
-    reset() { rows.clear(); renderedIds = []; container.replaceChildren(); following = true; if (emptyNode) emptyNode.hidden = false; showFollowState(); },
+    reset() { rows.clear(); blocks.clear(); renderedIds = []; container.replaceChildren(); following = true; if (emptyNode) emptyNode.hidden = false; showFollowState(); },
     latest,
-    dispose() { scrollContainer?.removeEventListener('scroll', onScroll); latestButton?.removeEventListener('click', latest); rows.clear(); },
+    dispose() { scrollContainer?.removeEventListener('scroll', onScroll); latestButton?.removeEventListener('click', latest); rows.clear(); blocks.clear(); },
     get following() { return following; },
   };
 }
