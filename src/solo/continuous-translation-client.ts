@@ -9,6 +9,10 @@ import {
 export type ContinuousTranslationAudioMetadata = {
   /** Stream alignment only, not a unique delta or sentence identifier. */
   providerElapsedMs?: number;
+  /** Explicit prototype source binding; native translation never supplies it. */
+  utteranceId?: string;
+  /** Trusted regular-client epoch; absent on the unchanged native protocol. */
+  sessionEpoch?: number;
 };
 
 export type ContinuousTranslationSessionMetadata = {

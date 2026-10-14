@@ -55,6 +55,8 @@ export type LocalVoiceSynthesizer = {
   }>;
 };
 export type ContinuousTranslationBridgeOptions = TranslationBridgeOptions & {
+  /** Trusted per-call DI only; never selected by a browser or environment flag. */
+  callContext?: ReturnType<typeof createCallContext>;
   createClient?: (
     options: ContinuousTranslationOptions,
   ) => ContinuousTranslationClient;
@@ -123,6 +125,7 @@ type Provider = {
   ready: boolean;
   input: PcmuToPcm24k;
   output: Pcm24kToPcmu;
+  outputEpoch?: number;
   transcript: string;
   transcriptSequence: number;
   transcriptAt: number;
@@ -287,7 +290,7 @@ export class ContinuousTranslationBridge {
 
   private readonly captionUtterances = new Set<string>();
 
-  private readonly callContext = createCallContext();
+  private readonly callContext: ReturnType<typeof createCallContext>;
 
   private readonly contextSources = new Map<
     string,
@@ -313,6 +316,7 @@ export class ContinuousTranslationBridge {
   private directMarkTimer?: ReturnType<typeof setTimeout>;
 
   constructor(private readonly options: ContinuousTranslationBridgeOptions) {
+    this.callContext = options.callContext ?? createCallContext();
     const timeout = options.playbackTimeoutMs ?? 20000;
     if (!Number.isFinite(timeout) || timeout < 1 || timeout > 120000)
       throw new Error('INVALID_CONTINUOUS_PLAYBACK_TIMEOUT');
@@ -1219,7 +1223,21 @@ export class ContinuousTranslationBridge {
       return;
     // The client can deliver output immediately after resolving ready, before
     // its promise continuation runs; client protocol validation owns readiness.
-    this.forward(role, provider.output.push(pcm), metadata);
+    if (
+      Number.isSafeInteger(metadata?.sessionEpoch) &&
+      metadata.sessionEpoch > 0 &&
+      provider.outputEpoch !== metadata.sessionEpoch
+    ) {
+      provider.output.reset();
+      provider.outputEpoch = metadata.sessionEpoch;
+    }
+    this.forward(
+      role,
+      provider.output.push(pcm),
+      metadata,
+      undefined,
+      metadata?.utteranceId,
+    );
     // Provider chunk gaps are not semantic end-of-speech. Keep the FIR tail
     // and resampling phase across every chunk, including provider silence;
     // never add synthetic padding between chunks. Hangup discards the tail

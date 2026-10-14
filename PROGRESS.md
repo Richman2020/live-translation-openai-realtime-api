@@ -1,8 +1,22 @@
 # 项目进度与交接
 
-更新日期：2026-10-13。共享仓库：<https://github.com/Richman2020/live-translation-openai-realtime-api>。
+更新日期：2026-10-14。共享仓库：<https://github.com/Richman2020/live-translation-openai-realtime-api>。
 
 需求见 [PROJECT_BRIEF.md](PROJECT_BRIEF.md)，工作规则见 [AGENTS.md](AGENTS.md)，运行步骤见 [LOCAL_SETUP.md](LOCAL_SETUP.md)，后续执行入口见 [LOCAL_CODEX_HANDOFF.md](LOCAL_CODEX_HANDOFF.md)。
+
+## 最新：方案 A 常规 Realtime 2.1 独立离线原型（2026-10-14）
+
+- 用户已选择 A 的离线原型，本轮无付费试听授权。由精确 `8f96e42f4510cbe8ffe7323a5cb64f8a4b73f805` 建新分支 `codex/ai-phone-realtime-a-prototype-20261014`、新目录 `/workspace/ai-phone-realtime-A-prototype-20261014`；没有覆盖同名路径/分支。原候选仍为8f，372个 tracked文件及55份此前声线决策资料全文SHA-256一致，原未提交依赖链接保留。保护前后清单在 `/workspace/ai-phone-reference/realtime-A-prototype-20261014/candidate-protection.before.json` 与 `candidate-protection.after.json`。
+- 开始只读核实指定AI服务线上完整SHA `d7a395e7ddc7d8a253500ab6d12310c9f8a9cf6a`、部署 `e90e8959-e8c8-4f9a-a8e5-6a069a25ef0f` SUCCESS、暂存为空；没有变更来源、平台、凭据或权限，没有部署/操作portal-test。最新用户授权优先于下方旧推送、旧预算和桌面执行记载。
+- 原型为默认关闭的可信DI工厂，不导入生产cloud factory/网页引擎选项。显式选择时仅本方中文译音改为常规 `gpt-realtime-2.1`，voice创建/干净重建显式一致、无fallback；对方英文原声与8f的ASR/中文字幕及分组路径保留，不增中文配音。常规会话的model/voice/PCM24k/中文ASR/VAD有效ACK及响应可选配置冲突有离线核对，dedicated translate不加不支持参数。
+- 样本分段、对应ASR final、有界原文上下文、显式inline同段PCM、单active/FIFO译音与来源/版本/epoch绑定；已播快照不悄改，raw更正用于后续上下文而不改历史。原声回程不被本方队列阻塞；同方继续及对方插话不默认取消尚未播完的正确译音，此策略的双工听感待试听。只允许无未确认来源/音频的显式干净重建，无自动重试/旧音频重放。身份、标签隔离、用户/对端挂断、真实失联双腿清理保留，不恢复个人金额/固定整通时长挂断。
+- 实现依据是此前固定哈希的官方SDK/OpenAPI缓存；GA item_reference描述/union冲突保留为证据并采用明确inline input_audio，不用付费探测或静默fallback。每段先ASR再响应会增加首音等待，同段PCM双路径可能增加输入处理费，不能套用dedicated价格或声称0.5–1秒/固定男声已达标。现行2.1/ASR美元费率及账户模型可用性未核，当前没有供应商max_output_tokens费用上界；未来试听先核价/限量/明确美元授权。详见[原型完整说明与最小试听提案](docs/CLOUD_PHONE_REALTIME_A_PROTOTYPE_2026-10-14.md)。
+- 本轮只使用现有依赖链接，执行既有 `prepare:desktop` 复制已锁定浏览器SDK；无install/ci、新依赖或全局工具，无push/PR/GitHub CI、部署、平台改动、真实电话、付费模型或真实录音。最终本轮统一检查及独立审查结果在本节收尾记录，不借用8f或历史测试数量。
+- **最终统一结果**：Node24.19.0/npm11.9.0，`npm test` **1549 total /1544 pass /5 Windows条件skip /0 fail/cancel**；`npm run typecheck`及`npm run build`exit0。新增专项共72项：input19、regular client28、bridge22、真实SessionManager DI结束清理3，全部通过。模拟覆盖短停顿/结巴/120秒长输入/双方交替与原声优先/数字更正/缺上下文/乱序和重复/迟到撤回/clean重建/旧epoch/手动挂断及失联；不将假ASR/假译文断言当真实语义正确率。两组本轮Chrome151离线检查：conversation40、现有cloud paired=false88，全部passed/externalRequests0/exceptions空，供应商DI组realSupplierCalls0；它们验证原默认页面，未验证原型真实译音。
+- **检查失败及处置**：首次额外对新测试执行ESLint发现63项fixture样式提示（业务源码0），仅新测试空行、无操作方法注释、安全const/destructure及必要的逐案例顺序等待局部说明修正，保留前后日志/AST等价证据；修后新源码与全部新测试lint/格式exit0，重新冻结并全量复跑为上述1549结果。旧范围lint仍exit1：`continuous-translation-bridge.ts:927`父基线已有`++providerConnectionSequence`（no-plusplus）；`cloud-service.ts:145/:187`已有no-console警告，全文未改、固定枚举/有限数值诊断，不含凭据、完整号码或正文。没有宣称全仓库lint通过，没有放宽认证或改变旧音频序号逻辑。
+- **独立审查**：来源/清理审查者发现P2-1同步abort后音频回调及相邻early ASR重放路径、P2-2旧已播raw快照污染下一段上下文，均保留真实红/绿探针并在最终client `29231e4bd52472f2b2234ea5fa991a331cf27854c6f2b1dff07beaaa8aafc443`独立重跑闭合。协议审查者独立9/9探针核对有效ASR prompt、voice/codec/rate/modality/conversation冲突在发声前拒绝；11关键旧文件byte一致，native client可执行代码相同，shared bridge除精确DI/绑定/epoch增量外可执行投影一致。二者未冒称运行root全量；范围内无剩余具体代码阻塞，但不等于真实接口或声音验收。
+- **最终冻结证据**：9代码/测试输入+368父基线保护文件，清单 `/workspace/ai-phone-reference/realtime-A-prototype-20261014/verification-inputs.final.json` SHA256 `89c55df5c978dd9289126bac2314d6fcac42b8db2a13df65b4d90949b42200eb`，统一检查后377项复算无变化；默认浏览器164个输入也保持。`validation-results.json`及全量/type/build/lint/format日志、两份独立报告/探针均在同目录，最终本地SHA另以提交回执和Git对象绑定交付。5个新桥接阶段日志曾写入旧voice资料目录，已只移动本轮新增日志到本审计目录并留relocation清单，原55份材料未改。
+- **未执行与下一步**：供应商实际接受、真实识别/纯翻译遵循、男性听感/声线稳定、双工效果、首音/积压/费用均未验收；未做任何试听或电话。dot先核对本地候选和独立报告，再决定是否批准受限试听。建议首轮仅一个voice/会话、≤24秒输入、≤6个来源响应、≤36秒输出观察，不接Twilio、不录音/重试；先核当前费率、单响应输出token上限及取消余量，再由用户明确美元预算。提案不是已获批准或供应商费用硬封顶；生产线上不受原型改动。
 
 ## 最新：有界上下文、连续字幕块与固定声线方案；本地候选，未推送或部署（2026-10-13）
 
