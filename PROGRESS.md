@@ -4,6 +4,18 @@
 
 需求见 [PROJECT_BRIEF.md](PROJECT_BRIEF.md)，工作规则见 [AGENTS.md](AGENTS.md)，运行步骤见 [LOCAL_SETUP.md](LOCAL_SETUP.md)，后续执行入口见 [LOCAL_CODEX_HANDOFF.md](LOCAL_CODEX_HANDOFF.md)。
 
+## 最新：一次性试听执行器独立离线增量（2026-10-14）
+
+- 父候选 `320f01c4fa037989bddc8a26e0574e7282730c8a` 保持不变；新增分支 `codex/ai-phone-audition-runner-offline-20261014`、目录 `/workspace/ai-phone-audition-runner-offline-20261014`。保护父目录380个tracked文件、原执行单12份材料及未提交依赖链接；没有恢复补丁、改变线上或继承旧发布授权。本轮本地完整提交见交付包RECEIPT，不推送。
+- 新增独立CLI/runner/input/transport/artifacts，不接生产入口或Twilio。固定 `gpt-realtime-2.1`/`echo`，单会话、≤24秒原始输入、≤6 ASR commit/response.create、零自动重试重连。正式session和response均设512总输出tokens，分别核对实际ACK；缺失/不支持则停止，不能只凭本地计数称供应商生效。本轮ACK均为模拟，真实API未调用。
+- 默认离线预检不读凭据、不建结果、不上传；真实入口仍须样本使用确认及明确$1批准。模板记录不能代替聊天授权。取消/超时/错误停止输入与发送，单次定向取消，raw独立监听最多3秒收尾；缺usage未知，终止异常不假称连接已关。保存输出≤36秒不是计费限制。
+- 上下文仍用conversation:none+当前inline音频+有界近期raw ASR，无前轮音频/译音重送；当前PCM经ASR buffer和inline两路提交，重复处理风险记录。逐请求记录实际上下文/指令/音频bytes，字节不是token。本轮按dot 2026-10-14 09:43官方费率记录复核原$0.498752估算+$0.501248余量，保留$1建议，未获金额批准、非账单封顶。ASR $0.04预留替代24秒$0.0024分钟估计，不重复加总，类别费率未明不猜实际费用。
+- 最终本轮离线检查：新增input16、transport32、runner8、CLI/报表13，合计69；加父client28/input19相关回归，共 **116/116通过、0失败/跳过**。`npm run typecheck`、`npm run build`、全部新增TS/CLI的ESLint及Prettier exit0。未重复整个旧原型1549项；未声称全仓库历史lint问题消失。
+- 独立审查未参与实现，定向6/6复验通过。已修：取消终态早于其他ASR时漏收usage、36秒测试伪覆盖、FIFO批准文件阻塞、调用前未预留可写输出目录。最终无剩余重要发现，记录与全文哈希在本轮审计包；无法承诺系统磁盘故障或真实供应商行为。
+- 待录稿47个发音汉字，普通预约、日期时间、金额否定及更正；用户自行录制非真实通话，WAV/PCM16LE/24kHz/mono，录后按样本核对≤24秒及≤6切段。原文仅报告，参考英文独立人工验收、不进模型输入。当前无合法已确认测试录音，没有启麦、录音或付费合成。
+- 无费用检查只读云环境metadata与key存在布尔值：api.openai.com未列允许主机、当前无OPENAI_API_KEY或秘密绑定。API连通与账户权限未核验；无付费探测、网络绕过、凭据读写。未来样本、使用确认、明确金额批准和合法既有API通路齐备后才可一次试听。
+- 完整增量说明见 [执行器回执](docs/REALTIME_AUDITION_RUNNER_OFFLINE_2026-10-14.md)、[待录稿](docs/REALTIME_AUDITION_READING_SCRIPT_2026-10-14.md)。本轮未安装、推送、部署、改平台、拨号、调用模型或真实录音；男性听感/准确性/延迟/实际账单仍待试听，长通话稳定性不能由短试听代替。
+
 ## 最新：方案 A 常规 Realtime 2.1 独立离线原型（2026-10-14）
 
 - 用户已选择 A 的离线原型，本轮无付费试听授权。由精确 `8f96e42f4510cbe8ffe7323a5cb64f8a4b73f805` 建新分支 `codex/ai-phone-realtime-a-prototype-20261014`、新目录 `/workspace/ai-phone-realtime-A-prototype-20261014`；没有覆盖同名路径/分支。原候选仍为8f，372个 tracked文件及55份此前声线决策资料全文SHA-256一致，原未提交依赖链接保留。保护前后清单在 `/workspace/ai-phone-reference/realtime-A-prototype-20261014/candidate-protection.before.json` 与 `candidate-protection.after.json`。
