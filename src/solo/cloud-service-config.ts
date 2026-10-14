@@ -3,6 +3,10 @@ import { checkConfig, type SoloConfig } from './config';
 import { GoogleOidcClient } from './google-oidc';
 import { GOOGLE_LOGIN_PATHS } from './google-login';
 import { selectCloudServiceMode } from './cloud-web-verification-config';
+import {
+  parsePhoneTranslationSelection,
+  type PhoneTranslationSelection,
+} from './aliyun-planb-config';
 
 type Environment = Readonly<Record<string, string | undefined>>;
 export type CloudServiceConfig = Readonly<{
@@ -11,6 +15,8 @@ export type CloudServiceConfig = Readonly<{
   google: Readonly<ConstructorParameters<typeof GoogleOidcClient>[0]>;
   allowedTarget: string;
   outgoingPairedCaptions: boolean;
+  /** Trusted startup snapshot. Omitted by older callers means OpenAI. */
+  translationProvider?: PhoneTranslationSelection;
 }>;
 
 /** Names only. This parser never prints, copies, creates or persists credentials. */
@@ -74,6 +80,7 @@ export function parseCloudServiceConfig(
       'CLOUD_CONFIG_INVALID:CLOUD_OUTGOING_PAIRED_CAPTIONS_ENABLED',
     );
   const outgoingPairedCaptions = captions === 'true';
+  const translationProvider = parsePhoneTranslationSelection(env);
   const runtime = parsePhoneRuntime(env);
   if (runtime.mode !== 'cloud') throw new Error('CLOUD_RUNTIME_REQUIRED');
   if (required(env, 'PUBLIC_BASE_URL') !== runtime.publicOrigin)
@@ -96,14 +103,24 @@ export function parseCloudServiceConfig(
     TWILIO_API_KEY_SECRET: required(env, 'TWILIO_API_KEY_SECRET'),
     TWILIO_TWIML_APP_SID: required(env, 'TWILIO_TWIML_APP_SID'),
     TWILIO_CALLER_NUMBER: required(env, 'TWILIO_CALLER_NUMBER'),
-    OPENAI_API_KEY: required(env, 'OPENAI_API_KEY'),
+    // No OpenAI credential is read or required for an explicit Aliyun call.
+    OPENAI_API_KEY:
+      translationProvider.provider === 'aliyun-plan-b'
+        ? ''
+        : required(env, 'OPENAI_API_KEY'),
     OPENAI_REALTIME_MODEL: 'gpt-realtime-1.5',
     OPENAI_TRANSCRIPTION_MODEL: 'whisper-1',
     OPENAI_PROXY_URL: '',
     LOCAL_ACCESS_TOKEN: '',
   };
   const invalid = checkConfig(providers).find(
-    (check) => check.name !== 'LOCAL_ACCESS_TOKEN' && check.status !== 'ready',
+    (check) =>
+      check.name !== 'LOCAL_ACCESS_TOKEN' &&
+      !(
+        translationProvider.provider === 'aliyun-plan-b' &&
+        check.name === 'OPENAI_API_KEY'
+      ) &&
+      check.status !== 'ready',
   );
   if (invalid) throw new Error(`CLOUD_CONFIG_INVALID:${invalid.name}`);
 
@@ -132,5 +149,6 @@ export function parseCloudServiceConfig(
     google,
     allowedTarget,
     outgoingPairedCaptions,
+    translationProvider,
   });
 }

@@ -11,6 +11,10 @@ import { desktopConnectivity } from './desktop-connectivity';
 import { ConnectionMaintenance } from './connection-maintenance';
 import { checkConfig, ConfigStore } from './config';
 import {
+  freezePhoneTranslationSelection,
+  type PhoneTranslationSelection,
+} from './aliyun-planb-config';
+import {
   loadPhoneRuntime,
   parsePhoneRuntime,
   requireLocalPhoneRuntime,
@@ -136,6 +140,8 @@ type SoloServerOptions = {
   providerVerifier?: typeof verifyProviders;
   browserControl?: CloudPhoneAccess;
   googleLogin?: GoogleBrowserLogin;
+  /** Trusted cloud startup only; never read from HTTP or browser fields. */
+  phoneTranslationProvider?: PhoneTranslationSelection;
 };
 
 export async function buildSoloServer(options: SoloServerOptions = {}) {
@@ -157,6 +163,7 @@ export async function buildCloudControlledServer(options: {
   browserControl: CloudPhoneAccess;
   googleLogin: GoogleBrowserLogin;
   publicDir?: string;
+  phoneTranslationProvider?: PhoneTranslationSelection;
 }) {
   if (
     !(options?.configStore instanceof ConfigStore) ||
@@ -196,6 +203,9 @@ async function buildPhoneApplication(
   options: SoloServerOptions,
   cloudRuntime?: CloudPhoneRuntime,
 ) {
+  const phoneTranslationProvider = freezePhoneTranslationSelection(
+    cloudRuntime ? options.phoneTranslationProvider : undefined,
+  );
   const { browserControl } = options;
   const { googleLogin } = options;
   if (
@@ -361,7 +371,14 @@ async function buildPhoneApplication(
   function requireConfigured() {
     const configured = cloudRuntime
       ? checkConfig(configStore.value)
-          .filter((check) => check.name !== 'LOCAL_ACCESS_TOKEN')
+          .filter(
+            (check) =>
+              check.name !== 'LOCAL_ACCESS_TOKEN' &&
+              !(
+                phoneTranslationProvider.provider === 'aliyun-plan-b' &&
+                check.name === 'OPENAI_API_KEY'
+              ),
+          )
           .every((check) => check.status === 'ready')
       : configStore.configured();
     if (!configured) throw new SessionError('CONFIGURATION_REQUIRED', 503);

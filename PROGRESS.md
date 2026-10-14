@@ -4,6 +4,22 @@
 
 需求见 [PROJECT_BRIEF.md](PROJECT_BRIEF.md)，工作规则见 [AGENTS.md](AGENTS.md)，运行步骤见 [LOCAL_SETUP.md](LOCAL_SETUP.md)，后续执行入口见 [LOCAL_CODEX_HANDOFF.md](LOCAL_CODEX_HANDOFF.md)。
 
+## 最新：阿里云 Plan B 独立离线实现（2026-10-14）
+
+- 实际基线链为生产 `d7a395e7ddc7d8a253500ab6d12310c9f8a9cf6a` → 上下文字幕 `8f96e42f4510cbe8ffe7323a5cb64f8a4b73f805` → OpenAI A 原型 `320f01c4fa037989bddc8a26e0574e7282730c8a` → 试听执行器 `e10648b9dd84b80901c383dd685b2073c490690f`；从精确 e106 建独立分支 `codex/ai-phone-plan-b-aliyun-offline-20261014` 和工作目录 `/workspace/ai-phone-plan-b-aliyun-20261014`。生产基线记录 d7/部署 e90e8959-e8c8-4f9a-a8e5-6a069a25ef0f 不被本轮替换；原工作区、生产未提交 PROGRESS、四份完整源码和提交对象均单独备份。原五工作树共1548 tracked工作副本、HEAD及未提交状态前后核对，不默认main/work最新。
+- 可验证备份 `OPENAI_PRESERVED_BACKUP_20261014.zip` SHA256 `1db32f2fdc54e6bdde17954b0742794a4e74307727a50fbaa1c384a86bf631be`，有独立恢复/fsck证明、SHA清单及安全审查；浅边界d7，不携运行.env、Git配置/认证/hooks/reflog、node_modules链接或更旧历史。恢复在新目录选择四个 backup 分支，不覆盖现有工作树。旧 native OpenAI、A原型、原试听执行器 runtime、package/lock、认证/controller/session-manager/网页均保留全文；shared bridge仅新增精确播放封口入口，原OpenAI路径不调用它。
+- 原OpenAI为默认；只有可信环境显式 `CLOUD_PHONE_TRANSLATION_PROVIDER=aliyun-plan-b` 才启用新路径。服务/每通绑定冻结供应商与地域配置；本轮不开发选择页面、错误不回退、不在通话中换供应商。北京/新加坡的 `ALIYUN_BEIJING_API_KEY` / `ALIYUN_SINGAPORE_API_KEY` 分开、只读选中地域；缺密钥固定字段错误，不要求聊天传密钥。选中Plan B不读未用OpenAI key，原默认仍保留原检查，Twilio/Google身份、Origin/CSRF、SID/nonce/controller及单通限制不放宽。
+- 固定 `fun-asr-realtime`（中英分别zh/en、PCM24k）→ `qwen-mt-flash` → `cosyvoice-v3-flash / loongandy_v3`。本人中文的同一确定英文译文配对展示和TTS；对方英文原音直达耳麦，仅中文字幕、无中文TTS。阿里官方声线描述为美式男声，离线只能核对参数，实际男声听感/稳定仍未试听。HTTPS/WSS沿用既有代理及TLS，不绕过网络，不跨地域借密钥或改模型。
+- ASR只使用官方 `input.context` 数组和可靠同方确定原文；Qwen-MT是单轮、一个user消息，分开近期原文上下文和本次原文，禁止补事实/回答问题，保留数字、金额、日期、否定与更正。没有虚构多轮、system/assistant、translation_options.context或结构化返回参数；自定义user提示的实际遵循度待真实样本验证，不以mock替代。近期原文有界、来源/版本明确；临时字幕350ms合并、同方连续块与自然小节保留。
+- 单FIFO确定译音、Twilio mark背压及exact count完成回执；同方继续或对方插话不默认丢弃正确未播译文，英文原音通路独立。迟到/重复/撤回/旧task关闭后不新增播放，已播意义更正单独保留版本证据，不悄改已播快照。挂断/真实故障取消MT、停止输入及旧音频、清理两ASR与TTS；北京官方cancel、新加坡关闭本地作废，已生成内容仍可能计费。没有恢复个人金额/固定整通时长/测试截止强制挂断或本页控制倒计时。
+- **最终本轮验证**：新增 Plan B 100项（ASR22、MT17、TTS21、pipeline/bridge32、配置/选择/网络/启动8）；`npm test` **1718 total /1713 pass /5 Windows条件skip /0 fail/cancel**；`npm run typecheck`、`npm run build`、新增源码/测试及旧audition夹具增量lint、格式exit0。仅既有 `prepare:desktop` 本地复制已锁定SDK，无安装/生命周期install。首次整树6失败为旧执行器精确候选guard拒绝Plan B工作树；仅将该组离线测试夹具改为e106隔离checkout，原guard和执行器不改，13/13专项及最终整树已通过。失败日志保留，不借用历史测试数量。
+- 全旧范围lint仍1既有error（shared bridge:927 no-plusplus）和2既有warning（cloud-service:149/:191 no-console）；固定枚举/有限数值诊断，无凭据、完整号码、正文，未为消提示扩大旧逻辑。新阿里诊断仅模型/voice/地域/role、时间/数值/固定原因，非默认正文持久化；独立文件安全审查与最终哈希随回执。
+- 独立协议审查及独立流程审查发现四项并复验闭合：TTS终态后取消仍吐缓冲音频、早来源迟final造成后来源抢播、播放未封口/计数不释放、空final未撤回草稿/context。报告逐项列触发、位置、影响与独立验证，不把root全量成绩算成审查者重跑。原方案保护及恢复检查独立通过。本轮固定提交完整SHA见交付RECEIPT，差异与每文件SHA256绑定，代码测试后未扩业务。
+- **未证实延迟边界**：只有ASR确认自然小节才发声；同一source连续60秒仅partial的离线情形，草稿字幕持续修订，final前TTS0、final后1，内容无尾部丢失。真实Fun-ASR是否及时sentence_end、无长停顿首音/连续播放、上下文忠实度/男性听感/双工和实际账单仍未验证，不能宣称低延迟或电话验收通过。
+- 2026-10-14官方人民币按量价分别记录北京/新加坡：ASR每秒¥0.00033/0.00066；MT每百万输入tokens¥0.7/1.174、输出¥1.95/3.596；TTS每万输入字符¥1/0.9541。ASR两路秒数、每次上下文/草稿修订文字和TTS字符分别计；usage缺失未知，累计只取max，取消未播可能收费。没有凭空整链路每分钟/美元硬封顶；原Railway3美元提醒/接近4美元由用户决定关停、Hobby不变。
+- **授权现状**：用户最新确认此前OpenAI $1试听已执行、授权已消耗，覆盖下方历史“未授权/未执行”记录；Plan B不得复用旧样本上传或费用批准。本轮模型调用/上传/录音/电话/安装/推送/部署/平台与凭据改动全部0；不操作Railway AI、不恢复已停止portal-test。后续先选北京或新加坡、安全环境配置地域密钥和无费用连通核验；另准备限量独立试听入口、合法中文/英文样本、向阿里发送样本同意及新金额批准，才可执行，不用生产电话路径偷做试听。
+- 完整实现说明 [Plan B 离线交付](docs/CLOUD_PHONE_ALIYUN_PLAN_B_2026-10-14.md)，后续配合清单 [最小试听](docs/ALIYUN_PLAN_B_MINIMAL_AUDITION_NEXT.md)。下一轮方案/费用批准、供应商权限和真实试听/电话结果都独立核验；本轮仅离线实现通过，没有上线或真实验收。
+
 ## 最新：一次性试听执行器独立离线增量（2026-10-14）
 
 - 父候选 `320f01c4fa037989bddc8a26e0574e7282730c8a` 保持不变；新增分支 `codex/ai-phone-audition-runner-offline-20261014`、目录 `/workspace/ai-phone-audition-runner-offline-20261014`。保护父目录380个tracked文件、原执行单12份材料及未提交依赖链接；没有恢复补丁、改变线上或继承旧发布授权。本轮本地完整提交见交付包RECEIPT，不推送。

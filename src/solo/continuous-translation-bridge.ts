@@ -1518,6 +1518,19 @@ export class ContinuousTranslationBridge {
     waiters.forEach((resolve) => resolve());
   }
 
+  /** Trusted source-bound providers seal one finished outgoing utterance using
+   * the exact number of phone deliveries. No browser or native stream calls it. */
+  completeOutgoingUtterance(utteranceId: string): boolean {
+    if (
+      this.closed ||
+      typeof utteranceId !== 'string' ||
+      !this.utteranceDeliveryCounts.has(utteranceId)
+    )
+      return false;
+    this.utterancePlayback(utteranceId, 'sent', true);
+    return true;
+  }
+
   private utterancePlayback(
     utteranceId: string,
     status: UtterancePlaybackEvent['status'],

@@ -18,7 +18,6 @@ import { GoogleBrowserLogin } from './google-login';
 import { GoogleOidcClient } from './google-oidc';
 import {
   SessionManager,
-  createSessionBridge,
   twilioProvider,
   type BridgeOptions,
   type BridgeLike,
@@ -27,6 +26,11 @@ import {
 import { buildCloudControlledServer } from './server';
 import { createCloudIngress } from './cloud-ingress';
 import { sanitizeTerminationCause } from './call-termination-diagnostics';
+import {
+  createCloudTranslationBridgeFactory,
+  type CloudTranslationFactories,
+} from './cloud-translation-selection';
+import { freezePhoneTranslationSelection } from './aliyun-planb-config';
 
 const identifier = /^[A-Za-z0-9_-]{1,128}$/;
 
@@ -341,11 +345,20 @@ export async function createCloudService(
       settings: CloudServiceConfig['providers'],
     ) => CallProvider;
     bridgeFactory?: (settings: BridgeOptions) => BridgeLike;
+    /** Explicit offline ports; no browser or environment chooses a factory. */
+    translationFactories?: CloudTranslationFactories;
     googleFetch?: typeof fetch;
     onCleanupFailure?: () => void;
   } = {},
 ) {
   const now = options.now || Date.now;
+  const translationProvider = freezePhoneTranslationSelection(
+    config.translationProvider,
+  );
+  const translateBridge = createCloudTranslationBridgeFactory(
+    translationProvider,
+    options.translationFactories,
+  );
   let login: GoogleBrowserLogin | undefined;
   let manager: SessionManager | undefined;
   let control: CloudPhoneAccess | undefined;
@@ -381,7 +394,7 @@ export async function createCloudService(
     manager = new SessionManager({
       providerFactory: options.providerFactory || twilioProvider,
       bridgeFactory: (settings) =>
-        (options.bridgeFactory || createSessionBridge)({
+        (options.bridgeFactory || translateBridge)({
           ...settings,
           outgoingCaptions: config.outgoingPairedCaptions,
           captionFailureEndsCall: true,
@@ -413,7 +426,9 @@ export async function createCloudService(
       voiceJoin: voice,
       allowedTranslationEngines: ['continuous-captions'],
       defaultTranslationEngine: 'continuous-captions',
-      outgoingPairedCaptions: config.outgoingPairedCaptions,
+      outgoingPairedCaptions:
+        translationProvider.provider === 'aliyun-plan-b' ||
+        config.outgoingPairedCaptions,
       maintainAuthentication: (context, callId) =>
         login!.renewFromVerifiedCall(context, callId),
       publicReadinessChecker: async (settings) => {
@@ -442,6 +457,7 @@ export async function createCloudService(
       sessionManager: manager,
       browserControl: control,
       googleLogin: login,
+      phoneTranslationProvider: translationProvider,
       ...(options.publicDir ? { publicDir: options.publicDir } : {}),
     });
     await app.listen({ host: '127.0.0.1', port: 0 });

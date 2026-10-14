@@ -67,6 +67,14 @@ async function main(): Promise<void> {
   const { parseCloudServiceConfig } = await import('./cloud-service-config');
   const config = parseCloudServiceConfig(process.env);
   if (args[0] === '--check') {
+    const planB = config.translationProvider?.provider === 'aliyun-plan-b';
+    let openaiSocketsPerCall = 3;
+    let optionalOutgoingCaptionSockets = 0;
+    if (planB) openaiSocketsPerCall = 0;
+    else if (config.outgoingPairedCaptions) {
+      openaiSocketsPerCall = 5;
+      optionalOutgoingCaptionSockets = 2;
+    }
     // eslint-disable-next-line no-console -- Fixed metadata only, never env values.
     console.log(
       JSON.stringify({
@@ -76,15 +84,36 @@ async function main(): Promise<void> {
         externalProvidersContacted: false,
         translationEngine: 'continuous-captions',
         translationCapabilityVerified: false,
-        openaiSocketsPerCall: config.outgoingPairedCaptions ? 5 : 3,
-        optionalOutgoingCaptionSockets: config.outgoingPairedCaptions ? 2 : 0,
-        outgoingPairedCaptions: config.outgoingPairedCaptions,
-        openaiModels: [
-          'gpt-realtime-translate',
-          'gpt-4o-transcribe',
-          'gpt-realtime-1.5',
-          ...(config.outgoingPairedCaptions ? ['gpt-live-transcribe'] : []),
-        ],
+        openaiSocketsPerCall,
+        optionalOutgoingCaptionSockets,
+        outgoingPairedCaptions:
+          config.translationProvider?.provider === 'aliyun-plan-b' ||
+          config.outgoingPairedCaptions,
+        openaiModels:
+          config.translationProvider?.provider === 'aliyun-plan-b'
+            ? []
+            : [
+                'gpt-realtime-translate',
+                'gpt-4o-transcribe',
+                'gpt-realtime-1.5',
+                ...(config.outgoingPairedCaptions
+                  ? ['gpt-live-transcribe']
+                  : []),
+              ],
+        ...(config.translationProvider?.provider === 'aliyun-plan-b'
+          ? {
+              translationProvider: 'aliyun-plan-b',
+              aliyunRegion: config.translationProvider.config.region,
+              aliyunModels: [
+                'fun-asr-realtime',
+                'qwen-mt-flash',
+                'cosyvoice-v3-flash',
+              ],
+              aliyunVoice: 'loongandy_v3',
+              aliyunAsrTasksPerCall: 2,
+              aliyunTtsTasks: 'per_committed_local_section',
+            }
+          : {}),
         maxConcurrentCalls: 1,
         applicationBudgetEnabled: false,
         phoneJournalRequired: false,

@@ -15,12 +15,12 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 
 import {
   AUDITION_CANDIDATE,
   assertAuditionCandidate,
-  auditionMain,
+  auditionMain as originalAuditionMain,
   parseAuditionArgs,
   readAuditionApproval,
   validateAuditionOutput,
@@ -35,6 +35,54 @@ import {
 import { prepareAuditionInput } from '../src/experiments/realtime-audition-input';
 import type { RealtimeAuditionResult } from '../src/experiments/realtime-audition-runner';
 import type { AuditionTransportSnapshot } from '../src/experiments/realtime-audition-transport';
+
+// The runner deliberately refuses this Plan B working tree. Test its original
+// CLI in an exact e106 checkout instead of weakening the production SHA guard.
+const candidateRoot = mkdtempSync(join(tmpdir(), 'audition-exact-candidate-'));
+const commonGit = spawnSync(
+  'git',
+  ['rev-parse', '--path-format=absolute', '--git-common-dir'],
+  { encoding: 'utf8' },
+);
+assert.equal(commonGit.status, 0);
+const cloned = spawnSync(
+  'git',
+  [
+    'clone',
+    '--shared',
+    '--no-checkout',
+    commonGit.stdout.trim(),
+    candidateRoot,
+  ],
+  { encoding: 'utf8' },
+);
+assert.equal(cloned.status, 0, 'Offline candidate fixture clone failed');
+const checkedOut = spawnSync(
+  'git',
+  [
+    '-C',
+    candidateRoot,
+    'checkout',
+    '--detach',
+    'e10648b9dd84b80901c383dd685b2073c490690f',
+  ],
+  { encoding: 'utf8' },
+);
+assert.equal(checkedOut.status, 0, 'Exact candidate fixture checkout failed');
+symlinkSync(
+  resolve('node_modules'),
+  join(candidateRoot, 'node_modules'),
+  'dir',
+);
+after(() => rmSync(candidateRoot, { recursive: true, force: true }));
+const auditionMain = (
+  args: Parameters<typeof originalAuditionMain>[0],
+  dependencies: Parameters<typeof originalAuditionMain>[1] = {},
+) =>
+  originalAuditionMain(args, {
+    assertCandidate: () => assertAuditionCandidate(candidateRoot),
+    ...dependencies,
+  });
 
 function fixture() {
   const directory = mkdtempSync(join(tmpdir(), 'audition-cli-test-'));
@@ -222,12 +270,12 @@ test('real CLI subprocess dry-run inherits an inert fake key without leaking it 
       [
         '--import',
         'tsx',
-        resolve('scripts/realtime-audition.mts'),
+        join(candidateRoot, 'scripts/realtime-audition.mts'),
         '--manifest',
         item.manifest,
       ],
       {
-        cwd: resolve('.'),
+        cwd: candidateRoot,
         encoding: 'utf8',
         timeout: 10000,
         env: {
@@ -346,7 +394,7 @@ test(
         [
           '--import',
           'tsx',
-          resolve('scripts/realtime-audition.mts'),
+          join(candidateRoot, 'scripts/realtime-audition.mts'),
           '--manifest',
           item.manifest,
           '--execute-once',
@@ -355,7 +403,7 @@ test(
           '--output',
           join(item.directory, 'results'),
         ],
-        { cwd: resolve('.'), encoding: 'utf8', timeout: 3000 },
+        { cwd: candidateRoot, encoding: 'utf8', timeout: 3000 },
       );
       assert.equal(
         response.signal,
@@ -479,8 +527,22 @@ test('artifact reservation cannot be forged, reused or redirected to a replaceme
   }
 });
 
-test('candidate check verifies fixed source and refuses unrelated repositories', () => {
-  assert.doesNotThrow(() => assertAuditionCandidate());
+test('candidate check verifies exact original source and refuses changed or unrelated repositories', () => {
+  assert.doesNotThrow(() => assertAuditionCandidate(candidateRoot));
+  const file = join(candidateRoot, 'src/solo/realtime-prototype-client.ts');
+  const original = readFileSync(file);
+  try {
+    writeFileSync(
+      file,
+      Buffer.concat([original, Buffer.from('\n// offline drift fixture\n')]),
+    );
+    assert.throws(
+      () => assertAuditionCandidate(candidateRoot),
+      /CANDIDATE_FILES_CHANGED/,
+    );
+  } finally {
+    writeFileSync(file, original);
+  }
   const directory = mkdtempSync(join(tmpdir(), 'audition-not-git-'));
   try {
     assert.throws(
