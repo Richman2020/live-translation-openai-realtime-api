@@ -140,9 +140,14 @@ export function createLiveTranslateClient(
   const endpoint = buildLiveTranslateEndpoint(options.workspaceId);
   const { role } = options;
   const voice = options.voice === undefined ? LIVE_TRANSLATE_VOICE : options.voice;
+  let effectiveVoice = voice;
   if (
     !['local', 'remote'].includes(role) ||
     !['Aiden', 'Tina', 'Andre'].includes(voice) ||
+    (options.allowAndreTopLevelWithTinaOutput !== undefined &&
+      typeof options.allowAndreTopLevelWithTinaOutput !== 'boolean') ||
+    (options.allowAndreTopLevelWithTinaOutput === true &&
+      (role !== 'local' || voice !== 'Andre')) ||
     typeof options.apiKey !== 'string' ||
     !options.apiKey.trim() ||
     (options.timeoutMs !== undefined &&
@@ -358,8 +363,8 @@ export function createLiveTranslateClient(
     return accepted && !closed();
   };
   const responseConfiguration = (raw: any) =>
-    requireValue(raw?.voice === undefined || raw.voice === voice,
-      'response.voice', voice, raw?.voice, 'LIVETRANSLATE_CONFIGURATION_REJECTED') &&
+    requireValue(raw?.voice === undefined || raw.voice === effectiveVoice,
+      'response.voice', effectiveVoice, raw?.voice, 'LIVETRANSLATE_CONFIGURATION_REJECTED') &&
     requireValue(raw?.modalities === undefined || (Array.isArray(raw.modalities) &&
       raw.modalities.length === modalities.length &&
       modalities.every((value) => raw.modalities.includes(value)) &&
@@ -717,6 +722,9 @@ export function createLiveTranslateClient(
         !Object.hasOwn(s, 'enable_voice_clone');
       const allowMissingCloneEcho = options.allowMissingVoiceCloneEcho === true &&
         role === 'local' && missingCloneEcho;
+      const approvedVoiceConflict = options.allowAndreTopLevelWithTinaOutput === true &&
+        role === 'local' && voice === 'Andre' && s?.voice === 'Andre' &&
+        s?.audio?.output?.voice === 'Tina';
       const checks: [boolean, LiveTranslateProtocolDiagnostic['validationPath'], LiveTranslateProtocolDiagnostic['expected'], unknown][] = [
         [state === 'configuring', 'state', 'valid_protocol_transition', state],
         [s?.id === sessionId, 'session.id', 'matching_session_id', s?.id],
@@ -732,7 +740,7 @@ export function createLiveTranslateClient(
         [s?.audio?.input?.format?.sample_rate === 16000, 'session.audio.input.format.sample_rate', '16000', s?.audio?.input?.format?.sample_rate],
         [s?.audio?.output?.format?.type === 'pcm', 'session.audio.output.format.type', 'pcm', s?.audio?.output?.format?.type],
         [s?.audio?.output?.format?.sample_rate === 24000, 'session.audio.output.format.sample_rate', '24000', s?.audio?.output?.format?.sample_rate],
-        [s?.audio?.output?.voice === voice, 'session.audio.output.voice', voice, s?.audio?.output?.voice],
+        [s?.audio?.output?.voice === voice || approvedVoiceConflict, 'session.audio.output.voice', voice, s?.audio?.output?.voice],
         [s?.voice === undefined || s.voice === voice, 'session.voice', voice, s?.voice],
         [s?.enable_voice_clone === false || allowMissingCloneEcho,
           'session.enable_voice_clone', 'false', s?.enable_voice_clone],
@@ -751,6 +759,12 @@ export function createLiveTranslateClient(
         basis: 'provider_session_updated',
         model: sessionValue(s?.model, [LIVE_TRANSLATE_MODEL]),
         voice: sessionValue(s?.audio?.output?.voice, ['Aiden', 'Tina', 'Andre']),
+        requestedVoice: voice,
+        topLevelVoice: sessionValue(s?.voice, ['Aiden', 'Tina', 'Andre']),
+        ...(!rejected ? {
+          voiceConfirmation: approvedVoiceConflict
+            ? 'approved_top_level_andre_nested_tina' as const : 'exact_match' as const,
+        } : {}),
         voiceCloneEnabled:
           typeof s?.enable_voice_clone === 'boolean'
             ? s.enable_voice_clone
@@ -779,15 +793,29 @@ export function createLiveTranslateClient(
         });
         if (closed()) return;
       }
+      if (approvedVoiceConflict) {
+        emit(options.onProtocolDiagnostic, {
+          role, at: receivedAt, stage: 'configuring', eventType: 'session.updated',
+          validationPath: 'session.audio.output.voice', expected: 'Andre',
+          actualType: 'string', fatal: false,
+          code: 'LIVETRANSLATE_APPROVED_ANDRE_TINA_CONFLICT',
+          acknowledgement: { sessionId, eventId: event.event_id ?? null, receiveSequence },
+        });
+        if (closed()) return;
+      }
       clearTimeout(timer);
       timer = undefined;
       state = 'ready';
+      effectiveVoice = s.audio.output.voice;
       protocolEvent('configuration_accepted', event);
       readyResolve({
         sessionId,
         role,
         model: s.model,
         voice: s.audio.output.voice,
+        requestedVoice: voice,
+        topLevelVoice: s.voice ?? null,
+        voiceConfirmation: approvedVoiceConflict ? 'approved_top_level_andre_nested_tina' : 'exact_match',
         voiceCloneEnabled: missingCloneEcho ? null : s.enable_voice_clone,
         voiceCloneConfirmation: missingCloneEcho ? 'missing_echo_warning' : 'explicit_false',
         targetLanguage: s.translation.language,

@@ -17,8 +17,10 @@ import {
 import type { PreparedLiveTranslateAuditionInput } from '../src/experiments/livetranslate-audition-input';
 import type {
   LiveTranslateClientOptions,
+  LiveTranslateProtocolDiagnostic,
   LiveTranslateRole,
   LiveTranslateSession,
+  LiveTranslateSessionConfiguration,
   LiveTranslateVoice,
 } from '../src/experiments/livetranslate-types';
 
@@ -122,10 +124,10 @@ class Wire extends EventEmitter {
     });
   }
 
-  response(id: string, translationId: string, sourceId: string) {
+  response(id: string, translationId: string, sourceId: string, voice?: string) {
     this.receive({
       type: 'response.created',
-      response: { id, status: 'in_progress' },
+      response: { id, status: 'in_progress', ...(voice === undefined ? {} : { voice }) },
     });
     this.receive({
       type: 'conversation.item.created',
@@ -497,6 +499,249 @@ test('single-local runner requests the Andre candidate, permits an authorized mi
     assert.equal(result.observedSessionConfigurations[0].accepted, false);
     assert.equal(result.observedSessionConfigurations[0].voice, item.voice);
     assert.equal(wires[0].sent.length, 1);
+  }
+});
+
+test('single-local runner preserves the approved Andre request and actual Tina output through a complete fake session', async () => {
+  const sample = Buffer.alloc(3200, 1);
+  const input: PreparedLiveTranslateAuditionInput = {
+    mode: 'single-local', manifestPath: 'synthetic-offline-only.json', manifestSha256: 'a'.repeat(64),
+    workspaceId: 'offline-workspace', spaceHost: HOST, totalSeconds: 0.1,
+    clips: [{ id: 'local', role: 'local', pcm: sample, durationMs: 100,
+      sha256: createHash('sha256').update(sample).digest('hex'), wavPath: 'synthetic-local.wav' }],
+  };
+  const conflict = (session: any) => ({
+    ...session, voice: 'Andre',
+    audio: { ...session.audio, output: { ...session.audio.output, voice: 'Tina' } },
+  });
+  const cases: {
+    name: string;
+    success?: boolean;
+    missingCloneEcho?: boolean;
+    responseVoice?: string;
+    failureAfterInput?: boolean;
+    patch?: (session: any) => any;
+  }[] = [
+    { name: 'approved conflict with the actual response voice', success: true, responseVoice: 'Tina' },
+    { name: 'approved conflict without an optional response voice', success: true },
+    { name: 'approved conflict and missing clone echo', success: true, missingCloneEcho: true,
+      responseVoice: 'Tina', patch: (session) => ({ ...session, enable_voice_clone: undefined }) },
+    { name: 'response must not claim the requested Andre voice', responseVoice: 'Andre', failureAfterInput: true },
+    { name: 'response must not claim another voice', responseVoice: 'Aiden', failureAfterInput: true },
+    { name: 'missing top-level Andre is not approved', patch: (session) => ({ ...session, voice: undefined }) },
+    { name: 'top-level Tina is not approved', patch: (session) => ({ ...session, voice: 'Tina' }) },
+    { name: 'another top-level voice is not approved', patch: (session) => ({ ...session, voice: 'Aiden' }) },
+    { name: 'another nested voice is not approved', patch: (session) => ({
+      ...session, audio: { ...session.audio, output: { ...session.audio.output, voice: 'Aiden' } },
+    }) },
+    { name: 'missing nested voice is not approved', patch: (session) => ({
+      ...session, audio: { ...session.audio, output: { ...session.audio.output, voice: undefined } },
+    }) },
+    { name: 'clone true is rejected', patch: (session) => ({ ...session, enable_voice_clone: true }) },
+    { name: 'clone null is rejected', patch: (session) => ({ ...session, enable_voice_clone: null }) },
+    { name: 'clone string false is rejected', patch: (session) => ({ ...session, enable_voice_clone: 'false' }) },
+    { name: 'another model is rejected', patch: (session) => ({ ...session, model: 'qwen3.5-livetranslate-flash-realtime' }) },
+    { name: 'another target language is rejected', patch: (session) => ({ ...session, translation: { language: 'zh' } }) },
+    { name: 'missing target language is rejected', patch: (session) => ({ ...session, translation: undefined }) },
+    { name: 'wrong input PCM is rejected', patch: (session) => ({
+      ...session, audio: { ...session.audio, input: { ...session.audio.input, format: { type: 'pcm', sample_rate: 24000 } } },
+    }) },
+    { name: 'wrong output PCM is rejected', patch: (session) => ({
+      ...session, audio: { ...session.audio, output: { ...session.audio.output, format: { type: 'pcm', sample_rate: 16000 } } },
+    }) },
+    { name: 'missing output PCM is rejected', patch: (session) => ({
+      ...session, audio: { ...session.audio, output: { ...session.audio.output, format: undefined } },
+    }) },
+  ];
+  for (const item of cases) {
+    const wires: Wire[] = [];
+    let now = 0;
+    const factory = realFactory(wires, (wire) => {
+      const session = wire.session.bind(wire);
+      let created = false;
+      wire.session = () => {
+        if (!created) { created = true; return session(); }
+        const acknowledged = conflict(session());
+        return item.patch ? item.patch(acknowledged) : acknowledged;
+      };
+      if (item.success || item.failureAfterInput) wire.onFinish = () => {
+        wire.source('synthetic_source', '人工离线样例。');
+        wire.response('synthetic_response', 'synthetic_translation', 'synthetic_source', item.responseVoice);
+        if (item.failureAfterInput) return;
+        wire.text('synthetic_response', 'synthetic_translation', 'Synthetic sample.');
+        wire.audio('synthetic_response', 'synthetic_translation', 7);
+        wire.text('synthetic_response', 'synthetic_translation', 'Synthetic sample.', true);
+        wire.output('response.audio.done', 'synthetic_response', 'synthetic_translation');
+        wire.done('synthetic_response', 'synthetic_translation', 'Synthetic sample.');
+        wire.receive({ type: 'session.finished' });
+      };
+    });
+    // eslint-disable-next-line no-await-in-loop -- Each case has one isolated fake protocol session.
+    const result = await runLiveTranslateAudition({
+      input, apiKey: 'offline-fake-not-a-credential', now: () => now,
+      delay: async (ms) => {
+        if (!item.success && !item.failureAfterInput) assert.fail(`No recording frame may be sent: ${item.name}`);
+        now += ms;
+      },
+      clientFactory(options) {
+        assert.equal(options.allowAndreTopLevelWithTinaOutput, true, item.name);
+        assert.equal(options.allowMissingVoiceCloneEcho, true, item.name);
+        return factory(options);
+      },
+    });
+    assert.equal(result.counters.sessions, 1, item.name);
+    assert.equal(wires.length, 1, item.name);
+    assert.equal(wires[0].closed, 1, item.name);
+    const updates = wires[0].sent.filter((event) => event.type === 'session.update');
+    assert.equal(updates.length, 1, item.name);
+    assert.equal(updates[0].session.voice, 'Andre', item.name);
+    assert.equal(updates[0].session.enable_voice_clone, false, item.name);
+    assert.equal(result.configuration.voice, 'Andre', item.name);
+    if (!item.success && !item.failureAfterInput) {
+      assert.equal(result.status, 'failed', item.name);
+      assert.equal(result.errorCode, 'LIVETRANSLATE_CONFIGURATION_REJECTED', item.name);
+      assert.equal(result.counters.inputBytesSent, 0, item.name);
+      assert.equal(result.confirmedSessions.length, 0, item.name);
+      assert.equal(result.observedSessionConfigurations.length, 1, item.name);
+      assert.equal(result.observedSessionConfigurations[0].accepted, false, item.name);
+      assert.equal(wires[0].sent.length, 1, item.name);
+      continue;
+    }
+    assert.equal(result.counters.inputBytesSent, sample.length, item.name);
+    assert.equal(result.confirmedSessions.length, 1, item.name);
+    assert.equal(result.observedSessionConfigurations.length, 1, item.name);
+    const confirmed = result.confirmedSessions[0];
+    const acknowledged = result.observedSessionConfigurations[0];
+    for (const evidence of [confirmed, acknowledged]) {
+      assert.equal(evidence.voice, 'Tina', item.name);
+      assert.equal(evidence.requestedVoice, 'Andre', item.name);
+      assert.equal(evidence.topLevelVoice, 'Andre', item.name);
+      assert.equal(evidence.voiceConfirmation, 'approved_top_level_andre_nested_tina', item.name);
+      assert.equal(evidence.voiceCloneEnabled, item.missingCloneEcho ? null : false, item.name);
+      assert.equal(evidence.targetLanguage, 'en', item.name);
+    }
+    assert.equal(acknowledged.accepted, true, item.name);
+    assert.equal(confirmed.voiceCloneConfirmation, item.missingCloneEcho ? 'missing_echo_warning' : 'explicit_false', item.name);
+    assert.equal(acknowledged.sessionId, confirmed.sessionId, item.name);
+    assert.equal(acknowledged.eventId, confirmed.configurationAcknowledgement.eventId, item.name);
+    assert.equal(acknowledged.receiveSequence, confirmed.configurationAcknowledgement.receiveSequence, item.name);
+    assert.equal(acknowledged.receivedAt, confirmed.configurationAcknowledgement.receivedAt, item.name);
+    const warning = result.protocolDiagnostics.find((event) =>
+      event.code === 'LIVETRANSLATE_APPROVED_ANDRE_TINA_CONFLICT');
+    assert(warning, item.name);
+    assert.equal(warning.fatal, false, item.name);
+    assert.equal(warning.eventType, 'session.updated', item.name);
+    assert.equal(warning.stage, 'configuring', item.name);
+    assert.equal(warning.validationPath, 'session.audio.output.voice', item.name);
+    assert.equal(warning.expected, 'Andre', item.name);
+    assert.equal(warning.actualType, 'string', item.name);
+    assert.equal(warning.at, acknowledged.receivedAt, item.name);
+    assert.deepEqual(warning.acknowledgement, {
+      sessionId: acknowledged.sessionId,
+      eventId: acknowledged.eventId,
+      receiveSequence: acknowledged.receiveSequence,
+    }, item.name);
+    const cloneWarnings = result.protocolDiagnostics.filter((event) =>
+      event.code === 'LIVETRANSLATE_CLONE_CONFIRMATION_MISSING');
+    assert.equal(cloneWarnings.length, item.missingCloneEcho ? 1 : 0, item.name);
+    if (item.missingCloneEcho) {
+      assert.equal(cloneWarnings[0].fatal, false, item.name);
+      assert.equal(cloneWarnings[0].at, acknowledged.receivedAt, item.name);
+      assert.equal(cloneWarnings[0].actualType, 'missing', item.name);
+    }
+    const accepted = result.protocolEvents.findIndex((event) => event.stage === 'configuration_accepted');
+    const firstAppend = result.protocolEvents.findIndex((event) =>
+      event.stage === 'client_event_sent' && event.eventType === 'input_audio_buffer.append');
+    assert(accepted >= 0 && firstAppend > accepted, item.name);
+    assert.deepEqual(Buffer.concat(wires[0].sent
+      .filter((event) => event.type === 'input_audio_buffer.append')
+      .map((event) => Buffer.from(event.audio, 'base64'))), sample, item.name);
+    if (item.failureAfterInput) {
+      assert.equal(result.status, 'failed', item.name);
+      assert.equal(result.errorCode, 'LIVETRANSLATE_CONFIGURATION_REJECTED', item.name);
+      const rejection = result.protocolDiagnostics.find((event) => event.fatal);
+      assert.equal(rejection?.validationPath, 'response.voice', item.name);
+      assert.equal(rejection?.expected, 'Tina', item.name);
+      assert.equal(result.audio.length, 0, item.name);
+      continue;
+    }
+    assert.equal(result.status, 'completed', item.name);
+    assert.equal(result.errorCode, undefined, item.name);
+    assert.deepEqual(result.audio[0].pcm, pcm(7), item.name);
+    assert(result.sources.some((event) => event.final && event.text === '人工离线样例。'), item.name);
+    assert(result.translations.some((event) => event.final && event.text === 'Synthetic sample.'), item.name);
+    assert.equal(result.usage.length, 1, item.name);
+    assert(result.protocolEvents.some((event) => event.eventType === 'response.audio.done'), item.name);
+    assert(result.protocolEvents.some((event) => event.eventType === 'response.done'), item.name);
+    assert(result.protocolEvents.some((event) => event.eventType === 'session.finished'), item.name);
+  }
+});
+
+test('single-local runner rejects forged conflict confirmation without the matching ACK and warning', async () => {
+  const sample = Buffer.alloc(3200, 1);
+  const input: PreparedLiveTranslateAuditionInput = {
+    mode: 'single-local', manifestPath: 'synthetic-offline-only.json', manifestSha256: 'a'.repeat(64),
+    workspaceId: 'offline-workspace', spaceHost: HOST, totalSeconds: 0.1,
+    clips: [{ id: 'local', role: 'local', pcm: sample, durationMs: 100,
+      sha256: createHash('sha256').update(sample).digest('hex'), wavPath: 'synthetic-local.wav' }],
+  };
+  const cases = [
+    'missing warning', 'other warning session', 'other warning event', 'other warning sequence',
+    'other warning time', 'fatal warning', 'missing ACK request', 'other ACK top-level voice',
+    'missing session marker',
+  ];
+  for (const name of cases) {
+    let creates = 0;
+    let appends = 0;
+    // eslint-disable-next-line no-await-in-loop -- Every forged receipt has one isolated fake client.
+    const result = await runLiveTranslateAudition({
+      input, apiKey: 'offline-fake-not-a-credential',
+      clientFactory(options) {
+        creates += 1;
+        assert.equal(options.allowAndreTopLevelWithTinaOutput, true, name);
+        assert.equal(options.voice, 'Andre', name);
+        const session: LiveTranslateSession = {
+          role: 'local', sessionId: 'synthetic_conflict', model: MODEL, voice: 'Tina',
+          requestedVoice: 'Andre', topLevelVoice: 'Andre',
+          voiceConfirmation: 'approved_top_level_andre_nested_tina',
+          voiceCloneEnabled: false, voiceCloneConfirmation: 'explicit_false', targetLanguage: 'en',
+          inputSampleRate: 16000, outputSampleRate: 24000, outputModalities: ['text', 'audio'],
+          configurationAcknowledgement: { eventId: 'synthetic_ack', receiveSequence: 2,
+            receivedAt: 0, basis: 'provider_session_updated' },
+        };
+        const ack: LiveTranslateSessionConfiguration = {
+          role: 'local', sessionId: session.sessionId, model: MODEL, voice: 'Tina',
+          requestedVoice: 'Andre', topLevelVoice: 'Andre',
+          voiceConfirmation: 'approved_top_level_andre_nested_tina',
+          voiceCloneEnabled: false, targetLanguage: 'en', accepted: true,
+          ...session.configurationAcknowledgement,
+        };
+        const warning: LiveTranslateProtocolDiagnostic = {
+          role: 'local', at: 0, stage: 'configuring', eventType: 'session.updated',
+          validationPath: 'session.audio.output.voice', expected: 'Andre', actualType: 'string',
+          fatal: false, code: 'LIVETRANSLATE_APPROVED_ANDRE_TINA_CONFLICT',
+          acknowledgement: { sessionId: session.sessionId, eventId: 'synthetic_ack', receiveSequence: 2 },
+        };
+        if (name === 'other warning session') warning.acknowledgement!.sessionId = 'synthetic_other_session';
+        if (name === 'other warning event') warning.acknowledgement!.eventId = 'synthetic_other_ack';
+        if (name === 'other warning sequence') warning.acknowledgement!.receiveSequence = 3;
+        if (name === 'other warning time') warning.at = 1;
+        if (name === 'fatal warning') warning.fatal = true;
+        if (name === 'missing ACK request') delete ack.requestedVoice;
+        if (name === 'other ACK top-level voice') ack.topLevelVoice = 'Tina';
+        if (name === 'missing session marker') delete session.voiceConfirmation;
+        options.onSessionConfiguration?.(ack);
+        if (name !== 'missing warning') options.onProtocolDiagnostic?.(warning);
+        return { ready: Promise.resolve(session), append() { appends += 1; },
+          finish: async () => {}, abort() {} };
+      },
+    });
+    assert.equal(result.status, 'failed', name);
+    assert.equal(result.errorCode, 'LIVETRANSLATE_AUDITION_SESSION_CONFIG_REJECTED', name);
+    assert.equal(creates, 1, name);
+    assert.equal(appends, 0, name);
+    assert.equal(result.counters.inputBytesSent, 0, name);
+    assert.equal(result.confirmedSessions.length, 0, name);
   }
 });
 

@@ -2,11 +2,16 @@ import type WebSocket from 'ws';
 
 export type LiveTranslateRole = 'local' | 'remote';
 export type LiveTranslateVoice = 'Aiden' | 'Tina' | 'Andre';
+export type LiveTranslateVoiceConfirmation =
+  'exact_match' | 'approved_top_level_andre_nested_tina';
 export type LiveTranslateSession = {
   sessionId: string;
   role: LiveTranslateRole;
   model: 'qwen3.8-livetranslate-flash-realtime';
   voice: LiveTranslateVoice;
+  requestedVoice?: LiveTranslateVoice;
+  topLevelVoice?: LiveTranslateVoice | null;
+  voiceConfirmation?: LiveTranslateVoiceConfirmation;
   /** null means the provider omitted this field; never infer false from the request. */
   voiceCloneEnabled: false | null;
   voiceCloneConfirmation?: 'explicit_false' | 'missing_echo_warning';
@@ -31,6 +36,9 @@ export type LiveTranslateSessionConfiguration = {
   basis: 'provider_session_updated';
   model: LiveTranslateSession['model'] | 'other' | null;
   voice: LiveTranslateVoice | 'other' | null;
+  requestedVoice?: LiveTranslateVoice;
+  topLevelVoice?: LiveTranslateVoice | 'other' | null;
+  voiceConfirmation?: LiveTranslateVoiceConfirmation;
   voiceCloneEnabled: boolean | null;
   targetLanguage: 'en' | 'zh' | 'other' | null;
   accepted: boolean;
@@ -140,6 +148,11 @@ export type LiveTranslateProtocolDiagnostic = {
   actualType: LiveTranslateProtocolValueType;
   fatal: boolean;
   code: string;
+  acknowledgement?: {
+    sessionId: string;
+    eventId: string | null;
+    receiveSequence: number;
+  };
 };
 export type LiveTranslateSource = {
   role: LiveTranslateRole;
@@ -226,6 +239,8 @@ export type LiveTranslateClientOptions = {
   timeoutMs?: number;
   /** User-approved single-local audition policy; defaults to strict echo confirmation. */
   allowMissingVoiceCloneEcho?: boolean;
+  /** Narrow one-audition policy: local Andre request, top-level Andre, nested Tina only. */
+  allowAndreTopLevelWithTinaOutput?: boolean;
   now?: () => number;
   createWebSocket?: (
     url: string,

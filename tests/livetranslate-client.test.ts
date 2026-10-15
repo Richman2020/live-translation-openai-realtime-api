@@ -323,6 +323,52 @@ test('trusted Tina selection pins request, nested ACK and optional top-level voi
   assert.throws(() => fixture('local', { voice: 'unlisted' as any }), /CONFIG_INVALID/);
 });
 
+test('the explicit Andre/Tina exception retains actual Tina and requires the exact local pair and same-ACK warning', async () => {
+  const selected = fixture('local', { voice: 'Andre', allowAndreTopLevelWithTinaOutput: true });
+  const actual = selected.session();
+  await selected.start({ voice: 'Andre', audio: {
+    ...actual.audio, output: { ...actual.audio.output, voice: 'Tina' },
+  } });
+  const confirmed = await selected.client.ready;
+  assert.equal(selected.socket.sent[0].session.voice, 'Andre');
+  assert.equal(selected.socket.sent[0].session.enable_voice_clone, false);
+  assert.equal(confirmed.voice, 'Tina');
+  assert.equal(confirmed.requestedVoice, 'Andre');
+  assert.equal(confirmed.topLevelVoice, 'Andre');
+  assert.equal(confirmed.voiceConfirmation, 'approved_top_level_andre_nested_tina');
+  assert.equal(selected.sessionConfigurations[0].voice, 'Tina');
+  assert.equal(selected.sessionConfigurations[0].requestedVoice, 'Andre');
+  assert.equal(selected.sessionConfigurations[0].topLevelVoice, 'Andre');
+  const warning = selected.protocolDiagnostics[0];
+  assert.equal(warning.code, 'LIVETRANSLATE_APPROVED_ANDRE_TINA_CONFLICT');
+  assert.equal(warning.fatal, false);
+  assert.equal(warning.validationPath, 'session.audio.output.voice');
+  assert.deepEqual(warning.acknowledgement, {
+    sessionId: confirmed.sessionId,
+    eventId: confirmed.configurationAcknowledgement.eventId,
+    receiveSequence: confirmed.configurationAcknowledgement.receiveSequence,
+  });
+  assert.equal(warning.at, confirmed.configurationAcknowledgement.receivedAt);
+  selected.receive({ type: 'response.created', response: {
+    id: 'actual_tina_response', status: 'in_progress', voice: 'Tina',
+  } });
+  assert.equal(selected.errors.length, 0);
+  selected.client.append(Buffer.alloc(320));
+  assert.equal(selected.socket.sent[1].type, 'input_audio_buffer.append');
+  selected.client.abort();
+
+  const strict = fixture('local', { voice: 'Andre' });
+  const strictSession = strict.session();
+  await assert.rejects(strict.start({ voice: 'Andre', audio: {
+    ...strictSession.audio, output: { ...strictSession.audio.output, voice: 'Tina' },
+  } }), /CONFIGURATION_REJECTED/);
+  assert.equal(strict.socket.sent.length, 1);
+  assert.equal(strict.protocolDiagnostics[0].fatal, true);
+  assert.throws(() => fixture('remote', { voice: 'Andre', allowAndreTopLevelWithTinaOutput: true }), /CONFIG_INVALID/);
+  assert.throws(() => fixture('local', { voice: 'Aiden', allowAndreTopLevelWithTinaOutput: true }), /CONFIG_INVALID/);
+  assert.throws(() => fixture('local', { voice: 'Tina', allowAndreTopLevelWithTinaOutput: true }), /CONFIG_INVALID/);
+});
+
 test('Tina, absent voice, clone uncertainty and wrong language stop with safe evidence and zero input', async () => {
   const patches = [
     (session: any) => ({ audio: { ...session.audio, output: { ...session.audio.output, voice: 'Tina' } } }),

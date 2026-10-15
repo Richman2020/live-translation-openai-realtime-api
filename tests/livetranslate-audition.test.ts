@@ -1247,12 +1247,61 @@ test('single-local mock uses exactly one session and preserves first receive, fu
   assert.equal(h.captured.length, 1);
   assert.equal(h.captured[0].role, 'local');
   assert.equal(h.captured[0].voice, 'Andre');
+  assert.equal(h.captured[0].allowAndreTopLevelWithTinaOutput, true);
   assert.equal(result.confirmedSessions[0].voice, 'Andre');
   assert.equal(result.audio.length, 1);
   assert.equal(result.audio[0].firstPcmBasis, 'client_receive_timing');
   assert.equal(result.audio[0].firstPcmAt, 1025);
   assert.equal(result.audio[0].responseDoneAt, 1055);
   assert.equal(result.audio[0].actualPlaybackStartedAt, null);
+});
+test('single-local Andre and Tina conflict confirmation without a matching warning rejects before any audio append', async (t) => {
+  const f = singleFixture(t);
+  const h = mock(f.input());
+  const original = h.options.clientFactory!;
+  h.options.clientFactory = (options) => {
+    const client = original(options);
+    return {
+      ...client,
+      ready: client.ready.then((session) => {
+        const conflict = {
+          ...session,
+          voice: 'Tina' as const,
+          requestedVoice: 'Andre' as const,
+          topLevelVoice: 'Andre' as const,
+          voiceConfirmation: 'approved_top_level_andre_nested_tina' as const,
+        };
+        options.onSessionConfiguration?.({
+          role: conflict.role,
+          sessionId: conflict.sessionId,
+          eventId: conflict.configurationAcknowledgement.eventId,
+          receiveSequence: conflict.configurationAcknowledgement.receiveSequence,
+          receivedAt: conflict.configurationAcknowledgement.receivedAt,
+          basis: 'provider_session_updated',
+          model: conflict.model,
+          voice: conflict.voice,
+          requestedVoice: conflict.requestedVoice,
+          topLevelVoice: conflict.topLevelVoice,
+          voiceConfirmation: conflict.voiceConfirmation,
+          voiceCloneEnabled: conflict.voiceCloneEnabled,
+          targetLanguage: conflict.targetLanguage,
+          accepted: true,
+        });
+        return conflict;
+      }),
+    };
+  };
+  const result = await runLiveTranslateAudition(h.options);
+  assert.equal(result.status, 'failed');
+  assert.equal(result.errorCode, 'LIVETRANSLATE_AUDITION_SESSION_CONFIG_REJECTED');
+  assert.equal(result.counters.sessions, 1);
+  assert.equal(result.counters.inputBytesSent, 0);
+  assert.equal(h.captured[0].allowAndreTopLevelWithTinaOutput, true);
+  assert.equal(h.appended.length, 0);
+  assert.equal(result.observedSessionConfigurations.length, 1);
+  assert.equal(result.observedSessionConfigurations[0].accepted, true);
+  assert.equal(result.protocolDiagnostics.length, 0);
+  assert.equal(result.confirmedSessions.length, 0);
 });
 test('full single-local sample retains every paced frame, its partial tail and a bounded send timeline without inventing speech end', async (t) => {
   const f = singleFixture(t, 21.097375);
@@ -1320,6 +1369,7 @@ test('dual clips keep both partial tail frames rather than dropping audio to fit
   assert.equal(result.status, 'completed');
   assert.equal(result.configuration.voice, 'Aiden');
   assert.ok(h.captured.every(({ voice }) => voice === 'Aiden'));
+  assert.ok(h.captured.every(({ allowAndreTopLevelWithTinaOutput }) => allowAndreTopLevelWithTinaOutput !== true));
   assert.ok(result.confirmedSessions.every(({ voice }) => voice === 'Aiden'));
   assert.equal(result.sends.length, 1201);
   assert.deepEqual(
@@ -1342,8 +1392,8 @@ test('single-local approval has a fresh isolated scope and cannot exchange autho
     fixedNow,
   );
   assert.equal(value.scope, LIVETRANSLATE_SINGLE_LOCAL_SCOPE);
-  assert.equal(value.scope, 'livetranslate-single-local-andre-audition-v1');
-  assert.equal(value.parentCandidate, '7a938da8400f76b8178350937b711b17de207131');
+  assert.equal(value.scope, 'livetranslate-single-local-andre-tina-conflict-audition-v1');
+  assert.equal(value.parentCandidate, '29997d6bf545c6d6c28c3563f95b9a84c1ef3ea0');
   assert.equal(value.mode, 'single-local');
   writeFileSync(path, JSON.stringify(approval(input)));
   assert.throws(
@@ -1594,6 +1644,7 @@ test('single-local real client plus fake wire preserves default 20ms pacing and 
       creates += 1;
       assert.equal(options.role, 'local');
       assert.equal(options.voice, 'Andre');
+      assert.equal(options.allowAndreTopLevelWithTinaOutput, true);
       const client = createLiveTranslateClient({
         ...options,
         createWebSocket: (url) => {

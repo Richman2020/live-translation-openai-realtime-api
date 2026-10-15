@@ -308,6 +308,7 @@ export async function runLiveTranslateAudition(
         now,
         timeoutMs: Math.min(timeoutMs, 15000),
         allowMissingVoiceCloneEcho: input.mode === 'single-local' && clip.role === 'local',
+        allowAndreTopLevelWithTinaOutput: input.mode === 'single-local' && clip.role === 'local',
         onProtocolEvent: (event) => {
           if (!journalOpen) return;
           if (result.protocolEvents.length >= 8192) {
@@ -521,6 +522,24 @@ export async function runLiveTranslateAudition(
         break;
       }
       const session = await fenced(client.ready);
+      const acceptedVoiceConflict = input.mode === 'single-local' && clip.role === 'local' &&
+        voice === 'Andre' && session.voice === 'Tina' && session.requestedVoice === 'Andre' &&
+        session.topLevelVoice === 'Andre' && session.voiceConfirmation === 'approved_top_level_andre_nested_tina' &&
+        result.observedSessionConfigurations.some((ack) => ack.clipId === clip.id && ack.accepted &&
+          ack.sessionId === session.sessionId && ack.role === clip.role && ack.model === session.model &&
+          ack.voice === 'Tina' && ack.requestedVoice === 'Andre' && ack.topLevelVoice === 'Andre' &&
+          ack.voiceConfirmation === 'approved_top_level_andre_nested_tina' &&
+          ack.eventId === session.configurationAcknowledgement?.eventId &&
+          ack.receiveSequence === session.configurationAcknowledgement?.receiveSequence &&
+          ack.receivedAt === session.configurationAcknowledgement?.receivedAt) &&
+        result.protocolDiagnostics.some((warning) => warning.clipId === clip.id && warning.role === clip.role &&
+          warning.at === session.configurationAcknowledgement?.receivedAt &&
+          warning.eventType === 'session.updated' && warning.stage === 'configuring' && !warning.fatal &&
+          warning.code === 'LIVETRANSLATE_APPROVED_ANDRE_TINA_CONFLICT' &&
+          warning.validationPath === 'session.audio.output.voice' && warning.expected === 'Andre' &&
+          warning.actualType === 'string' && warning.acknowledgement?.sessionId === session.sessionId &&
+          warning.acknowledgement.eventId === session.configurationAcknowledgement?.eventId &&
+          warning.acknowledgement.receiveSequence === session.configurationAcknowledgement?.receiveSequence);
       const acceptedMissingCloneEcho = input.mode === 'single-local' && clip.role === 'local' &&
         session.voiceCloneEnabled === null && session.voiceCloneConfirmation === 'missing_echo_warning' &&
         result.observedSessionConfigurations.some((ack) => ack.clipId === clip.id && ack.accepted &&
@@ -537,7 +556,7 @@ export async function runLiveTranslateAudition(
         (observedSessionId !== undefined &&
           observedSessionId !== session.sessionId) ||
         session.model !== LIVETRANSLATE_AUDITION_MODEL ||
-        session.voice !== voice ||
+        (session.voice !== voice && !acceptedVoiceConflict) ||
         (session.voiceCloneEnabled !== false && !acceptedMissingCloneEcho) ||
         session.targetLanguage !== (clip.role === 'local' ? 'en' : 'zh') ||
         session.configurationAcknowledgement?.basis !==
