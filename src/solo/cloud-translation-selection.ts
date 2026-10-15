@@ -22,6 +22,11 @@ export function createCloudTranslationBridgeFactory(
   factories: CloudTranslationFactories = {},
 ): (settings: BridgeOptions) => BridgeLike {
   const snapshot = freezePhoneTranslationSelection(selection);
+  if (
+    snapshot.provider === 'aliyun-plan-b' &&
+    snapshot.config.region !== 'beijing'
+  )
+    throw new Error('CLOUD_PLAN_B_REGION_DENIED');
   const openai = factories.openai ?? createSessionBridge;
   const planB =
     factories.planB ??

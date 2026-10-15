@@ -382,3 +382,18 @@ test('selected Plan B service startup and unauthorized request create zero provi
   assert.equal(unauthorized, 403);
   assert.equal(calls, 0);
 });
+
+test('phone Plan B rejects non-Beijing selection before constructing a supplier or phone bridge', () => {
+  let calls = 0;
+  assert.throws(
+    () =>
+      createCloudTranslationBridgeFactory(selection('singapore'), {
+        planB: () => {
+          calls += 1;
+          return fakeBridge();
+        },
+      }),
+    /CLOUD_PLAN_B_REGION_DENIED/u,
+  );
+  assert.equal(calls, 0);
+});

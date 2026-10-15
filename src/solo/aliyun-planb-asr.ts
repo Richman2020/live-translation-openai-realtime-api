@@ -5,6 +5,11 @@ import type { CallContextSnapshot } from './call-context';
 import { createPlanBWebSocket } from './aliyun-planb-network';
 import type {
   PlanBAsrClient,
+  PlanBAsrDiagnostic,
+  PlanBAsrDiagnosticDecision,
+  PlanBAsrDiagnosticFieldState,
+  PlanBAsrDiagnosticSnapshot,
+  PlanBAsrDiagnosticTextState,
   PlanBAsrOptions,
   PlanBAsrSource,
   PlanBEvidence,
@@ -19,7 +24,71 @@ const MAX_UNFINISHED_SOURCES = 32;
 const integer = (value: unknown): value is number =>
   typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 
-type Source = PlanBAsrSource & { begin: number; providerEnd?: number };
+type Source = PlanBAsrSource & {
+  begin: number;
+  providerEnd?: number;
+  acceptedDiagnostic: PlanBAsrDiagnosticSnapshot;
+  /** One payload before the last accepted start revision; never exported. */
+  previousRefinement?: { begin: number; text: string };
+  /** One known start alias after finalization; never permits another source. */
+  finalBeginAlias?: number;
+};
+
+function diagnosticFieldState(
+  value: unknown,
+  valid: boolean,
+): PlanBAsrDiagnosticFieldState {
+  if (value === undefined) return 'missing';
+  if (value === null) return 'null';
+  return valid ? 'valid' : 'invalid';
+}
+
+function diagnosticTextState(value: unknown): PlanBAsrDiagnosticTextState {
+  if (value === undefined) return 'missing';
+  if (value === null) return 'null';
+  if (typeof value !== 'string') return 'invalid';
+  if (value.length > MAX_SOURCE_CHARACTERS) return 'too-long';
+  if (!value.length) return 'empty';
+  return value.trim() ? 'nonempty' : 'whitespace';
+}
+
+/** Read only scalar field shapes; raw objects and strings never escape. */
+function diagnosticSnapshot(
+  sentence: any,
+  arrivalSequence: number,
+): PlanBAsrDiagnosticSnapshot {
+  const id = sentence?.sentence_id;
+  const begin = sentence?.begin_time;
+  const end = sentence?.end_time;
+  const final = sentence?.sentence_end;
+  const sentenceBegin = sentence?.sentence_begin;
+  const heartbeat = sentence?.heartbeat;
+  const idValid = integer(id) && id !== Number.MAX_SAFE_INTEGER;
+  return {
+    arrivalSequence,
+    providerSentenceId: idValid ? id : null,
+    sourceSequence: idValid ? id + 1 : null,
+    idState: diagnosticFieldState(id, idValid),
+    beginState: diagnosticFieldState(begin, integer(begin)),
+    endState: diagnosticFieldState(end, integer(end)),
+    finalState: diagnosticFieldState(final, typeof final === 'boolean'),
+    sentenceBeginState: diagnosticFieldState(
+      sentenceBegin,
+      typeof sentenceBegin === 'boolean',
+    ),
+    heartbeatState: diagnosticFieldState(
+      heartbeat,
+      typeof heartbeat === 'boolean',
+    ),
+    beginMs: integer(begin) ? begin : null,
+    endMs: integer(end) ? end : null,
+    final: typeof final === 'boolean' ? final : null,
+    sentenceBegin: typeof sentenceBegin === 'boolean' ? sentenceBegin : null,
+    heartbeat: typeof heartbeat === 'boolean' ? heartbeat : null,
+    textState: diagnosticTextState(sentence?.text),
+  };
+}
+
 type RawContext = {
   role: 'user';
   content: { type: 'input_text'; text: string }[];
@@ -69,6 +138,11 @@ export function createAliyunPlanBAsrClient(
   const clock = options.now ?? Date.now;
   const taskId = randomUUID();
   const sources = new Map<number, Source>();
+  // Count successfully queued PCM samples, not supplier usage or wall time.
+  // BigInt avoids adding a new total-duration limit to production streaming.
+  let sentPcmSamples = 0n;
+  let sourceArrivalSequence = 0;
+  let lastSourceArrival: PlanBAsrDiagnosticSnapshot | null = null;
   let retiredThrough = -1;
   let state: 'connecting' | 'starting' | 'ready' | 'finishing' | 'closed' =
     'connecting';
@@ -206,7 +280,50 @@ export function createAliyunPlanBAsrClient(
     }
   };
   const receiveSource = (sentence: any) => {
-    if (sentence?.heartbeat === true) return;
+    sourceArrivalSequence += 1;
+    const incoming = diagnosticSnapshot(sentence, sourceArrivalSequence);
+    const previousArrival = lastSourceArrival;
+    lastSourceArrival = incoming;
+    const diagnostic = (
+      decision: PlanBAsrDiagnosticDecision,
+      prior?: Source,
+    ) => {
+      if (!options.onSourceDiagnostic) return;
+      const previousAccepted = prior?.acceptedDiagnostic ?? null;
+      // Every snapshot given to an observer is a separate scalar-only copy.
+      const value: PlanBAsrDiagnostic = {
+        arrivalSequence: incoming.arrivalSequence,
+        decision,
+        incoming: { ...incoming },
+        previousAccepted: previousAccepted ? { ...previousAccepted } : null,
+        previousArrival: previousArrival ? { ...previousArrival } : null,
+        beginChanged:
+          previousAccepted?.beginMs !== undefined &&
+          previousAccepted.beginMs !== null &&
+          incoming.beginMs !== null
+            ? previousAccepted.beginMs !== incoming.beginMs
+            : null,
+        endRegressed:
+          previousAccepted?.endMs !== undefined &&
+          previousAccepted.endMs !== null &&
+          incoming.endMs !== null
+            ? incoming.endMs < previousAccepted.endMs
+            : null,
+        textChanged:
+          prior && typeof sentence?.text === 'string'
+            ? prior.text !== sentence.text
+            : null,
+      };
+      try {
+        options.onSourceDiagnostic(value);
+      } catch {
+        /* Diagnostic observers cannot alter source decisions or teardown. */
+      }
+    };
+    if (sentence?.heartbeat === true) {
+      diagnostic('heartbeat_ignored');
+      return;
+    }
     if (
       !sentence ||
       !integer(sentence.sentence_id) ||
@@ -221,46 +338,170 @@ export function createAliyunPlanBAsrClient(
           sentence.end_time < sentence.begin_time)) ||
       (sentence.sentence_end && !integer(sentence.end_time))
     ) {
+      diagnostic('invalid_source');
       fail('PLAN_B_ASR_SOURCE_INVALID');
       return;
     }
     const id: number = sentence.sentence_id;
-    if (id <= retiredThrough) return;
+    if (id <= retiredThrough) {
+      diagnostic('retired_source_ignored');
+      return;
+    }
     const prior = sources.get(id);
     const providerEnd = integer(sentence.end_time)
       ? sentence.end_time
       : undefined;
+    const noStartFlag = (shape: PlanBAsrDiagnosticSnapshot) =>
+      shape.sentenceBeginState !== 'invalid' &&
+      shape.sentenceBegin !== true &&
+      shape.heartbeatState !== 'invalid' &&
+      shape.heartbeat !== true;
+    const respectsFinalBounds = (begin: number, end: number) => {
+      if (
+        end < Math.max(begin, prior?.begin ?? begin) ||
+        BigInt(end) * 24n > sentPcmSamples
+      )
+        return false;
+      for (const [otherId, other] of sources) {
+        if (
+          (otherId < id && begin < (other.providerEnd ?? other.begin)) ||
+          (otherId > id && end > other.begin)
+        )
+          return false;
+      }
+      return true;
+    };
+    let beginRefined = false;
+    let beginAliasRevised = false;
+    let finalBeginAliased = false;
     if (prior) {
       if (sentence.begin_time !== prior.begin) {
-        fail('PLAN_B_ASR_SOURCE_ID_CONFLICT');
-        return;
+        finalBeginAliased =
+          !prior.final &&
+          sentence.sentence_end &&
+          prior.previousRefinement?.begin === sentence.begin_time &&
+          noStartFlag(prior.acceptedDiagnostic) &&
+          noStartFlag(incoming) &&
+          respectsFinalBounds(sentence.begin_time, providerEnd!);
+        const knownFinalAlias =
+          prior.final &&
+          prior.finalBeginAlias === sentence.begin_time &&
+          noStartFlag(incoming) &&
+          (providerEnd === undefined ||
+            respectsFinalBounds(sentence.begin_time, providerEnd));
+        const nullEndPartial = (shape: PlanBAsrDiagnosticSnapshot) =>
+          shape.final === false &&
+          shape.endState === 'null' &&
+          shape.textState === 'nonempty' &&
+          noStartFlag(shape);
+        const refiningPartial =
+          !prior.final &&
+          nullEndPartial(prior.acceptedDiagnostic) &&
+          nullEndPartial(incoming);
+        if (
+          refiningPartial &&
+          prior.previousRefinement?.begin === sentence.begin_time &&
+          prior.previousRefinement.text === sentence.text
+        ) {
+          diagnostic('partial_begin_replay_ignored', prior);
+          return;
+        }
+        const respectsNeighbors = () => {
+          for (const [otherId, other] of sources) {
+            if (
+              (otherId < id &&
+                sentence.begin_time < (other.providerEnd ?? other.begin)) ||
+              (otherId > id && sentence.begin_time >= other.begin)
+            )
+              return false;
+          }
+          return true;
+        };
+        beginRefined =
+          refiningPartial &&
+          sentence.begin_time >
+            Math.max(
+              prior.begin,
+              prior.previousRefinement?.begin ?? prior.begin,
+            ) &&
+          // Fixed 24kHz PCM contains 24 samples per provider millisecond.
+          BigInt(sentence.begin_time) * 24n <= sentPcmSamples &&
+          respectsNeighbors();
+        beginAliasRevised =
+          refiningPartial &&
+          prior.previousRefinement?.begin === sentence.begin_time &&
+          prior.previousRefinement.text !== sentence.text &&
+          BigInt(sentence.begin_time) * 24n <= sentPcmSamples &&
+          respectsNeighbors();
+        if (
+          !beginRefined &&
+          !beginAliasRevised &&
+          !finalBeginAliased &&
+          !knownFinalAlias
+        ) {
+          diagnostic('begin_conflict', prior);
+          fail('PLAN_B_ASR_SOURCE_ID_CONFLICT');
+          return;
+        }
       }
       if (prior.final) {
-        if (sentence.text !== prior.text || !sentence.sentence_end)
+        if (sentence.text !== prior.text || !sentence.sentence_end) {
+          diagnostic('final_revision_ignored', prior);
+          if (isClosed()) return;
           evidence('correction', 'PLAN_B_ASR_LATE_SOURCE_IGNORED');
+        } else diagnostic('final_duplicate_ignored', prior);
         return;
       }
       if (
         prior.providerEnd !== undefined &&
         (providerEnd === undefined || providerEnd < prior.providerEnd)
-      )
+      ) {
+        diagnostic('endpoint_regression_ignored', prior);
         return;
+      }
       if (
+        !beginRefined &&
+        !beginAliasRevised &&
         prior.text === sentence.text &&
         prior.final === sentence.sentence_end &&
         prior.providerEnd === providerEnd
-      )
+      ) {
+        diagnostic('duplicate_ignored', prior);
         return;
+      }
     }
-    if (!sentence.text.trim() && !prior) return;
+    if (!sentence.text.trim() && !prior) {
+      diagnostic('empty_new_source_ignored');
+      return;
+    }
+    let finalBeginAlias: number | undefined;
+    if (
+      sentence.sentence_end &&
+      prior?.previousRefinement &&
+      noStartFlag(prior.acceptedDiagnostic) &&
+      noStartFlag(incoming) &&
+      respectsFinalBounds(prior.previousRefinement.begin, providerEnd!)
+    )
+      finalBeginAlias = finalBeginAliased
+        ? prior.begin
+        : prior.previousRefinement.begin;
+    let previousRefinement: Source['previousRefinement'];
+    if (beginRefined || beginAliasRevised)
+      previousRefinement = { begin: prior!.begin, text: prior!.text };
+    else if (!sentence.sentence_end && prior?.previousRefinement)
+      previousRefinement = prior.previousRefinement;
     const source: Source = {
       // Preserve provider order, including defensive non-heartbeat ID 0 support.
       sequence: id + 1,
       revision: (prior?.revision ?? 0) + 1,
       text: sentence.text,
       final: sentence.sentence_end,
-      at: anchor + sentence.begin_time,
+      // An accepted source keeps its identity/time across bounded start edits.
+      at: prior?.at ?? anchor + sentence.begin_time,
       begin: sentence.begin_time,
+      acceptedDiagnostic: incoming,
+      ...(previousRefinement ? { previousRefinement } : {}),
+      ...(finalBeginAlias === undefined ? {} : { finalBeginAlias }),
       ...(providerEnd === undefined ? {} : { providerEnd }),
       ...(sentence.sentence_end ? { endAt: anchor + providerEnd! } : {}),
     };
@@ -268,6 +509,7 @@ export function createAliyunPlanBAsrClient(
       !Number.isSafeInteger(source.at) ||
       (source.endAt !== undefined && !Number.isSafeInteger(source.endAt))
     ) {
+      diagnostic('invalid_source_time', prior);
       fail('PLAN_B_ASR_SOURCE_TIME_INVALID');
       return;
     }
@@ -276,18 +518,26 @@ export function createAliyunPlanBAsrClient(
       [...sources.values()].filter((entry) => !entry.final).length >
       MAX_UNFINISHED_SOURCES
     ) {
+      diagnostic('source_backlog', prior);
       fail('PLAN_B_ASR_SOURCE_BACKLOG');
       return;
     }
     while (sources.size > MAX_RETAINED_SOURCES) {
       const oldest = Math.min(...sources.keys());
       if (!sources.get(oldest)!.final) {
+        diagnostic('source_backlog', prior);
         fail('PLAN_B_ASR_SOURCE_BACKLOG');
         return;
       }
       sources.delete(oldest);
       retiredThrough = Math.max(retiredThrough, oldest);
     }
+    let decision: PlanBAsrDiagnosticDecision = 'accepted';
+    if (beginRefined) decision = 'partial_begin_refined';
+    else if (beginAliasRevised) decision = 'partial_begin_alias_revised';
+    else if (finalBeginAliased) decision = 'final_begin_alias_accepted';
+    diagnostic(decision, prior);
+    if (isClosed()) return;
     try {
       options.onSource({
         sequence: source.sequence,
@@ -442,7 +692,8 @@ export function createAliyunPlanBAsrClient(
         )
           return;
       }
-      send(Buffer.from(pcm24k));
+      if (send(Buffer.from(pcm24k)))
+        sentPcmSamples += BigInt(pcm24k.length / 2);
     },
     finish() {
       finishRequested = true;

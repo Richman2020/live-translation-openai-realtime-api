@@ -9,6 +9,7 @@ import type { CallContextSnapshot } from '../src/solo/call-context';
 import type {
   AliyunPlanBConfig,
   PlanBAsrOptions,
+  PlanBAsrDiagnostic,
   PlanBAsrSource,
   PlanBEvidence,
   PlanBUsage,
@@ -68,6 +69,7 @@ function config(
 function fixture(overrides: Partial<PlanBAsrOptions> = {}) {
   const socket = new Socket();
   const errors: string[] = [];
+  const diagnostics: PlanBAsrDiagnostic[] = [];
   const sources: PlanBAsrSource[] = [];
   const usages: PlanBUsage[] = [];
   const evidences: PlanBEvidence[] = [];
@@ -81,6 +83,7 @@ function fixture(overrides: Partial<PlanBAsrOptions> = {}) {
       return socket as unknown as WebSocket;
     },
     onSource: (source) => sources.push(source),
+    onSourceDiagnostic: (event) => diagnostics.push(event),
     onError: (code) => errors.push(code),
     onUsage: (usage) => usages.push(usage),
     onEvidence: (evidence) => evidences.push(evidence),
@@ -122,6 +125,7 @@ function fixture(overrides: Partial<PlanBAsrOptions> = {}) {
     socket,
     errors,
     sources,
+    diagnostics,
     usages,
     evidences,
     addresses,
@@ -618,4 +622,151 @@ test('source retention remains bounded while late retired sources cannot be resu
   } finally {
     f.client.abort();
   }
+});
+
+// Minimal scalar shapes from the verified short-audio source revisions; text is
+// synthetic. The original audio/body is not required for this offline fixture.
+test('captured null-end start refinement and retained alias revision keep one ASR identity', async () => {
+  const f = fixture();
+  await f.started();
+  f.client.append(Buffer.alloc(24000 * 2 * 5));
+  f.source({ begin_time: 1720, end_time: null, text: '合成初稿' });
+  f.source({ begin_time: 2280, end_time: null, text: '合成修订' });
+  f.source({ begin_time: 1720, end_time: null, text: '合成初稿' });
+  f.source({ begin_time: 1720, end_time: null, text: '合成后续修订' });
+  f.source({
+    begin_time: 2280,
+    end_time: 4000,
+    sentence_end: true,
+    text: '合成最终句。',
+  });
+  f.source({
+    begin_time: 1720,
+    end_time: 4000,
+    sentence_end: true,
+    text: '合成最终句。',
+  });
+  assert.deepEqual(
+    f.sources.map((item) => item.revision),
+    [1, 2, 3, 4],
+  );
+  assert.equal(new Set(f.sources.map((item) => item.sequence)).size, 1);
+  assert.equal(new Set(f.sources.map((item) => item.at)).size, 1);
+  assert.equal(f.sources.at(-1).endAt, 14000);
+  assert.deepEqual(
+    f.diagnostics.map((item) => item.decision),
+    [
+      'accepted',
+      'partial_begin_refined',
+      'partial_begin_replay_ignored',
+      'partial_begin_alias_revised',
+      'final_begin_alias_accepted',
+      'final_duplicate_ignored',
+    ],
+  );
+  assert.deepEqual(f.errors, []);
+  f.client.abort();
+});
+
+test('final endpoint can return to known pre-refinement start, but cannot authorize a third start', async () => {
+  for (const finalBegin of [1600, 1680, 1640]) {
+    const f = fixture();
+    // eslint-disable-next-line no-await-in-loop -- Isolated fake tasks per candidate boundary.
+    await f.started();
+    f.client.append(Buffer.alloc(24000 * 2 * 4));
+    f.source({ begin_time: 1600, end_time: null, text: '初稿' });
+    f.source({ begin_time: 1680, end_time: null, text: '新稿' });
+    f.source({
+      begin_time: finalBegin,
+      end_time: 2400,
+      sentence_end: true,
+      text: '完成。',
+    });
+    if (finalBegin === 1640) {
+      assert.deepEqual(f.errors, ['PLAN_B_ASR_SOURCE_ID_CONFLICT']);
+      assert.equal(f.sources.length, 2);
+    } else {
+      assert.equal(f.sources.length, 3);
+      assert.equal(f.sources.at(-1).final, true);
+      assert.deepEqual(f.errors, []);
+    }
+    f.client.abort();
+  }
+});
+
+test('changed ASR start remains bounded by queued audio, neighboring source and explicit-null partial shape', async () => {
+  const cases = [
+    { begin_time: 4001, end_time: null },
+    { begin_time: 1800, end_time: undefined },
+    { begin_time: 1800, end_time: 2200 },
+    { begin_time: 1800, end_time: null, sentence_begin: true },
+  ];
+  for (const incoming of cases) {
+    const f = fixture();
+    // eslint-disable-next-line no-await-in-loop -- Isolated invalid fake source frames.
+    await f.started();
+    f.client.append(Buffer.alloc(24000 * 2 * 4));
+    f.source({ begin_time: 1600, end_time: null, text: '初稿' });
+    f.source({ ...incoming, text: '修订' });
+    assert.deepEqual(f.errors, ['PLAN_B_ASR_SOURCE_ID_CONFLICT']);
+    f.client.abort();
+  }
+  const f = fixture();
+  await f.started();
+  f.client.append(Buffer.alloc(24000 * 2 * 4));
+  f.source({ sentence_id: 2, begin_time: 2000, end_time: null, text: '后句' });
+  f.source({ sentence_id: 1, begin_time: 1600, end_time: null, text: '前句' });
+  f.source({
+    sentence_id: 1,
+    begin_time: 2000,
+    end_time: null,
+    text: '跨界稿',
+  });
+  assert.deepEqual(f.errors, ['PLAN_B_ASR_SOURCE_ID_CONFLICT']);
+  f.client.abort();
+});
+
+test('refined empty final withdraws once and old partial cannot revive an ended source', async () => {
+  const f = fixture();
+  await f.started();
+  f.client.append(Buffer.alloc(24000 * 2 * 4));
+  f.source({ begin_time: 1600, end_time: null, text: '初稿' });
+  f.source({ begin_time: 1680, end_time: null, text: '新稿' });
+  f.source({ begin_time: 1600, end_time: 2400, sentence_end: true, text: '' });
+  f.source({ begin_time: 1680, end_time: null, text: '不得复活' });
+  assert.equal(f.sources.length, 3);
+  assert.equal(f.sources.at(-1).text, '');
+  assert.equal(f.sources.at(-1).final, true);
+  assert.deepEqual(f.errors, []);
+  assert.equal(f.diagnostics.at(-1).decision, 'final_revision_ignored');
+  f.client.abort();
+});
+
+test('ASR diagnostic whitelist never exports text or raw task data, and observer mutation cannot alter source decisions', async () => {
+  const snapshots: PlanBAsrDiagnostic[] = [];
+  const f = fixture({
+    onSourceDiagnostic(event) {
+      snapshots.push(JSON.parse(JSON.stringify(event)));
+      event.incoming.beginMs = 999999;
+      if (event.previousAccepted)
+        event.previousAccepted.providerSentenceId = 999;
+    },
+  });
+  await f.started();
+  f.source({ text: 'synthetic-private-source-body' });
+  f.source({ text: 'synthetic-final', sentence_end: true });
+  assert.equal(f.sources.length, 2);
+  assert.equal(f.sources[0].at, 10000);
+  assert.equal(snapshots[1].previousAccepted.providerSentenceId, 1);
+  const encoded = JSON.stringify(snapshots);
+  for (const secret of [
+    'synthetic-private-source-body',
+    'synthetic-final',
+    'offline-fixture',
+    f.taskId(),
+    'Authorization',
+  ])
+    assert(!encoded.includes(secret));
+  assert.deepEqual(f.errors, []);
+  f.client.abort();
 });

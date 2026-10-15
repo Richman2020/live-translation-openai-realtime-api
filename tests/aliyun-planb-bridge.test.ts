@@ -9,6 +9,7 @@ import { createAliyunPlanBBridge } from '../src/solo/aliyun-planb-bridge';
 import type {
   AliyunPlanBConfig,
   PlanBAsrOptions,
+  PlanBTimingEvent,
   PlanBTranslationOptions,
 } from '../src/solo/aliyun-planb-types';
 import { ConversationEventAdapter } from '../src/solo/conversation-events';
@@ -93,6 +94,9 @@ function harness(extras: Record<string, unknown> = {}) {
   const captions: string[] = [];
   const diagnostics: any[] = [];
   const corrections: any[] = [];
+  const timings: PlanBTimingEvent[] = [];
+  const optionTimings: PlanBTimingEvent[] = [];
+  let now = 5000;
   const adapter = new ConversationEventAdapter(
     'live-pairing-offline',
     () => 5000,
@@ -105,7 +109,7 @@ function harness(extras: Record<string, unknown> = {}) {
     {
       apiKey: 'unused-openai-key',
       model: 'gpt-realtime-1.5',
-      now: () => 5000,
+      now: () => now,
       remoteCaptions: true,
       outgoingCaptions: false,
       onTranscript: (event) => {
@@ -121,6 +125,7 @@ function harness(extras: Record<string, unknown> = {}) {
         const update = adapter.audio(event);
         if (update) conversation.apply(update);
       },
+      onPlanBTiming: (event) => optionTimings.push(event),
       onUtterancePlayback: (event) => {
         lifecycles.push(event);
         const update = adapter.playback(event);
@@ -133,6 +138,7 @@ function harness(extras: Record<string, unknown> = {}) {
     {
       config,
       onCorrection: (event) => corrections.push(event),
+      onTiming: (event) => timings.push(event),
       deps: {
         createAsr: (options) => {
           asr.set(options.role, options);
@@ -200,6 +206,11 @@ function harness(extras: Record<string, unknown> = {}) {
     captions,
     diagnostics,
     corrections,
+    timings,
+    optionTimings,
+    setNow: (value: number) => {
+      now = value;
+    },
     source,
     conversation,
     lifecycles,
@@ -227,7 +238,7 @@ test('Plan B reuses telephone PCM adaptation, preserves original English immedia
   h.bridge.close();
 });
 
-test('both speaker pipelines share recent raw context while remote never creates Chinese voice', async () => {
+test('both speaker pipelines keep recent raw context for ASR, send only current source to MT and never create Chinese voice', async () => {
   const h = harness();
   await tick();
   h.source('remote', 1, 'What time is the appointment?');
@@ -239,12 +250,16 @@ test('both speaker pipelines share recent raw context while remote never creates
     (request) => request.role === 'local' && request.text.includes('下午两点'),
   );
   assert(
-    localRequest.context.entries.some(
-      (entry) =>
-        entry.role === 'remote' &&
-        entry.text === 'What time is the appointment?',
-    ),
+    h.asr
+      .get('local')
+      .getContext()
+      .entries.some(
+        (entry) =>
+          entry.role === 'remote' &&
+          entry.text === 'What time is the appointment?',
+      ),
   );
+  assert.deepEqual(localRequest.context.entries, []);
   assert(
     !localRequest.context.entries.some((entry) =>
       entry.text.startsWith('translated:'),
@@ -443,5 +458,219 @@ test('successive utterances seal their own exact counts without carrying previou
     h.conversation.snapshot().every((row) => row.playback.status === 'played'),
   );
   assert.equal(h.failures.length, 0);
+  h.bridge.close();
+});
+
+test('telephone timing separates provider endpoint, ASR, translation, first sample, real queue and final mark drainage', async () => {
+  let releaseTranslation: () => void;
+  let releaseAudio: () => void;
+  const translated = new Promise<void>((resolve) => {
+    releaseTranslation = resolve;
+  });
+  const audio = new Promise<void>((resolve) => {
+    releaseAudio = resolve;
+  });
+  const h = harness({
+    translate: async () => {
+      await translated;
+      return {
+        text: 'The appointment is on the sixteenth, not the fifteenth.',
+      };
+    },
+    createTts: () => ({
+      async *synthesize() {
+        await audio;
+        yield Buffer.alloc(4800, 1);
+      },
+      abort() {},
+    }),
+  });
+  h.remote.autoAck = false;
+  await tick();
+  h.source('local', 1, '是十六日，不是十五日。');
+  h.setNow(5200);
+  releaseTranslation();
+  await tick();
+  assert(!h.timings.some((event) => event.stage === 'audio_first_sample'));
+  h.setNow(5600);
+  releaseAudio();
+  await tick();
+  await tick();
+  const stages = h.timings.map((event) => event.stage);
+  assert.deepEqual(stages, [
+    'provider_endpoint_estimate',
+    'asr_final',
+    'section_ready',
+    'translation_start',
+    'translation_complete',
+    'synthesis_start',
+    'audio_first_sample',
+    'playback_queued',
+    'playback_start_unavailable',
+  ]);
+  const endpoint = h.timings[0];
+  assert.equal(endpoint.basis, 'provider_stream_estimate');
+  assert.equal(endpoint.at, 120);
+  assert.equal(h.timings[1].at, 5000);
+  assert.equal(h.timings[2].at, 5000);
+  assert.equal(h.timings[3].at, 5000);
+  assert.equal(h.timings[4].at, 5200);
+  assert.equal(h.timings[5].at, 5200);
+  assert.equal(h.timings[6].at, 5600);
+  assert.equal(h.timings[7].basis, 'transport_enqueue_observed');
+  assert.equal(h.timings[8].basis, 'unavailable');
+  assert.equal(h.timings[8].actualPlaybackStartAt, null);
+  // Queue/boundary time is independent from the actual MT and TTS spans.
+  assert.equal(h.timings[2].at - h.timings[1].at, 0);
+  assert.equal(h.timings[3].at - h.timings[2].at, 0);
+  assert.equal(h.timings[4].at - h.timings[3].at, 200);
+  assert.equal(h.timings[6].at - h.timings[5].at, 400);
+  assert(
+    h.timings.every((event) => event.utteranceId === endpoint.utteranceId),
+  );
+  assert(
+    h.timings.every(
+      (event) => event.sourceRevision === endpoint.sourceRevision,
+    ),
+  );
+  assert(h.timings.every((event) => event.sessionEpoch === 1));
+  assert(h.timings.every((event) => event.sequence === endpoint.sequence));
+  assert(h.timings.every((event) => JSON.stringify(event.sourceIds) === '[1]'));
+  assert(!h.timings.some((event) => event.stage === 'playback_drained'));
+  h.setNow(5900);
+  h.remote.acknowledge();
+  await tick();
+  const drained = h.timings.at(-1);
+  assert.equal(drained.stage, 'playback_drained');
+  assert.equal(drained.at, 5900);
+  assert.equal(drained.basis, 'transport_mark_observed');
+  assert.equal(drained.actualPlaybackStartAt, null);
+  assert.deepEqual(h.timings, h.optionTimings);
+  assert(!JSON.stringify(h.timings).includes('sixteenth'));
+  assert(!JSON.stringify(h.timings).includes('十六'));
+  h.bridge.close();
+});
+
+test('streamed audio is queued before a slow later chunk and drainage waits for every exact mark', async () => {
+  let nextChunk: () => void;
+  const waiting = new Promise<void>((resolve) => {
+    nextChunk = resolve;
+  });
+  const h = harness({
+    createTts: () => ({
+      async *synthesize() {
+        yield Buffer.alloc(4800, 1);
+        await waiting;
+        yield Buffer.alloc(4800, 2);
+      },
+      abort() {
+        nextChunk();
+      },
+    }),
+  });
+  h.remote.autoAck = false;
+  await tick();
+  h.source('local', 1, '连续播放前半句和后半句。');
+  await tick();
+  assert.equal(
+    h.remote.sent.filter((event) => event.event === 'media').length,
+    1,
+  );
+  assert.equal(
+    h.timings.filter((event) => event.stage === 'playback_queued').length,
+    1,
+  );
+  h.remote.acknowledge();
+  assert(!h.timings.some((event) => event.stage === 'playback_drained'));
+  h.setNow(5500);
+  nextChunk();
+  await tick();
+  await tick();
+  assert.equal(
+    h.remote.sent.filter((event) => event.event === 'media').length,
+    2,
+  );
+  assert(!h.timings.some((event) => event.stage === 'playback_drained'));
+  h.setNow(5700);
+  h.remote.acknowledge();
+  await tick();
+  assert.equal(
+    h.timings.filter((event) => event.stage === 'playback_drained').length,
+    1,
+  );
+  assert.equal(h.timings.at(-1).at, 5700);
+  h.remote.acknowledge();
+  assert.equal(
+    h.timings.filter((event) => event.stage === 'playback_drained').length,
+    1,
+  );
+  h.bridge.close();
+});
+
+test('hangup fences delayed audio, old marks and source revisions without inventing a playback start', async () => {
+  let release: () => void;
+  const waiting = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const h = harness({
+    createTts: () => ({
+      async *synthesize() {
+        yield Buffer.alloc(4800, 1);
+        await waiting;
+        yield Buffer.alloc(4800, 2);
+      },
+      abort() {
+        release();
+      },
+    }),
+  });
+  h.remote.autoAck = false;
+  await tick();
+  h.source('local', 1, '挂断后不能继续发声。');
+  await tick();
+  const count = h.timings.length;
+  const mediaCount = h.remote.sent.filter(
+    (event) => event.event === 'media',
+  ).length;
+  h.bridge.close();
+  h.remote.acknowledge();
+  h.source('local', 1, '迟到修订。', 2);
+  release();
+  await tick();
+  await tick();
+  assert.equal(h.timings.length, count);
+  assert.equal(
+    h.remote.sent.filter((event) => event.event === 'media').length,
+    mediaCount,
+  );
+  assert(!h.timings.some((event) => event.stage === 'playback_drained'));
+  assert(
+    h.timings
+      .filter((event) => event.stage === 'playback_start_unavailable')
+      .every((event) => event.actualPlaybackStartAt === null),
+  );
+});
+
+test('remote English creates caption timing only and cannot claim translated Chinese playback', async () => {
+  const h = harness();
+  await tick();
+  h.source('remote', 1, 'Do not charge twice.');
+  await tick();
+  const original = Buffer.from([0xff, 0x7f, 0x10, 0x80]);
+  h.remote.media(original);
+  const media = h.local.sent.find((event) => event.event === 'media');
+  assert.equal(media.media.payload, original.toString('base64'));
+  assert.deepEqual(
+    h.timings.map((event) => event.stage),
+    [
+      'provider_endpoint_estimate',
+      'asr_final',
+      'section_ready',
+      'translation_start',
+      'translation_complete',
+    ],
+  );
+  assert(h.timings.every((event) => event.role === 'remote'));
+  assert.equal(h.spoken.length, 0);
   h.bridge.close();
 });

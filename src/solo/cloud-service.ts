@@ -31,6 +31,31 @@ import {
   type CloudTranslationFactories,
 } from './cloud-translation-selection';
 import { freezePhoneTranslationSelection } from './aliyun-planb-config';
+import { diagnosticLogRecord } from './diagnostic-log';
+
+/** Only this content-free event reaches the selected Plan B runtime log. */
+export function reportCloudPlanBTiming(event: {
+  event: string;
+  data: unknown;
+}): void {
+  if (
+    event.event !== 'translation-timing' ||
+    !event.data ||
+    typeof event.data !== 'object' ||
+    Array.isArray(event.data)
+  )
+    return;
+  try {
+    const record = diagnosticLogRecord(
+      event.event,
+      event.data as Record<string, unknown>,
+    );
+    // eslint-disable-next-line no-console -- Whitelisted numeric metadata only; no raw provider objects or text.
+    if (record) console.log(JSON.stringify(record));
+  } catch {
+    // Diagnostic output failures must never delay a hangup or audio cleanup.
+  }
+}
 
 const identifier = /^[A-Za-z0-9_-]{1,128}$/;
 
@@ -404,6 +429,8 @@ export async function createCloudService(
       allowedTarget: config.allowedTarget,
     });
     manager.on('diagnostic', reportCloudCallTermination);
+    if (translationProvider.provider === 'aliyun-plan-b')
+      manager.on('event', reportCloudPlanBTiming);
     const leases = new CloudControllerLeases({ policy: login.policy, now });
     const voice = new CloudVoiceJoin({
       policy: login.policy,

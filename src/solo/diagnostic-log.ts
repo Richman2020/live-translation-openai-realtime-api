@@ -11,6 +11,7 @@ export function diagnosticLogRecord(
       'translation-metric',
       'translation-provider',
       'translation-input',
+      'translation-timing',
       'caption-input',
     ].includes(event)
   )
@@ -33,6 +34,52 @@ export function diagnosticLogRecord(
     });
   };
   choice('role', ['local', 'remote']);
+  if (event === 'translation-timing') {
+    choice('stage', [
+      'provider_endpoint_estimate',
+      'asr_final',
+      'section_ready',
+      'translation_start',
+      'translation_complete',
+      'synthesis_start',
+      'audio_first_sample',
+      'playback_queued',
+      'playback_start_unavailable',
+      'playback_drained',
+    ]);
+    choice('basis', [
+      'provider_stream_estimate',
+      'application_observed',
+      'transport_enqueue_observed',
+      'transport_mark_observed',
+      'unavailable',
+    ]);
+    numbers(['sourceRevision', 'sessionEpoch']);
+    if (
+      typeof data.at === 'number' &&
+      Number.isFinite(data.at) &&
+      data.at >= 0 &&
+      data.at <= Number.MAX_SAFE_INTEGER
+    )
+      record.observedAtEpochMs = data.at;
+    if (
+      typeof data.utteranceId === 'string' &&
+      /^planb_(?:local|remote)_(?:source_[0-9]+|caption:source_[0-9]+:[0-9]+)$/u.test(
+        data.utteranceId,
+      )
+    )
+      record.utteranceId = data.utteranceId;
+    if (
+      typeof data.pipelineId === 'string' &&
+      /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/iu.test(
+        data.pipelineId,
+      )
+    )
+      record.pipelineId = data.pipelineId;
+    // No receiver-start event exists in the current Twilio media interface.
+    // Even a forged numeric value must not turn send/drain into human audibility.
+    record.actualPlaybackStartAt = null;
+  }
   if (event === 'translation-connection') {
     choice('state', ['disconnected', 'reconnecting', 'ready']);
     numbers(['closeCode'], 65535);

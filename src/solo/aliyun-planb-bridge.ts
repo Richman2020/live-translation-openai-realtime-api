@@ -16,6 +16,7 @@ import {
 import type {
   AliyunPlanBConfig,
   PlanBEvidence,
+  PlanBTimingEvent,
   PlanBUsage,
 } from './aliyun-planb-types';
 import type {
@@ -34,6 +35,8 @@ export type AliyunPlanBBridgeSelection = {
   onEvidence?: (event: PlanBEvidence) => void;
   /** Trusted explicit test evidence sink; never an ordinary server log. */
   onCorrection?: (event: PlanBSourceCorrection) => void;
+  /** Metadata-only observation. Twilio marks prove drainage, not playback start. */
+  onTiming?: (event: PlanBTimingEvent) => void;
 };
 type Playback = { pending: Set<string>; sealed: boolean; seen: boolean };
 type Waiter = { resolve: () => void; reject: (error: Error) => void };
@@ -62,6 +65,8 @@ export function createAliyunPlanBBridge(
   const sourceOrders = new Map<string, number>();
   const playback = new Map<string, Playback>();
   const deliveries = new Map<string, number>();
+  const timings = new Map<string, PlanBTimingEvent>();
+  const queuedTiming = new Set<string>();
   const waiters = new Set<Waiter>();
   let sourceOrder = 0;
   let outstanding = 0;
@@ -74,6 +79,44 @@ export function createAliyunPlanBBridge(
     } catch {
       // Diagnostic subscribers cannot prevent teardown or change providers.
     }
+  };
+  const now = options.now || Date.now;
+  const timing = (event: PlanBTimingEvent) => {
+    if (closed) return;
+    // Copy the source binding before observers run. A diagnostic consumer must
+    // not change the metadata subsequently attached to telephone deliveries.
+    const snapshot = Object.freeze({
+      ...event,
+      sourceIds: Object.freeze([...event.sourceIds]),
+    });
+    timings.set(event.utteranceId, snapshot);
+    if (timings.size > 1024) timings.delete(timings.keys().next().value!);
+    notify(selection.onTiming, snapshot);
+    notify(options.onPlanBTiming, snapshot);
+  };
+  const transportTiming = (
+    id: string,
+    stage:
+      | 'playback_queued'
+      | 'playback_drained'
+      | 'playback_start_unavailable',
+  ) => {
+    const source = timings.get(id);
+    if (closed || !source) return;
+    const basis = {
+      playback_queued: 'transport_enqueue_observed',
+      playback_drained: 'transport_mark_observed',
+      playback_start_unavailable: 'unavailable',
+    } as const;
+    timing({
+      ...source,
+      stage,
+      at: now(),
+      basis: basis[stage],
+      // Neither a websocket write nor a matching Twilio mark tells us when
+      // the receiver began playing. There is no receiver-start observer here.
+      actualPlaybackStartAt: null,
+    });
   };
   const outgoingState = (state: 'connecting' | 'ready' | 'failed') =>
     notify(options.onOutgoingCaptionState, {
@@ -90,6 +133,8 @@ export function createAliyunPlanBBridge(
     waiters.clear();
     playback.clear();
     deliveries.clear();
+    timings.clear();
+    queuedTiming.clear();
     sourceOrders.clear();
     outstanding = 0;
   };
@@ -102,7 +147,10 @@ export function createAliyunPlanBBridge(
     if (!record || !record.sealed || !record.seen || record.pending.size)
       return;
     local?.acknowledgeAudio(id);
+    transportTiming(id, 'playback_drained');
     playback.delete(id);
+    queuedTiming.delete(id);
+    timings.delete(id);
   };
   const diagnostic = (event: TranslationAudioDiagnostic) => {
     if (
@@ -120,6 +168,11 @@ export function createAliyunPlanBBridge(
           deliveries.set(event.deliveryId, event.generatedBytes);
           record.pending.add(event.deliveryId);
           outstanding += event.generatedBytes;
+        }
+        if (!queuedTiming.has(event.utteranceId)) {
+          queuedTiming.add(event.utteranceId);
+          transportTiming(event.utteranceId, 'playback_queued');
+          transportTiming(event.utteranceId, 'playback_start_unavailable');
         }
       } else if (event.stage === 'playback_confirmed') {
         const bytes = deliveries.get(event.deliveryId);
@@ -191,6 +244,7 @@ export function createAliyunPlanBBridge(
     | 'onUsage'
     | 'onEvidence'
     | 'onCorrection'
+    | 'onTiming'
   > => ({
     config,
     role,
@@ -200,6 +254,7 @@ export function createAliyunPlanBBridge(
     onUsage: selection.onUsage,
     onEvidence: selection.onEvidence,
     onCorrection: selection.onCorrection,
+    onTiming: timing,
   });
   const inner = new ContinuousTranslationBridge({
     ...options,

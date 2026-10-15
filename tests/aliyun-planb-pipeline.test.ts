@@ -111,7 +111,7 @@ function harness(
   };
 }
 
-test('Plan B freezes one confirmed translation for caption and fixed-voice TTS; context is raw and bounded upstream', async () => {
+test('Plan B freezes one guarded translation for caption and fixed-voice TTS; raw context stays ASR-only', async () => {
   const context = {
     version: 1,
     entries: [
@@ -138,7 +138,8 @@ test('Plan B freezes one confirmed translation for caption and fixed-voice TTS; 
     (event) => event.kind === 'translation' && event.final,
   );
   assert.equal(h.spoken[0], final.text);
-  assert.equal(h.translated.at(-1).context.entries[0].text, 'What time?');
+  assert.equal(h.translated.at(-1).context.entries.length, 0);
+  assert.equal(h.asr().getContext().entries[0].text, 'What time?');
   assert.equal(
     h.transcripts.find((event) => event.kind === 'original' && event.final)
       .text,
@@ -423,20 +424,24 @@ test('an earlier source that never finalizes fails cleanup rather than speaking 
   assert.deepEqual(h.failures, ['PLANB_SOURCE_ORDER_UNRESOLVED']);
 });
 
-test('rapid partials coalesce within the draft throttle and a final bypasses the throttle', async () => {
+test('rapid partials update original captions without sending provisional raw or model deltas to speech', async () => {
   const h = harness();
   h.source(1, '第一', false, 1);
   await tick();
   h.source(1, '第一部分', false, 2);
   h.source(1, '第一部分仍在更正', false, 3);
   await tick();
-  assert.equal(h.translated.length, 1);
+  assert.equal(h.translated.length, 0);
+  assert.equal(
+    h.transcripts.filter((event) => event.kind === 'translation').length,
+    0,
+  );
   h.source(1, '更正完成，金额五十元。', true, 4);
   await h.pipeline.finish();
-  assert.equal(h.translated.length, 2);
+  assert.equal(h.translated.length, 1);
   assert.deepEqual(
     h.translated.map((request) => request.sequence),
-    [1, 2],
+    [1],
   );
   assert.deepEqual(h.spoken, ['translated:更正完成，金额五十元。']);
   h.pipeline.abort();
@@ -449,8 +454,10 @@ test('empty final ASR withdraws a draft, clears translated text and writes a raw
   });
   h.source(1, '你好', false);
   await tick();
-  assert(
-    h.transcripts.some((event) => event.kind === 'translation' && event.text),
+  assert.equal(h.translated.length, 0);
+  assert.equal(
+    h.transcripts.filter((event) => event.kind === 'translation').length,
+    0,
   );
   h.source(1, '', true, 2);
   await h.pipeline.finish();
@@ -512,5 +519,401 @@ test('withdrawal after exposed audio preserves the frozen snapshot and emits exp
   assert.equal(h.corrections[0].audioExposed, true);
   assert.equal(h.corrections[0].rawText, '');
   assert.equal(h.spoken.length, 1);
+  h.pipeline.abort();
+});
+
+test('only validated same-role source-target pairs become bounded translation memory; current raw stays isolated', async () => {
+  const h = harness('local', {
+    translate: async (options: any) => {
+      h.translated.push(options);
+      return {
+        text:
+          options.text === '金额二十五元。'
+            ? 'The amount is twenty-five yuan.'
+            : 'Correction: fifty yuan, not twenty-five yuan.',
+      };
+    },
+  });
+  h.source(1, '金额二十五元。');
+  await tick();
+  await tick();
+  h.source(2, '更正，五十元，不是二十五元。');
+  await h.pipeline.finish();
+  assert.equal(h.translated.length, 2);
+  const current: any = h.translated[1];
+  assert.equal(current.text, '更正，五十元，不是二十五元。');
+  assert.equal(current.context.entries.length, 0);
+  assert.equal(current.translationMemory.length, 1);
+  assert.equal(current.translationMemory[0].source, '金额二十五元。');
+  assert.equal(
+    current.translationMemory[0].target,
+    'The amount is twenty-five yuan.',
+  );
+  assert.equal(current.translationMemory[0].role, 'local');
+  assert.deepEqual(current.currentSourceIds, [2]);
+  assert.deepEqual(h.spoken, [
+    'The amount is twenty-five yuan.',
+    'Correction: fifty yuan, not twenty-five yuan.',
+  ]);
+  h.pipeline.abort();
+});
+
+test('JSON, fenced, meta and history-wrapper model bodies fail without final captions, unpacking or TTS', async () => {
+  for (const text of [
+    '{"translation":"Hello."}',
+    '["Hello."]',
+    '"Hello."',
+    '```text\nHello.\n```',
+    'Here is the translation: Hello.',
+    'RECENT_RAW_CONTEXT: old CURRENT_SOURCE: new',
+  ]) {
+    const h = harness('local', { translate: async () => ({ text }) });
+    h.source(1, '你好。');
+    // eslint-disable-next-line no-await-in-loop -- Each rejected model body owns an isolated pipeline.
+    await assert.rejects(h.pipeline.finish(), /PLANB_CURRENT_TRANSLATION_/);
+    assert.equal(h.audio.length, 0);
+    assert.equal(h.counts().ttsCreated, 0);
+    assert.equal(
+      h.transcripts.filter((event) => event.kind === 'translation').length,
+      0,
+    );
+    h.pipeline.abort();
+  }
+});
+
+test('a legitimate repeated source in a new utterance and following correction all remain audible', async () => {
+  const h = harness('local', {
+    translate: async (options: any) => {
+      h.translated.push(options);
+      return {
+        text:
+          options.text === '不要取消预约。'
+            ? 'Do not cancel the appointment.'
+            : 'Correction: cancel the appointment.',
+      };
+    },
+  });
+  h.source(1, '不要取消预约。');
+  await tick();
+  h.source(2, '不要取消预约。');
+  await tick();
+  h.source(3, '更正，取消预约。');
+  await h.pipeline.finish();
+  assert.deepEqual(h.spoken, [
+    'Do not cancel the appointment.',
+    'Do not cancel the appointment.',
+    'Correction: cancel the appointment.',
+  ]);
+  assert.deepEqual(
+    h.translated.map((entry: any) => entry.currentSourceIds),
+    [[1], [2], [3]],
+  );
+  h.pipeline.abort();
+});
+
+test('same ASR source splitting into identical natural subsections is not mistaken for a request replay', async () => {
+  const h = harness('local', {
+    translate: async () => ({ text: 'Please do not cancel.' }),
+  });
+  h.source(1, 'Please do not cancel. Please do not cancel.');
+  await h.pipeline.finish();
+  assert.deepEqual(h.spoken, [
+    'Please do not cancel.',
+    'Please do not cancel.',
+  ]);
+  assert.deepEqual(h.failures, []);
+  h.pipeline.abort();
+});
+
+test('timing separates provider endpoint estimate, actual final arrival, translation and first PCM; no body leaves observers', async () => {
+  let clock = 1000;
+  const timings: any[] = [];
+  const h = harness('local', {
+    now: () => clock,
+    onTiming: (event: any) => timings.push(event),
+    translate: async () => {
+      clock = 1800;
+      return { text: 'Do not charge twice.' };
+    },
+    createTts: () => ({
+      async *synthesize() {
+        clock = 2100;
+        yield Buffer.alloc(480);
+      },
+      abort() {},
+    }),
+  });
+  h.source(1, '不要重复收费。', true, 1, 500);
+  await h.pipeline.finish();
+  assert.deepEqual(
+    timings.map((event) => [event.stage, event.at, event.basis]),
+    [
+      ['provider_endpoint_estimate', 520, 'provider_stream_estimate'],
+      ['asr_final', 1000, 'application_observed'],
+      ['section_ready', 1000, 'application_observed'],
+      ['translation_start', 1000, 'application_observed'],
+      ['translation_complete', 1800, 'application_observed'],
+      ['synthesis_start', 1800, 'application_observed'],
+      ['audio_first_sample', 2100, 'application_observed'],
+    ],
+  );
+  assert(
+    timings.every(
+      (event) =>
+        event.utteranceId === timings[0].utteranceId &&
+        event.sourceRevision === timings[0].sourceRevision &&
+        event.sessionEpoch === 1 &&
+        event.sourceIds[0] === 1,
+    ),
+  );
+  assert(!JSON.stringify(timings).includes('不要'));
+  assert(!JSON.stringify(timings).includes('charge'));
+  assert(!timings.some((event) => event.stage === 'playback_start'));
+  h.pipeline.abort();
+});
+
+test('long provisional source waits visibly without fabricating speech, while confirmed natural clauses start before speaker-block completion', async () => {
+  const h = harness();
+  h.source(1, '尚未完成'.repeat(60), false, 1);
+  await tick();
+  assert.equal(h.translated.length, 0);
+  assert.equal(h.spoken.length, 0);
+  assert(h.transcripts.at(-1).text.length > 200);
+  h.source(1, '第一段已经完成。', true, 2);
+  await tick();
+  await tick();
+  assert.equal(h.spoken.length, 1);
+  h.source(2, '第二段仍然说话', false);
+  await tick();
+  assert.equal(h.spoken.length, 1);
+  h.source(2, '第二段也已完成。', true, 2);
+  await h.pipeline.finish();
+  assert.equal(h.spoken.length, 2);
+  h.pipeline.abort();
+});
+
+test('phone current-source pipeline rejects non-Beijing selection before constructing any supplier clients', () => {
+  let constructed = 0;
+  assert.throws(
+    () =>
+      harness('local', {
+        config: { ...config, region: 'singapore' },
+        createAsr() {
+          constructed += 1;
+          throw new Error('must not run');
+        },
+      }),
+    /PLANB_PIPELINE_REGION_UNSUPPORTED/,
+  );
+  assert.equal(constructed, 0);
+});
+
+test('known history sentence prefixed to a new translation is rejected whole; no stripping, replay or retry', async () => {
+  let requests = 0;
+  const h = harness('local', {
+    translate: async () => {
+      requests += 1;
+      return {
+        text:
+          requests === 1
+            ? 'The appointment is June fifteenth.'
+            : 'The appointment is June fifteenth. Do not charge twice.',
+      };
+    },
+  });
+  h.source(1, '预约六月十五日。');
+  await tick();
+  await tick();
+  assert.deepEqual(h.spoken, ['The appointment is June fifteenth.']);
+  h.source(2, '不要重复收费。');
+  await assert.rejects(
+    h.pipeline.finish(),
+    /PLANB_CURRENT_TRANSLATION_HISTORY_REPLAY_SUSPECT/,
+  );
+  assert.equal(requests, 2);
+  assert.deepEqual(h.spoken, ['The appointment is June fifteenth.']);
+  assert.equal(
+    h.transcripts.filter((event) => event.kind === 'translation' && event.final)
+      .length,
+    1,
+  );
+  assert.deepEqual(h.failures, [
+    'PLANB_CURRENT_TRANSLATION_HISTORY_REPLAY_SUSPECT',
+  ]);
+});
+
+test('a speaker explicitly repeating historical source before a correction is preserved, even when translation begins with that old sentence', async () => {
+  let requests = 0;
+  const h = harness('local', {
+    translate: async () => {
+      requests += 1;
+      return {
+        text:
+          requests === 1
+            ? 'The appointment is June fifteenth.'
+            : 'The appointment is June fifteenth. Correction: June sixteenth, not June fifteenth.',
+      };
+    },
+  });
+  h.source(1, '预约六月十五日。');
+  await tick();
+  await tick();
+  h.source(2, '预约六月十五日。更正，是六月十六日，不是十五日。');
+  await h.pipeline.finish();
+  assert.equal(requests, 2);
+  assert.equal(h.spoken.length, 2);
+  assert.equal(
+    h.spoken[1],
+    'The appointment is June fifteenth. Correction: June sixteenth, not June fifteenth.',
+  );
+  assert.deepEqual(h.failures, []);
+  h.pipeline.abort();
+});
+
+test('withdrawing one ASR source retires every unexposed natural subsection and cannot request or speak the stale tail', async () => {
+  let release: () => void;
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const spoken: string[] = [];
+  const h = harness('local', {
+    createTts: () => ({
+      async *synthesize(text: string) {
+        spoken.push(text);
+        await blocked;
+        yield Buffer.alloc(480);
+      },
+      abort() {
+        release();
+      },
+    }),
+  });
+  h.source(1, 'Please do not cancel. Please do not cancel.');
+  await tick();
+  assert.equal(h.translated.length, 1);
+  h.source(1, '', true, 2);
+  release();
+  await h.pipeline.finish();
+  assert.equal(h.translated.length, 1);
+  assert.equal(spoken.length, 1);
+  assert.equal(h.audio.length, 0);
+  for (const kind of ['original', 'translation']) {
+    const tombstones = h.transcripts.filter(
+      (event) => event.kind === kind && event.final && event.text === '',
+    );
+    assert.equal(tombstones.length, 2);
+    assert.equal(new Set(tombstones.map((event) => event.utteranceId)).size, 2);
+  }
+  assert.deepEqual(h.failures, []);
+  h.pipeline.abort();
+});
+
+test('withdrawal freezes an already exposed subsection, clears every unexposed tail and removes that source from future TM', async () => {
+  let release: () => void;
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let calls = 0;
+  const h = harness('local', {
+    createTts: () => ({
+      async *synthesize() {
+        calls += 1;
+        if (calls === 2) await blocked;
+        yield Buffer.alloc(480);
+      },
+      abort() {
+        release();
+      },
+    }),
+  });
+  h.source(1, 'Please do not cancel. Please do not cancel.');
+  await tick();
+  await tick();
+  assert.equal(h.audio.length, 1);
+  assert.equal(h.translated.length, 2);
+  const firstId = h.transcripts.find(
+    (event) => event.kind === 'translation' && event.final,
+  ).utteranceId;
+  h.source(1, '', true, 2);
+  release();
+  await tick();
+  await tick();
+  assert.equal(h.audio.length, 1);
+  assert.equal(h.corrections.length, 1);
+  assert.equal(h.corrections[0].utteranceId, firstId);
+  assert.equal(h.corrections[0].audioExposed, true);
+  assert(
+    !h.transcripts.some(
+      (event) => event.utteranceId === firstId && event.text === '',
+    ),
+  );
+  assert(
+    h.transcripts.some(
+      (event) =>
+        event.kind === 'original' &&
+        event.final &&
+        event.text === '' &&
+        event.utteranceId !== firstId,
+    ),
+  );
+  h.source(2, '这是新的真实句子。');
+  await h.pipeline.finish();
+  assert.equal(h.translated.length, 3);
+  assert.equal((h.translated[2] as any).translationMemory.length, 0);
+  assert.equal(h.audio.length, 2);
+  h.pipeline.abort();
+});
+
+test('an exposed source withdrawn while audio is draining cannot resurrect translation memory on late completion', async () => {
+  let release: () => void;
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let calls = 0;
+  const h = harness('local', {
+    createTts: () => ({
+      async *synthesize() {
+        calls += 1;
+        yield Buffer.alloc(480);
+        if (calls === 1) await blocked;
+      },
+      abort() {
+        release();
+      },
+    }),
+  });
+  h.source(1, '这句话稍后撤回。');
+  await tick();
+  assert.equal(h.audio.length, 1);
+  h.source(1, '', true, 2);
+  h.source(2, '这是一句新的有效原文。');
+  release();
+  await h.pipeline.finish();
+  assert.equal(h.audio.length, 2);
+  assert.equal(h.corrections.length, 1);
+  assert.equal(h.corrections[0].audioExposed, true);
+  assert.equal(h.translated.length, 2);
+  assert.equal((h.translated[1] as any).translationMemory.length, 0);
+  assert.deepEqual(h.failures, []);
+  h.pipeline.abort();
+});
+
+test('withdrawal reentered by audio-completion observer cannot republish an exposed source into TM', async () => {
+  const h = harness('local', {
+    onAudioComplete: () => {
+      if (h.translated.length === 1) h.source(1, '', true, 2);
+    },
+  });
+  h.source(1, '观察者撤回这句。');
+  await tick();
+  await tick();
+  assert.equal(h.audio.length, 1);
+  h.source(2, '随后这句保持有效。');
+  await h.pipeline.finish();
+  assert.equal(h.translated.length, 2);
+  assert.equal((h.translated[1] as any).translationMemory.length, 0);
+  assert.equal(h.corrections.length, 1);
+  assert.equal(h.audio.length, 2);
+  assert.deepEqual(h.failures, []);
   h.pipeline.abort();
 });

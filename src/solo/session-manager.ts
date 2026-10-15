@@ -1428,6 +1428,26 @@ export class SessionManager extends EventEmitter {
             if (event)
               this.emit('event', { event: 'conversation', data: event });
           },
+          onPlanBTiming: (timing) => {
+            if (!this.liveAdmission(session)) return;
+            // Explicit metadata only. Provider objects, recognized text, model
+            // output, credentials and phone numbers never enter this event.
+            this.emit('event', {
+              event: 'translation-timing',
+              data: {
+                sessionId: session.view.id,
+                pipelineId: session.view.id,
+                role: timing.role,
+                utteranceId: timing.utteranceId,
+                sourceRevision: timing.sourceRevision,
+                sessionEpoch: timing.sessionEpoch,
+                stage: timing.stage,
+                at: timing.at,
+                basis: timing.basis,
+                actualPlaybackStartAt: null,
+              },
+            });
+          },
           onCaptionInputDiagnostic: (diagnostic) => {
             if (this.liveAdmission(session))
               this.emit('event', {

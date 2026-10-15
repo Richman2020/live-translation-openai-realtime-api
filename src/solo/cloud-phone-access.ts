@@ -47,6 +47,7 @@ const eventNames = new Set([
   'translation-provider',
   'translation-input',
   'translation-metric',
+  'translation-timing',
   'error',
 ]);
 

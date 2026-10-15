@@ -1,8 +1,24 @@
 # 项目进度与交接
 
-更新日期：2026-10-14。共享仓库：<https://github.com/Richman2020/live-translation-openai-realtime-api>。
+更新日期：2026-10-15。共享仓库：<https://github.com/Richman2020/live-translation-openai-realtime-api>。
 
 需求见 [PROJECT_BRIEF.md](PROJECT_BRIEF.md)，工作规则见 [AGENTS.md](AGENTS.md)，运行步骤见 [LOCAL_SETUP.md](LOCAL_SETUP.md)，后续执行入口见 [LOCAL_CODEX_HANDOFF.md](LOCAL_CODEX_HANDOFF.md)。
+
+## 最新：阿里 Plan B 电话集成离线完成，未推送/发布（2026-10-15）
+
+- 用户固定来源 `da3bfbf09a5580de268ad8a2c0e12e572c24f267`，附件SHA256 `707868f36894c54476d7e5886f4ee0f06d8157b0483cc1250e0a8917450bfb3d`；双清单67/67、完整source/Git443/443、摘录43/43及两补丁tree核验通过。bundle仅在新inspect clone恢复声明d7浅边界；未改原仓库shallow，不继承附件旧授权。PATCH_PREIMAGES只对b072，不用于覆盖当前开发。
+- 本轮开始时实际开发HEAD为eb10，da3b为其后代；从精确 `eb10bf98a2606eb476af5314fde02c243f741fbd` 建 `codex/ai-phone-aliyun-integration-20261015`、`/workspace/ai-phone-aliyun-integration-20261015`。选择性移植ASR alias修复及current-only/TM/guard思路到生产，不整树覆盖，不合入whole/试听runner/已消费锁和旧进度。最终集成完整SHA见本轮RECEIPT（与来源da3b区分）。原七工作树HEAD/未提交tracked内容/依赖链接前后保护；OpenAI、上下文字幕、A原型、试听执行器与备份保持，package/lock未改。
+- 中文→Fun-ASR zh→Qwen-MT英文→CosyVoice-v3-flash/loongandy_v3给对方；英文原声直通耳麦，独立Fun-ASR en→中文字幕，0中文TTS。北京固定模型，构造client前拒非北京；单通provider/voice冻结，错误不回退。OpenAI仍默认、Plan B关闭，本轮不恢复portal-test。
+- 当前raw独立为唯一user message，历史只通过官方tm_list已guard通过、本通同role、完整source-target配对（6对/1600字界限）；不发旧JSON context或虚构多轮。receipt绑定role/call/job/request/sourceIDs/rawhash/完整返回，冻结一次消费，TTS再次核对正文。JSON/解释/结构包装/已知完整历史前缀复读拒绝不净化续播；单一相同target不能判泄漏，保留同义/真实重复、同ASR自然子段和后续更正。保守history规则可能误拒，任意语义与准确性不能离线证明。
+- 原文partial持续显示，仅确定自然小节进入MT/流式音频；同方speaker块仅分组，不等整块发声。FIFO、marks背压、真实断线/挂断清理、身份/签名/Origin/owner/controller/单通限制保留；没有试听24秒/90秒/8次、金额或控制权倒计时进入生产。长期只有ASR partial仍等final，未宣称真实低延迟。
+- ASR选择移植已验证起点partial refinement/alias/final边界与脱敏metadata诊断，保留明确矛盾终态拒绝。新增真实SessionManager＋真实ASR/MT/TTS客户端＋shared phone transport的fake-wire E2E9项；另真实来源44条ASR scalar元数据顺序/修订＋明确合成文字，不冒称原始帧或真实听写。覆盖双向、数字否定/更正、JSON/说明/历史、真重复/旧事件、乱序尾段、挂断迟到停止、模拟超过三分钟不受试听限额。
+- 时序onPlanBTiming包含provider估计终点、ASR final、自然小节ready、MT start/complete、synthesis start/首PCM、实际shared入队、sealed全部matchingmarks排空，统一options.now时间轴。真实接收端播放开始不可观测，明确playback_start_unavailable/actualPlaybackStartAt=null；不以首包、send或mark冒充耳听。仅selected PlanB向runtime日志输出固定enum/有限时间/匿名UUID及受限句段ID；SSE新事件仍走原owner/call授权，不记录正文/号码/key/header/rawerror。
+- 独立流程审查发现并修复2项业务竞态：同ASR源多小节withdraw只撤首段；已exposed源withdraw后旧TTS完成remember复活TM。现撤所有未暴露小节/任务/字幕/TM，已暴露保持冻结快照+独立更正，sourceWithdrawn阻断后续记忆复活。修前红/修后绿双探针最终2/2；流程独立去重151/151通过。独立安全核心最终去重332通过（此前331，新增metadata场景后电话集成9/9独立复验），新增runtime组50/51的1个本地vendor404经prepare本地复制后cloud-service13/13复验闭合；不要将重叠执行次数或root全量相加冒称独立成绩。
+- **最终统一离线检查**：`npm test` **1867 total /1862 pass /5 Windows条件skip /0 fail/cancel**，相对eb10新增98项；typecheck、build、增量ESLint/Prettier及diff-check exit0。既有prepare:desktop只复制锁定SDK；无install。shared变更ESLint exit0保留cloud-service:174/:216两处父基线安全console warning（固定诊断）；未声称旧全仓no-plusplus等历史问题消失。
+- 失败证据保留：初E2E fake ASR alias超过已送样本/遗漏SSE choice.index被正确拒绝，修测试协议不放宽parser；初统一运行runtime1862pass/5skip但新metadata fixture不可达literal分支导致typecheck及nested-ternary lint，修仅测试if后重跑最终全量/类型/lint/格式通过。两处时序expected随新增stage完整更新、vendor404已准备资产解决。源码最终哈希与独立报告/命令日志绑定，不用附件405项代替本轮。
+- 2026-10-15 10:23北京时间仅只读指定Railway ai-phone-test：源完整d7、部署e90e8959-e8c8-4f9a-a8e5-6a069a25ef0f SUCCESS、staged=null。只读变量名：未列ALIYUN_BEIJING_API_KEY/ALIYUN_PLAN_B_REGION/CLOUD_PHONE_TRANSLATION_PROVIDER，没有该服务阿里配置证据；既有runtime/origin/callback等仅确认名字存在，未读取值。Codex环境密钥/网络不能当Railway配置完成。回退参考保留d7/e90及原OpenAI选择，不操作其他项目或portal-test。
+- 已有短中文来源核验保留：估计终点→PCM4114/3867ms拆项已核，但实际播放、英文ASR→中文、电话双向/长通话及新候选上线均未验收。声音沿用用户已认可配置，不重选声。本轮未调用模型/上传/真实电话/录音/推送/PR/CI/部署/账户或网络配置，旧OpenAI/阿里试听授权已消费。下一步dot核对固定集成SHA后，另安排仅ai-phone-test配置/CI/发布及用户本人试打。
+- 完整说明：[电话集成与限制](docs/ALIYUN_PHONE_INTEGRATION_2026-10-15.md)；[指定staging发布/回退与变量清单](docs/ALIYUN_PHONE_STAGING_PLAN_2026-10-15.md)。本轮审计目录 `/workspace/ai-phone-reference/aliyun-phone-integration-20261015`，可移植交付包包含完整source/增量/哈希/独立报告；不包含密钥或旧音频/已消费审批。
 
 ## 最新：阿里最小试听入口与离线预检完成；未调用（2026-10-14）
 

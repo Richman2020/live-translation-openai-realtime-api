@@ -3,6 +3,7 @@ import WebSocket from 'ws';
 import { createOpenAIWebSocket } from './openai-websocket';
 import { DEFAULT_TRANSCRIPTION_MODEL, validTranscriptionModel } from './config';
 import type { RemoteCaptionInputDiagnostic } from './remote-caption-client';
+import type { PlanBTimingEvent } from './aliyun-planb-types';
 
 export type TranslationRole = 'local' | 'remote';
 
@@ -141,6 +142,8 @@ export type TranslationBridgeOptions = {
   onMetric?: (metric: TranslationMetric) => void;
   onConnection?: (event: TranslationConnection) => void;
   onAudioDiagnostic?: (event: TranslationAudioDiagnostic) => void;
+  /** Selected Plan B only. Metadata, not speech content or audibility proof. */
+  onPlanBTiming?: (event: PlanBTimingEvent) => void;
   onCaptionState?: (event: CaptionState) => void;
   onCaptionInputDiagnostic?: (event: RemoteCaptionInputDiagnostic) => void;
   onProviderDiagnostic?: (event: TranslationProviderDiagnostic) => void;

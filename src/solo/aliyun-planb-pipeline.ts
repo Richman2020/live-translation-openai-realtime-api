@@ -1,7 +1,5 @@
 /* eslint-disable no-await-in-loop -- A single FIFO translator and audio queue preserve source order. */
 /* eslint-disable no-continue -- Stale immutable snapshots must be skipped without retry or replay. */
-import { performance } from 'node:perf_hooks';
-
 import { createCaptionSections, type CaptionSection } from './caption-sections';
 import { normalizeCaptionDisplay } from './caption-normalization';
 import type {
@@ -10,7 +8,14 @@ import type {
   CallContextSnapshot,
 } from './call-context';
 import { createAliyunPlanBAsrClient } from './aliyun-planb-asr';
-import { translateAliyunPlanB } from './aliyun-planb-translation';
+import {
+  translateAliyunCurrentSource,
+  type CurrentTranslationOptions,
+} from './aliyun-planb-current-translation';
+import {
+  createCurrentTranslationGuard,
+  type CurrentTranslationMemory,
+} from './aliyun-planb-translation-guard';
 import { createAliyunPlanBTts } from './aliyun-planb-tts';
 import type {
   AliyunPlanBConfig,
@@ -19,11 +24,11 @@ import type {
   PlanBAsrOptions,
   PlanBEvidence,
   PlanBSocketFactory,
-  PlanBTranslationOptions,
   PlanBTranslationResult,
   PlanBTtsClient,
   PlanBTtsOptions,
   PlanBUsage,
+  PlanBTimingEvent,
 } from './aliyun-planb-types';
 import type { TranscriptEvent, TranslationRole } from './translation-bridge';
 
@@ -60,9 +65,10 @@ export type AliyunPlanBPipelineOptions = {
   onUsage?: (event: PlanBUsage) => void;
   onEvidence?: (event: PlanBEvidence) => void;
   onCorrection?: (event: PlanBSourceCorrection) => void;
+  onTiming?: (event: PlanBTimingEvent) => void;
   createAsr?: (options: PlanBAsrOptions) => PlanBAsrClient;
   translate?: (
-    options: PlanBTranslationOptions,
+    options: CurrentTranslationOptions,
   ) => Promise<PlanBTranslationResult>;
   createTts?: (options: PlanBTtsOptions) => PlanBTtsClient;
   createWebSocket?: PlanBSocketFactory;
@@ -83,13 +89,20 @@ export type AliyunPlanBPipeline = {
 type SectionState = CaptionSection & {
   utteranceId: string;
   sequence: number;
+  sourceIds: number[];
+  asrFinalAt?: number;
   revision: number;
   translated?: string;
   audioExposed: boolean;
+  sourceWithdrawn?: boolean;
   done: boolean;
   translationRevision: number;
 };
-type SourceState = PlanBAsrSource & { sectionId?: string; sealed?: boolean };
+type SourceState = PlanBAsrSource & {
+  sectionId?: string;
+  sealed?: boolean;
+  finalObservedAt?: number;
+};
 type Job = {
   section: SectionState;
   text: string;
@@ -101,7 +114,6 @@ const MAX_RECORDS = 512;
 const MAX_JOBS = 24;
 const MAX_QUEUE_CHARS = 16000;
 const AUDIO_CHUNK_BYTES = 4800;
-const DRAFT_INTERVAL_MS = 350;
 const integer = (value: number) => Number.isSafeInteger(value) && value >= 0;
 const emptyContext = (): CallContextSnapshot => ({ version: 0, entries: [] });
 
@@ -109,6 +121,8 @@ const emptyContext = (): CallContextSnapshot => ({ version: 0, entries: [] });
 export function createAliyunPlanBPipeline(
   options: AliyunPlanBPipelineOptions,
 ): AliyunPlanBPipeline {
+  if (options.config.region !== 'beijing')
+    throw new Error('PLANB_PIPELINE_REGION_UNSUPPORTED');
   if (
     !['local', 'remote'].includes(options.role) ||
     typeof options.onTranscript !== 'function' ||
@@ -128,6 +142,8 @@ export function createAliyunPlanBPipeline(
   const records = new Map<string, SectionState>();
   const pending = new Map<string, Job>();
   const controllers = new Set<AbortController>();
+  const translationGuard = createCurrentTranslationGuard(options.role);
+  let translationMemory: CurrentTranslationMemory[] = [];
   let sequence = 0;
   let ttsSequence = 0;
   let translationSequence = 0;
@@ -137,9 +153,7 @@ export function createAliyunPlanBPipeline(
   let finishing = false;
   let running = false;
   let pause: ReturnType<typeof setTimeout> | undefined;
-  let draftWake: ReturnType<typeof setTimeout> | undefined;
   let sourceWait: ReturnType<typeof setTimeout> | undefined;
-  let lastDraftAt = -Infinity;
   let tts: PlanBTtsClient | undefined;
   let asr: PlanBAsrClient;
   let failure: string | undefined;
@@ -175,7 +189,6 @@ export function createAliyunPlanBPipeline(
     closed = true;
     failure = code;
     clearTimeout(pause);
-    clearTimeout(draftWake);
     clearTimeout(sourceWait);
     for (const controller of controllers) controller.abort();
     controllers.clear();
@@ -197,6 +210,7 @@ export function createAliyunPlanBPipeline(
     }
     sources.clear();
     records.clear();
+    translationMemory = [];
     evidence(code ? 'failed' : 'cancelled', code);
     if (code) notify(options.onError, code);
     finishDrain();
@@ -241,46 +255,99 @@ export function createAliyunPlanBPipeline(
   };
   const current = (job: Job) =>
     !closed && job.section.revision === job.revision;
+  const timing = (
+    record: SectionState,
+    stage: PlanBTimingEvent['stage'],
+    at: number,
+  ) => {
+    if (closed) return;
+    notify(options.onTiming, {
+      role: options.role,
+      utteranceId: record.utteranceId,
+      sourceRevision: record.revision,
+      sessionEpoch: 1,
+      sequence: record.sequence,
+      sourceIds: [...record.sourceIds],
+      stage,
+      at,
+      basis:
+        stage === 'provider_endpoint_estimate'
+          ? 'provider_stream_estimate'
+          : 'application_observed',
+    });
+  };
   const execute = async (job: Job, controller: AbortController) => {
     const record = job.section;
     translationSequence += 1;
-    const context = job.final
-      ? options.getContext?.({
-          beforeAt: record.at,
-          observedBeforeAt: Math.max(now(), record.at),
-          allowLateFinal: true,
-        }) || job.context
-      : job.context;
-    const result = await (options.translate || translateAliyunPlanB)({
+    const requestSequence = translationSequence;
+    const boundSource = {
+      sequence: record.sequence,
+      sourceIds: [...record.sourceIds],
+      raw: job.text,
+    };
+    const memory = translationMemory.filter((pair) =>
+      pair.sourceIds.every((id) => id < record.sourceIds[0]),
+    );
+    // Current raw text is the only user message. Prior validated pairs use the
+    // supplier's documented tm_list; generic raw context is ASR-only.
+    timing(record, 'translation_start', now());
+    if (!current(job) || controller.signal.aborted) return;
+    const result = await (options.translate || translateAliyunCurrentSource)({
       config: options.config,
       role: options.role,
       text: job.text,
-      context,
-      sequence: translationSequence,
+      context: emptyContext(),
+      sequence: requestSequence,
+      currentSourceIds: [...record.sourceIds],
+      translationMemory: memory,
+      translationGuard,
       signal: controller.signal,
       fetch: options.fetch,
       timeoutMs: options.timeoutMs,
-      onDelta: (text) => {
-        if (!current(job) || controller.signal.aborted) return;
-        record.translationRevision += 1;
-        emit(record, 'translation', text, false);
-      },
       onUsage: options.onUsage,
       onEvidence: options.onEvidence,
     });
     if (!current(job) || controller.signal.aborted) return;
-    if (
-      !result ||
-      typeof result.text !== 'string' ||
-      !result.text.trim() ||
-      result.text.length > 16000
-    )
+    if (!result || typeof result.text !== 'string')
       throw new Error('PLANB_TRANSLATION_INVALID_RESULT');
-    record.translated = result.text;
+    const raw = 'rawText' in result ? result.rawText : result.text;
+    if (typeof raw !== 'string')
+      throw new Error('PLANB_TRANSLATION_INVALID_RESULT');
+    // Never unpack JSON, strip explanations or speak an unbound model result.
+    // The guard is deliberately independent of the transport implementation.
+    const receipt = translationGuard.issue(
+      boundSource,
+      requestSequence,
+      raw,
+      memory,
+    );
+    const accepted = translationGuard.consume(receipt, boundSource);
+    const remember = () => {
+      // An exposed voice may drain after its source was withdrawn. Never let
+      // that late completion resurrect a retired source/target pair in TM.
+      if (record.sourceWithdrawn) return;
+      const pair = translationGuard.toMemory(receipt, boundSource);
+      translationMemory = translationMemory.filter(
+        (previous) =>
+          !previous.sourceIds.some((id) => pair.sourceIds.includes(id)),
+      );
+      translationMemory.push(pair);
+      while (
+        translationMemory.length > 6 ||
+        translationMemory.reduce(
+          (sum, item) => sum + item.source.length + item.target.length,
+          0,
+        ) > 1600
+      )
+        translationMemory.shift();
+    };
+    record.translated = accepted.ttsText;
     record.translationRevision += 1;
-    emit(record, 'translation', result.text, job.final);
-    if (!job.final) return;
+    timing(record, 'translation_complete', now());
+    emit(record, 'translation', accepted.ttsText, true);
+    if (closed || !current(job) || controller.signal.aborted) return;
     if (options.role === 'remote') {
+      remember();
       record.done = true;
       return;
     }
@@ -298,14 +365,17 @@ export function createAliyunPlanBPipeline(
     };
     let generated = 0;
     ttsSequence += 1;
+    timing(record, 'synthesis_start', now());
+    if (!current(job) || controller.signal.aborted) return;
     for await (const pcm of tts.synthesize(
-      result.text,
+      accepted.ttsText,
       ttsSequence,
       controller.signal,
     )) {
       if (!current(job) || controller.signal.aborted) return;
       if (!Buffer.isBuffer(pcm) || !pcm.length || pcm.length % 2)
         throw new Error('PLANB_TTS_INVALID_PCM');
+      if (!generated) timing(record, 'audio_first_sample', now());
       for (
         let offset = 0;
         offset < pcm.length && current(job);
@@ -326,6 +396,7 @@ export function createAliyunPlanBPipeline(
     notify(options.onAudioComplete, metadata);
     await acknowledged;
     if (!current(job)) return;
+    remember();
     record.done = true;
   };
   const pump = async () => {
@@ -358,26 +429,22 @@ export function createAliyunPlanBPipeline(
         }
         clearTimeout(sourceWait);
         sourceWait = undefined;
-        const draftWait = DRAFT_INTERVAL_MS - (performance.now() - lastDraftAt);
-        if (!job.final && !finishing && draftWait > 0) {
-          clearTimeout(draftWake);
-          draftWake = setTimeout(() => {
-            pump().catch(() => stop('PLANB_PIPELINE_QUEUE_FAILED'));
-          }, draftWait);
-          draftWake.unref?.();
-          break;
-        }
         pending.delete(id);
         if (!current(job)) continue;
-        if (!job.final) lastDraftAt = performance.now();
         const controller = new AbortController();
         controllers.add(controller);
         active = { job, controller };
         try {
           await execute(job, controller);
-        } catch {
-          if (!closed && !controller.signal.aborted && current(job))
-            stop('PLANB_PIPELINE_PROVIDER_FAILED');
+        } catch (error) {
+          if (!closed && !controller.signal.aborted && current(job)) {
+            const code =
+              error instanceof Error &&
+              /^PLANB_CURRENT_TRANSLATION_[A-Z_]+$/u.test(error.message)
+                ? error.message
+                : 'PLANB_PIPELINE_PROVIDER_FAILED';
+            stop(code);
+          }
         } finally {
           controllers.delete(controller);
           active = undefined;
@@ -389,7 +456,9 @@ export function createAliyunPlanBPipeline(
     }
   };
   const withdraw = (record: SectionState) => {
-    if (closed || record.audioExposed) return;
+    if (closed) return;
+    record.sourceWithdrawn = true;
+    if (record.audioExposed) return;
     if (active?.job.section === record) active.controller.abort();
     pending.delete(record.id);
     record.text = '';
@@ -451,6 +520,7 @@ export function createAliyunPlanBPipeline(
           final: false,
           utteranceId: `planb_${options.role}_${update.id}`,
           sequence,
+          sourceIds: [],
           revision: 0,
           translationRevision: 0,
           audioExposed: false,
@@ -470,6 +540,31 @@ export function createAliyunPlanBPipeline(
       const origin =
         originSequence === undefined ? undefined : sources.get(originSequence);
       if (origin && !origin.sectionId) origin.sectionId = update.id;
+      record.sourceIds = [
+        ...new Set([
+          ...record.sourceIds,
+          ...[...sources.values()]
+            .filter(
+              (source) =>
+                source.sectionId === update.id ||
+                (source.sectionId &&
+                  update.id.startsWith(`caption:${source.sectionId}:`)),
+            )
+            .map((source) => source.sequence),
+          ...(originSequence === undefined ? [] : [originSequence]),
+        ]),
+      ].sort((a, b) => a - b);
+      if (update.final) {
+        record.asrFinalAt = Math.max(
+          ...record.sourceIds.map(
+            (id) => sources.get(id)?.finalObservedAt ?? now(),
+          ),
+        );
+        if (record.sourceEndAt !== undefined)
+          timing(record, 'provider_endpoint_estimate', record.sourceEndAt);
+        timing(record, 'asr_final', record.asrFinalAt);
+        timing(record, 'section_ready', now());
+      }
       for (const source of sources.values()) {
         if (!source.sealed && source.sectionId === update.id) {
           if (update.final) source.sealed = true;
@@ -492,24 +587,16 @@ export function createAliyunPlanBPipeline(
           : { sourceEndAt: record.sourceEndAt }),
       });
       if (closed) return;
-      const context =
-        options.getContext?.({
-          beforeAt: record.at,
-          observedBeforeAt: Math.max(now(), record.at),
-          allowLateFinal: true,
-        }) || emptyContext();
-      // Only provisional work may be superseded; a confirmed voice queue is
-      // never cancelled merely because the same speaker continues speaking.
-      if (active && active.job.section === record && !active.job.final)
-        active.controller.abort();
+      // Draft raw captions remain immediate. Only a confirmed natural section
+      // becomes a paid translation request or a candidate for speech.
+      if (!record.final) continue;
       pending.set(record.id, {
         section: record,
         text: record.text,
         revision: record.revision,
-        final: record.final,
-        context,
+        final: true,
+        context: emptyContext(),
       });
-      if (record.final) clearTimeout(draftWake);
       if (
         pending.size > MAX_JOBS ||
         [...pending.values()].reduce(
@@ -563,25 +650,53 @@ export function createAliyunPlanBPipeline(
       }
       if (previous.sealed) {
         if (event.text !== previous.text) {
-          const record = previous.sectionId && records.get(previous.sectionId);
-          if (record && !record.audioExposed && !event.text.trim()) {
-            withdraw(record);
-            sources.set(event.sequence, { ...previous, ...event });
-            pump().catch(() => stop('PLANB_PIPELINE_QUEUE_FAILED'));
-            return;
+          // A single ASR source may own several natural subsections. Retiring
+          // only its first visible section would leave stale tail jobs alive.
+          const affected = [...records.values()].filter((record) =>
+            record.sourceIds.includes(event.sequence),
+          );
+          if (!event.text.trim()) {
+            // Withdrawn source/target pairs must not become future TM, even if
+            // a previously exposed subsection remains a frozen audio snapshot.
+            translationMemory = translationMemory.filter(
+              (pair) => !pair.sourceIds.includes(event.sequence),
+            );
           }
-          notify(options.onCorrection, {
-            role: options.role,
-            sourceSequence: event.sequence,
-            sourceRevision: event.revision,
-            utteranceId: record?.utteranceId || `planb_${options.role}_retired`,
-            rawText: event.text,
-            frozenText: record?.text || previous.text,
-            audioExposed: record?.audioExposed || false,
-          });
-          evidence('correction');
+          for (const record of affected) {
+            if (closed) break;
+            if (!event.text.trim()) record.sourceWithdrawn = true;
+            if (!record.audioExposed && !event.text.trim()) {
+              withdraw(record);
+            } else {
+              notify(options.onCorrection, {
+                role: options.role,
+                sourceSequence: event.sequence,
+                sourceRevision: event.revision,
+                utteranceId: record.utteranceId,
+                rawText: event.text,
+                frozenText: record.text,
+                audioExposed: record.audioExposed,
+              });
+              evidence('correction');
+            }
+          }
+          if (!affected.length) {
+            notify(options.onCorrection, {
+              role: options.role,
+              sourceSequence: event.sequence,
+              sourceRevision: event.revision,
+              utteranceId: `planb_${options.role}_retired`,
+              rawText: event.text,
+              frozenText: previous.text,
+              audioExposed: false,
+            });
+            evidence('correction');
+          }
         }
-        sources.set(event.sequence, { ...previous, ...event });
+        if (!closed) {
+          sources.set(event.sequence, { ...previous, ...event });
+          pump().catch(() => stop('PLANB_PIPELINE_QUEUE_FAILED'));
+        }
         return;
       }
     } else {
@@ -599,7 +714,11 @@ export function createAliyunPlanBPipeline(
       sections.register(`source_${event.sequence}`, event.at);
     }
     clearTimeout(pause);
-    sources.set(event.sequence, { ...previous, ...event });
+    sources.set(event.sequence, {
+      ...previous,
+      ...event,
+      ...(event.final ? { finalObservedAt: now() } : {}),
+    });
     try {
       receiveSections(
         sections.update(
