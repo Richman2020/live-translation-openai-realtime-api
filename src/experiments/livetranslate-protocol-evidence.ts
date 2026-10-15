@@ -44,6 +44,8 @@ export function describeLiveTranslateProtocolEvidence(input: ProtocolEvidence) {
   else if (fatal?.validationPath === 'transport.finish_timeout') classification = 'session_tail_timeout';
   else if (fatal?.validationPath === 'transport.send') classification = 'client_send_failed_or_unavailable';
   else if (fatal?.validationPath === 'internal.handler') classification = 'local_handler_failure';
+  else if (input.errorCode === 'LIVETRANSLATE_CLONE_CONFIRMATION_MISSING')
+    classification = 'voice_clone_disabled_confirmation_missing';
   else if (fatal?.validationPath.startsWith('session.')) classification = 'session_configuration_or_identity_rejected';
   else if (fatal?.validationPath.startsWith('frame') || fatal?.validationPath === 'json') classification = 'incoming_frame_or_json_rejected';
   else if (fatal) classification = 'typed_protocol_validation_rejected';
@@ -52,6 +54,10 @@ export function describeLiveTranslateProtocolEvidence(input: ProtocolEvidence) {
     classification = 'protocol_finished_observed';
   return {
     classification,
+    configurationStopReason: classification === 'voice_clone_disabled_confirmation_missing'
+      ? '缺少复刻关闭确认' : null,
+    voiceCloneDisabledConfirmation: classification === 'voice_clone_disabled_confirmation_missing'
+      ? 'unknown_missing_echo' : 'see_observed_configuration_if_any',
     underlyingRemoteCauseEstablished: false,
     rawPayloadRetention: events.length || diagnostics.length ? 'redacted_schema_only' : 'not_captured',
     exactValidation: fatal ?? null,

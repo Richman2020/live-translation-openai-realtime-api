@@ -1,5 +1,9 @@
 # 项目进度与交接
 
+## 2026-10-15 最新：官方3.8完整示例离线核验
+
+在独立试听候选上补官方原样与人工派生测试，校准嵌套字段路径；缺复刻关闭回显使用专用本地诊断，仍在ready前停止、零音频。response.created空output允许创建、仍须完成清尾。14项新用例及关联回归共158项通过，网络保护零真实尝试；现有编译器缺失，未装依赖、未跑完整tsc。官方示例不证明Aiden/clone=false回显或所有3.8事件全局单索引。旧失败与spent锁保留，不新连接/付费/推送/部署。见[兼容性核验](docs/LIVETRANSLATE_OFFICIAL_38_COMPATIBILITY_2026-10-15.md)。
+
 更新日期：2026-10-15。共享仓库：<https://github.com/Richman2020/live-translation-openai-realtime-api>。
 
 需求见 [PROJECT_BRIEF.md](PROJECT_BRIEF.md)，工作规则见 [AGENTS.md](AGENTS.md)，运行步骤见 [LOCAL_SETUP.md](LOCAL_SETUP.md)，后续执行入口见 [LOCAL_CODEX_HANDOFF.md](LOCAL_CODEX_HANDOFF.md)。

@@ -286,7 +286,7 @@ test('Aiden input remains fenced until a complete server configuration acknowled
   f.client.abort();
 });
 
-test('Tina, absent voice, clone uncertainty and wrong language are rejected with safe evidence and zero input', async () => {
+test('Tina, absent voice, clone uncertainty and wrong language stop with safe evidence and zero input', async () => {
   const patches = [
     (session: any) => ({ audio: { ...session.audio, output: { ...session.audio.output, voice: 'Tina' } } }),
     (session: any) => ({ audio: { ...session.audio, output: { ...session.audio.output, voice: undefined } } }),
@@ -296,9 +296,12 @@ test('Tina, absent voice, clone uncertainty and wrong language are rejected with
   ];
   for (const patch of patches) {
     const f = fixture();
+    const sessionPatch = patch(f.session());
+    const expected = Object.hasOwn(sessionPatch, 'enable_voice_clone') && sessionPatch.enable_voice_clone === undefined
+      ? /CLONE_CONFIRMATION_MISSING/ : /CONFIGURATION_REJECTED/;
     // eslint-disable-next-line no-await-in-loop -- Each rejected configuration gets one isolated fake socket.
-    await assert.rejects(f.start(patch(f.session())), /CONFIGURATION_REJECTED/);
-    assert.throws(() => f.client.append(Buffer.alloc(320)), /CONFIGURATION_REJECTED/);
+    await assert.rejects(f.start(sessionPatch), expected);
+    assert.throws(() => f.client.append(Buffer.alloc(320)), expected);
     assert.equal(f.socket.sent.filter((event) => event.type === 'input_audio_buffer.append').length, 0);
     assert.equal(f.addresses.length, 1);
     assert.equal(f.sessionConfigurations.length, 1);
@@ -334,8 +337,10 @@ test('changed model, voice, clone, format or target is rejected before audio inp
     { translation: { language: 'zh' } },
   ]) {
     const f = fixture();
+    const expected = Object.hasOwn(patch, 'enable_voice_clone') && patch.enable_voice_clone === undefined
+      ? /CLONE_CONFIRMATION_MISSING/ : /CONFIGURATION_REJECTED/;
     // eslint-disable-next-line no-await-in-loop -- Each rejected ACK has a separate fake transport.
-    await assert.rejects(f.start(patch), /CONFIGURATION_REJECTED/);
+    await assert.rejects(f.start(patch), expected);
     assert.equal(f.socket.terminated, 1);
     assert.equal(f.addresses.length, 1);
     assert.equal(f.audio.length, 0);

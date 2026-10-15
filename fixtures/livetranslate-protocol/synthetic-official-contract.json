@@ -1184,7 +1184,7 @@
       "id": "clone-missing",
       "source": "synthetic_official_contract",
       "evidenceBasis": "manually_constructed_not_captured_provider_payload",
-      "mutation": "negative_configuration",
+      "mutation": "missing_confirmation_not_supplier_rejection_or_clone_enabled",
       "actions": [
         {
           "kind": "open"
@@ -1276,7 +1276,7 @@
         }
       ],
       "expected": {
-        "fatalCode": "LIVETRANSLATE_CONFIGURATION_REJECTED",
+        "fatalCode": "LIVETRANSLATE_CLONE_CONFIRMATION_MISSING",
         "fatalPath": "session.enable_voice_clone",
         "ready": false,
         "appendCount": 0,

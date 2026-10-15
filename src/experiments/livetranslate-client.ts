@@ -754,7 +754,13 @@ export function createLiveTranslateClient(
       if (closed()) return;
       if (rejected) {
         const [, validationPath, expected, actual] = rejected;
-        fail('LIVETRANSLATE_CONFIGURATION_REJECTED', undefined, undefined, { validationPath, expected, actual });
+        // An absent echo supplies no evidence about whether cloning is enabled.
+        // Preserve the strict gate, but distinguish missing confirmation from
+        // an explicit contradictory ACK or a provider error event.
+        const code = validationPath === 'session.enable_voice_clone' && actual === undefined
+          ? 'LIVETRANSLATE_CLONE_CONFIRMATION_MISSING'
+          : 'LIVETRANSLATE_CONFIGURATION_REJECTED';
+        fail(code, undefined, undefined, { validationPath, expected, actual });
         return;
       }
       clearTimeout(timer);

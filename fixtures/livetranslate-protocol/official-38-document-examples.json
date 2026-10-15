@@ -1,0 +1,211 @@
+{
+  "schema_version": 1,
+  "provenance": "official_document_excerpt_not_provider_capture",
+  "source_url": "https://help.aliyun.com/zh/model-studio/live-translator-server-events",
+  "prior_tool_ref": "turn599740view0",
+  "transcription_only": true,
+  "new_network_requests": 0,
+  "new_model_connections": 0,
+  "cache_source": "此前 functions.store('officialdocopen') / officialdocdetails2 / officialdocdetails3 缓存的公开web工具响应；本次仅读取现有缓存和本地文件，未重新抓取。",
+  "raw_source_html_saved": false,
+  "raw_source_html_gap": "此前尝试通过环境授权代理读取公开帮助页HTML时收到403，因此没有本地HTML快照。现有缓存为web工具提供的带行号页面文本，不能宣称源HTML逐字节快照。",
+  "transcription_transform": "从缓存文本移除工具L<n>:行号前缀及Markdown反引号围栏；保留JSON内原值，不填入本地Aiden或关闭复刻要求。raw_json保留缓存示例的原格式，event为同一JSON的解析结果。",
+  "examples": [
+    {
+      "event_type": "session.updated",
+      "applicability": "官方明确标注适用于 qwen3.8-livetranslate-flash-realtime 的专属示例",
+      "source_line_start": 130,
+      "source_line_end": 169,
+      "raw_json": "{\n      \"event_id\": \"event_example\",\n      \"type\": \"session.updated\",\n      \"session\": {\n        \"id\": \"sess_example\",\n        \"object\": \"realtime.session\",\n        \"model\": \"qwen3.8-livetranslate-flash-realtime\",\n        \"input_modalities\": [\n          \"audio\"\n        ],\n        \"output_modalities\": [\n          \"text\",\n          \"audio\"\n        ],\n        \"audio\": {\n          \"input\": {\n            \"format\": {\n              \"type\": \"pcm\",\n              \"sample_rate\": 16000\n            },\n            \"turn_detection\": {\n              \"type\": \"speaker_detection\",\n              \"threshold\": 0.5,\n              \"silence_duration_ms\": 1000\n            }\n          },\n          \"output\": {\n            \"format\": {\n              \"type\": \"pcm\",\n              \"sample_rate\": 24000\n            },\n            \"voice\": \"Tina\"\n          }\n        },\n        \"translation\": {\n          \"language\": \"en\"\n        }\n      }\n    }",
+      "event": {
+        "event_id": "event_example",
+        "type": "session.updated",
+        "session": {
+          "id": "sess_example",
+          "object": "realtime.session",
+          "model": "qwen3.8-livetranslate-flash-realtime",
+          "input_modalities": [
+            "audio"
+          ],
+          "output_modalities": [
+            "text",
+            "audio"
+          ],
+          "audio": {
+            "input": {
+              "format": {
+                "type": "pcm",
+                "sample_rate": 16000
+              },
+              "turn_detection": {
+                "type": "speaker_detection",
+                "threshold": 0.5,
+                "silence_duration_ms": 1000
+              }
+            },
+            "output": {
+              "format": {
+                "type": "pcm",
+                "sample_rate": 24000
+              },
+              "voice": "Tina"
+            }
+          },
+          "translation": {
+            "language": "en"
+          }
+        }
+      },
+      "field_table_source_line": 128,
+      "field_table_raw": "event_id`string`本次事件唯一标识符。type`string`事件类型，固定为`session.updated`。session`object`会话的配置。属性id`string`会话的唯一标识符。object`string`固定为`realtime.session`。model`string`使用的模型。input_modalities`array`适用于 `qwen3.8-livetranslate-flash-realtime`。输入模态，例如 `[\"audio\"]`。output_modalities`array`适用于 `qwen3.8-livetranslate-flash-realtime`。输出模态：`[\"text\"]` 或 `[\"text\", \"audio\"]`。audio`object`适用于 `qwen3.8-livetranslate-flash-realtime`。音频输入与输出配置。属性input.format`object`输入格式。`type` 默认值为 `pcm`，`sample_rate` 默认值为 `16000`（Hz）。input.turn_detection`object`断句配置。默认 `type` 为 `speaker_detection`，`threshold` 为 `0.5`，`silence_duration_ms` 为 `1000`。output.format`object`输出格式。`type` 默认值为 `pcm`，`sample_rate` 默认值为 `24000`（Hz）。output.voice`string`输出音色，默认值为 `Tina`。modalities`array`适用于 `qwen3.5-livetranslate-flash-realtime` 等模型。模型输出模态设置。voice`string`适用于 `qwen3.5-livetranslate-flash-realtime` 等模型。模型生成音频的音色。sample_rate`integer`（可选）适用于 `qwen3.5-livetranslate-flash-realtime` 等模型。输入音频的采样率。input_audio_format`string`适用于 `qwen3.5-livetranslate-flash-realtime` 等模型。输入音频的格式，固定为`pcm`。output_audio_format`string`适用于 `qwen3.5-livetranslate-flash-realtime` 等模型。输出音频的格式，固定为`pcm`。input_audio_transcription`object`适用于 `qwen3.5-livetranslate-flash-realtime` 等模型。输入音频转录配置。仅在会话配置了`input_audio_transcription.model`参数时返回。属性model`string`语音识别模型。language`string`设置的语音识别语种。turn_detection`object`适用于 `qwen3.5-livetranslate-flash-realtime` 等模型。VAD（语音活动检测）配置。Manual 模式下（客户端在`session.update`中将该参数设为`null`）不返回此字段。属性type`string`VAD 类型，固定为`server_vad`。threshold`float`VAD 检测灵敏度。prefix_padding_ms`integer`语音开始前保留的音频时长（毫秒），避免丢失语音起始部分。silence_duration_ms`integer`语音结束后需保持静音的最短时长（毫秒），超过该时长即判定语音结束。create_response`boolean`VAD 检测到语音结束后，是否自动触发翻译响应。interrupt_response`boolean`VAD 检测到新一轮语音开始时，是否打断当前正在生成的翻译响应。translation`object`（可选）翻译配置。属性language`string`（可选）设置的翻译目标语种。corpus`object`（可选）热词配置，用于提升特定词汇的翻译准确性。属性corpus.phrases`object`（可选）热词映射表。key 为源语言词汇，value 为目标语言对应翻译。enable_voice_clone`boolean`是否启用声音复刻。voice_clone_options`object`声音复刻控制参数，仅在`enable_voice_clone`为`true`时返回。属性frequency`string`音色复刻频率。  | 适用于 `qwen3.8-livetranslate-flash-realtime`。",
+      "important_absences": [
+        "session.enable_voice_clone",
+        "session.voice",
+        "session_id"
+      ],
+      "notes": "原样示例音色Tina；未出现enable_voice_clone，不能补成false。缺回显、默认音色等是否触发停止属于本次用户门控，与示例是否有效分开。"
+    },
+    {
+      "event_type": "response.created",
+      "applicability": "LiveTranslate服务端共有事件章节；示例未另标精确模型，不能声称这是实际3.8返回样本",
+      "source_line_start": 239,
+      "source_line_end": 256,
+      "raw_json": "{\n        \"event_id\": \"event_L8hHVI5jYis6BzAjnPWJh\",\n        \"type\": \"response.created\",\n        \"response\": {\n            \"id\": \"resp_P79OOMs8LnrXVpiIHUCKR\",\n            \"object\": \"realtime.response\",\n            \"conversation_id\": \"conv_UFClXtYkRkFXrs48y8pmK\",\n            \"status\": \"in_progress\",\n            \"modalities\": [\n                \"text\",\n                \"audio\"\n            ],\n            \"voice\": \"Cherry\",\n            \"output_audio_format\": \"pcm16\",\n            \"output\": []\n        }\n    }",
+      "event": {
+        "event_id": "event_L8hHVI5jYis6BzAjnPWJh",
+        "type": "response.created",
+        "response": {
+          "id": "resp_P79OOMs8LnrXVpiIHUCKR",
+          "object": "realtime.response",
+          "conversation_id": "conv_UFClXtYkRkFXrs48y8pmK",
+          "status": "in_progress",
+          "modalities": [
+            "text",
+            "audio"
+          ],
+          "voice": "Cherry",
+          "output_audio_format": "pcm16",
+          "output": []
+        }
+      },
+      "field_table_source_lines": [
+        232,
+        233,
+        234,
+        235,
+        236,
+        237
+      ],
+      "field_table_raw": "event_id`string`本次事件唯一标识符。type`string`事件类型，固定为`response.created`。response`object`响应对象。属性id `string`响应的唯一标识符。conversation_id `string`当前会话的唯一标识符。object `string`对象类型，此事件下固定为`realtime.response`。status `string`响应状态，取值范围：\n  * `completed`（已完成）\n  * `failed`（失败）\n  * `in_progress`（进行中）\n  * `incomplete`（不完整）\nmodalities `array`响应的模态。voice `string`模型生成音频的音色。output_audio_format`string`输出音频的格式。output `string`此事件下目前为空。  |",
+      "notes": "示例response.output是空数组；示例voice=Cherry，不能改成Aiden后仍称官方原样；表将output写为string而示例为[]，应记录文档自相类型差异。"
+    }
+  ],
+  "index_contract_excerpts": [
+    {
+      "event_type": "response.text.delta",
+      "applicability": "明确3.8",
+      "prior_tool_ref": "turn599740view0",
+      "source_lines": [
+        309,
+        310
+      ],
+      "raw": "适用于 `qwen3.8-livetranslate-flash-realtime`。 仅输出文本时，返回译文的新增文本片段。\nevent_id`string`事件唯一标识符。type`string``response.text.delta`。response_id`string`响应 ID。item_id`string`消息 ID。output_index`integer`输出项索引。content_index`integer`内容片段索引。delta`string`本次新增的文本片段。按接收顺序累加，不覆盖已收到的文本。  |",
+      "finding": "表仅说明output_index/content_index为索引，示例为0；没有写固定0。"
+    },
+    {
+      "event_type": "response.text.done",
+      "applicability": "共有事件",
+      "prior_tool_ref": "turn599740view0",
+      "source_lines": [
+        340,
+        345
+      ],
+      "raw": "## response.text.done\n\n当输出模态仅包含文本，且模型生成的文本结束时，服务端返回此事件。\n\n> 当响应中断、不完整或取消时，服务端也会返回此事件。\nevent_id`string`本次事件唯一标识符。type`string`事件类型，固定为`response.text.done`。response_id`string`响应的唯一标识符。item_id`string`消息项的唯一标识符。output_index`integer`目前固定为 0。content_index`integer`目前固定为 0。text `string`模型输出的完整文本。  |",
+      "finding": "表写output_index/content_index目前固定0。"
+    },
+    {
+      "event_type": "response.audio.delta",
+      "applicability": "共有音频事件",
+      "prior_tool_ref": "turn599740view0",
+      "source_lines": [
+        357,
+        360
+      ],
+      "raw": "## response.audio.delta\n\n当输出模态包含音频，且模型增量生成新的音频数据时，服务端将返回此事件。\nevent_id`string`本次事件唯一标识符。type`string`事件类型，固定为`response.audio.delta`。response_id`string`响应的唯一标识符。item_id`string`消息项唯一标识符。output_indexinteger目前固定为 0。content_index`integer`目前固定为 0。delta `string`模型增量输出的音频数据，使用Base64编码。  |",
+      "finding": "表写output_index/content_index目前固定0。"
+    },
+    {
+      "event_type": "response.audio.done",
+      "applicability": "共有音频事件",
+      "prior_tool_ref": "turn599740view0",
+      "source_lines": [
+        372,
+        379
+      ],
+      "raw": "## response.audio.done\n\n当输出模态包含音频，且模型生成音频结束时，服务端返回此事件。\n\n> 当响应中断、不完整或取消时，服务端也会返回此事件。\n\n> 该事件不返回完整音频数据。\nevent_id`string`本次事件唯一标识符。type`string`事件类型，固定为`response.audio.done`。response_id`string`响应的唯一标识符。item_id`string`消息项唯一标识符。output_index`integer`目前固定为 0。content_index`integer`目前固定为 0。  |",
+      "finding": "表写output_index/content_index目前固定0；中断、不完整或取消也可能有done。"
+    },
+    {
+      "event_type": "conversation.item.input_audio_transcription.delta",
+      "applicability": "明确3.8",
+      "prior_tool_ref": "turn170807view0",
+      "source_lines": [
+        461,
+        465
+      ],
+      "raw": "## conversation.item.input_audio_transcription.delta\n\n适用于 `qwen3.8-livetranslate-flash-realtime`。 返回输入语音的原文识别增量。\n\nevent_id`string`事件唯一标识符。type`string``conversation.item.input_audio_transcription.delta`。item_id`string`消息 ID。content_index`integer`内容片段索引。delta`string`本次新增的文本片段。按接收顺序累加，不覆盖已收到的文本。  |",
+      "finding": "表仅说明content_index为索引，示例0。"
+    },
+    {
+      "event_type": "conversation.item.input_audio_transcription.completed",
+      "applicability": "共有ASR事件",
+      "prior_tool_ref": "turn170807view0",
+      "source_lines": [
+        501,
+        505
+      ],
+      "raw": "## conversation.item.input_audio_transcription.completed\n\n当配置了`input_audio_transcription.model`参数时，语音识别完成后服务端会返回此事件，包含最终的完整识别结果。\n\nevent_id`string`本次事件唯一标识符。type`string`事件类型，固定为`conversation.item.input_audio_transcription.completed`。item_id`string`消息项唯一标识符。content_index`integer`目前固定为 0。transcript`string`完整的语音识别结果（源语言原文）。language`string`检测到的源语种。emotion`string`被识别音频的情感。支持的情感如下：",
+      "finding": "表写content_index目前固定0。"
+    },
+    {
+      "event_type": "response.audio_transcript.delta",
+      "applicability": "明确3.8",
+      "prior_tool_ref": "turn791746view0",
+      "source_lines": [
+        542,
+        545
+      ],
+      "raw": "## response.audio_transcript.delta\n\n适用于 `qwen3.8-livetranslate-flash-realtime`。输出文本和音频时，返回译文的新增文本片段。\nevent_id`string`事件唯一标识符。type`string``response.audio_transcript.delta`。response_id`string`响应 ID。item_id`string`消息 ID。output_index`integer`输出项索引。content_index`integer`内容片段索引。delta`string`本次新增的文本片段。按接收顺序累加，不覆盖已收到的文本。  |",
+      "finding": "表仅说明output_index/content_index为索引，示例0。"
+    },
+    {
+      "event_type": "response.audio_transcript.done",
+      "applicability": "共有完成事件",
+      "prior_tool_ref": "turn791746view0",
+      "source_lines": [
+        575,
+        578
+      ],
+      "raw": "## response.audio_transcript.done\n\n当输出模态包含音频，且模型生成文本结束时，服务端返回此事件。\nevent_id`string`本次事件唯一标识符。type`string`事件类型，固定为`response.audio_transcript.done`。response_id`string`响应的唯一标识符。item_id`string`消息项唯一标识符。output_index`integer`目前固定为 0。content_index`integer`目前固定为 0。transcript`string`完整文本。  |",
+      "finding": "表写output_index/content_index目前固定0。"
+    },
+    {
+      "event_type": "response.done",
+      "applicability": "共有完成事件",
+      "prior_tool_ref": "turn599740view0",
+      "source_lines": [
+        257,
+        260
+      ],
+      "raw": "## response.done\n\n响应生成完成后，服务端会返回此事件。事件中的 `response` 对象包含除原始音频数据外的全部输出项。\nevent_id`string`本次事件唯一标识符。type`string`事件类型，固定为`response.done`。response`object`响应对象。属性id `string`响应的唯一标识符。conversation_id `string`当前会话的唯一标识符。object `string`对象类型，此事件下固定为`realtime.response`。status `string`响应的状态。modalities `array`响应的模态。voice `string`模型生成音频的音色。output_audio_format`string`输出音频的格式。output `object`响应的输出。属性id `string`响应输出的唯一标识符。type `string`输出项的类型，当前固定为`message`。object `string`输出项的对象类型，当前固定为`realtime.item`。status `string`输出项的状态。role `string`输出项的角色。content `array`输出项的内容。属性type `string`输出内容的类型。输出为纯文本时，为`text`；输出包含音频时，为`audio`。text `string`输出的文本内容。transcript `string`音频转录为文字后的内容。usage `object`本次响应的 Token 消耗信息。  |",
+      "finding": "正文说response包含全部输出项，示例output及content均数组；类型表将output写object。没有明确保证多输出项或多音频content。"
+    }
+  ],
+  "local_policy_not_official_guarantee": {
+    "voice": "唯一候选Aiden；须确认session.audio.output.voice=Aiden，与官方原样Tina示例分开。",
+    "clone": "须显式session.enable_voice_clone=false；原样3.8示例缺此字段，故当前门控将停止，不能把缺失补false。",
+    "index_content": "候选目前仅支持output_index=0/content_index=0、一个输出项与一个内容部分。这是明确本地范围，不能说整个精确3.8合同处处保证单项；不支持范围须具体诊断。",
+    "empty_output": "response.created.output=[] 是响应刚创建时的官方示例，不能因其为空就拒绝正常响应创建；response.done则须按其最终性校验，不混用两个阶段的输出要求。",
+    "no_real_evidence": "本文件所有event对象都是官方文档示例，不是真实捕获；不能用于证明本次远端模型、音色、鉴权或失败根因。"
+  }
+}

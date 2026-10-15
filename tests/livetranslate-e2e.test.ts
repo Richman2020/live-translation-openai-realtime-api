@@ -9,6 +9,7 @@ import WebSocket from 'ws';
 
 import { createLiveTranslateClient } from '../src/experiments/livetranslate-client';
 import { runLiveTranslateAudition } from '../src/experiments/livetranslate-audition-runner';
+import { describeLiveTranslateProtocolEvidence } from '../src/experiments/livetranslate-protocol-evidence';
 import {
   reserveLiveTranslateAuditionOutput,
   writeLiveTranslateAuditionArtifacts,
@@ -392,7 +393,7 @@ test('single-local real protocol runner never sends recording on an unconfirmed 
   const cases = [
     { voice: 'Tina', patch: (session: any) => ({ ...session, audio: { ...session.audio, output: { ...session.audio.output, voice: 'Tina' } } }) },
     { voice: null, patch: (session: any) => ({ ...session, audio: { ...session.audio, output: { ...session.audio.output, voice: undefined } } }) },
-    { voice: 'Aiden', patch: (session: any) => ({ ...session, enable_voice_clone: undefined }) },
+    { voice: 'Aiden', missingCloneEcho: true, patch: (session: any) => ({ ...session, enable_voice_clone: undefined }) },
     { voice: 'Aiden', patch: (session: any) => ({ ...session, enable_voice_clone: true }) },
     { voice: 'Aiden', patch: (session: any) => ({ ...session, translation: { language: 'zh' } }) },
   ];
@@ -409,7 +410,14 @@ test('single-local real protocol runner never sends recording on an unconfirmed 
       }),
     });
     assert.equal(result.status, 'failed');
-    assert.equal(result.errorCode, 'LIVETRANSLATE_CONFIGURATION_REJECTED');
+    assert.equal(result.errorCode, item.missingCloneEcho
+      ? 'LIVETRANSLATE_CLONE_CONFIRMATION_MISSING' : 'LIVETRANSLATE_CONFIGURATION_REJECTED');
+    if (item.missingCloneEcho) {
+      const evidence = describeLiveTranslateProtocolEvidence(result);
+      assert.equal(evidence.configurationStopReason, '缺少复刻关闭确认');
+      assert.equal(evidence.classification, 'voice_clone_disabled_confirmation_missing');
+      assert.equal(result.observedSessionConfigurations[0].voiceCloneEnabled, null);
+    }
     assert.equal(result.counters.sessions, 1);
     assert.equal(result.counters.inputBytesSent, 0);
     assert.equal(result.confirmedSessions.length, 0);
