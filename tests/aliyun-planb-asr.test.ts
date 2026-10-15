@@ -158,6 +158,7 @@ test('both regions declare ordinary bilingual Fun-ASR PCM24k with distinct zh/en
           format: 'pcm',
           sample_rate: 24000,
           language_hints: [role === 'local' ? 'zh' : 'en'],
+          heartbeat: true,
         });
         f.client.append(Buffer.alloc(480, 4));
         assert.deepEqual(f.socket.sent[1], Buffer.alloc(480, 4));
@@ -769,4 +770,100 @@ test('ASR diagnostic whitelist never exports text or raw task data, and observer
     assert(!encoded.includes(secret));
   assert.deepEqual(f.errors, []);
   f.client.abort();
+});
+
+test('configured heartbeat keeps a long silent fake task open but real transport close still cleans up without reconnect', async (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = fixture({ timeoutMs: 10 });
+  await f.started();
+  assert.equal(f.socket.sent[0].payload.parameters.heartbeat, true);
+  assert.equal(
+    'semantic_punctuation_enabled' in f.socket.sent[0].payload.parameters,
+    false,
+  );
+  assert.equal(
+    'max_sentence_silence' in f.socket.sent[0].payload.parameters,
+    false,
+  );
+  assert.equal(
+    'multi_threshold_mode_enabled' in f.socket.sent[0].payload.parameters,
+    false,
+  );
+  const silentSecond = Buffer.alloc(24000 * 2);
+  for (let second = 0; second < 600; second += 1) {
+    f.client.append(silentSecond);
+    context.mock.timers.tick(1000);
+    if (second % 60 === 0)
+      f.source({ sentence_id: 0, heartbeat: true, text: '' });
+  }
+  // A fake supplier cannot prove real idle behavior. This verifies the formal
+  // parameter, no application call timer, heartbeat filtering and cleanup.
+  assert.equal(f.socket.sent.filter(Buffer.isBuffer).length, 600);
+  assert.equal(f.sources.length, 0);
+  assert.deepEqual(f.errors, []);
+  assert.equal(f.socket.terminated, 0);
+  assert.equal(f.addresses.length, 1);
+  f.socket.emit('close', 1006, Buffer.from('private provider close reason'));
+  assert.deepEqual(f.errors, ['PLAN_B_ASR_DISCONNECTED']);
+  assert.equal(f.socket.terminated, 1);
+  const sent = f.socket.sent.length;
+  assert.throws(() => f.client.append(silentSecond), /PLAN_B_ASR_DISCONNECTED/);
+  f.source({ sentence_id: 0, heartbeat: true, text: '' });
+  context.mock.timers.tick(600000);
+  assert.equal(f.socket.sent.length, sent);
+  assert.equal(f.addresses.length, 1);
+  assert.equal(f.sources.length, 0);
+  assert(!JSON.stringify(f.errors).includes('private'));
+  f.client.abort();
+});
+
+test('actual ASR close codes are bounded scalar metadata and raw close reasons or abort-induced late closes never escape', async () => {
+  for (const closeCode of [
+    1000,
+    1006,
+    1011,
+    4999,
+    999,
+    5000,
+    '1006',
+    Number.NaN,
+  ]) {
+    const f = fixture();
+    // eslint-disable-next-line no-await-in-loop -- Each fake socket has an isolated close lifecycle.
+    await f.started();
+    f.socket.emit(
+      'close',
+      closeCode,
+      Buffer.from('PRIVATE raw provider close message and body'),
+    );
+    const failure = f.evidences.find((event) => event.event === 'failed');
+    assert.equal(failure.code, 'PLAN_B_ASR_DISCONNECTED');
+    const valid =
+      typeof closeCode === 'number' &&
+      Number.isInteger(closeCode) &&
+      closeCode >= 1000 &&
+      closeCode <= 4999;
+    if (valid) assert.equal(failure.closeCode, closeCode);
+    else assert.equal('closeCode' in failure, false);
+    assert.equal(
+      f.evidences.filter((event) => event.event === 'failed').length,
+      1,
+    );
+    assert(!JSON.stringify(f.evidences).includes('PRIVATE'));
+    assert.equal(f.socket.listenerCount('close'), 0);
+    f.client.abort();
+  }
+  const f = fixture();
+  await f.started();
+  f.client.abort();
+  f.socket.emit(
+    'close',
+    1006,
+    Buffer.from('PRIVATE cancellation close reason'),
+  );
+  assert.deepEqual(f.errors, []);
+  assert.equal(
+    f.evidences.filter((event) => event.event === 'failed').length,
+    0,
+  );
 });

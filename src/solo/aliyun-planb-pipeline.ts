@@ -2,6 +2,7 @@
 /* eslint-disable no-continue -- Stale immutable snapshots must be skipped without retry or replay. */
 import { createCaptionSections, type CaptionSection } from './caption-sections';
 import { normalizeCaptionDisplay } from './caption-normalization';
+import { isPlanBFailureReason } from './call-termination-diagnostics';
 import type {
   CallContextObservation,
   CallContextQuery,
@@ -439,8 +440,7 @@ export function createAliyunPlanBPipeline(
         } catch (error) {
           if (!closed && !controller.signal.aborted && current(job)) {
             const code =
-              error instanceof Error &&
-              /^PLANB_CURRENT_TRANSLATION_[A-Z_]+$/u.test(error.message)
+              error instanceof Error && isPlanBFailureReason(error.message)
                 ? error.message
                 : 'PLANB_PIPELINE_PROVIDER_FAILED';
             stop(code);

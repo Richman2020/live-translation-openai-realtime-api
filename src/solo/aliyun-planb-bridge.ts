@@ -3,6 +3,10 @@ import type WebSocket from 'ws';
 
 import { createCallContext } from './call-context';
 import {
+  isPlanBFailureReason,
+  sanitizeTerminationCause,
+} from './call-termination-diagnostics';
+import {
   ContinuousTranslationBridge,
   type ContinuousTranslationBridgeOptions,
 } from './continuous-translation-bridge';
@@ -252,7 +256,24 @@ export function createAliyunPlanBBridge(
     timeoutMs: options.sessionTimeoutMs,
     getContext: (query) => context.snapshot(query),
     onUsage: selection.onUsage,
-    onEvidence: selection.onEvidence,
+    onEvidence: (event) => {
+      if (
+        !closed &&
+        event.event === 'failed' &&
+        event.role === role &&
+        isPlanBFailureReason(event.code)
+      )
+        notify(
+          options.onTerminationDiagnostic,
+          sanitizeTerminationCause({
+            reason: event.code,
+            layer: 'provider',
+            role,
+            wsCloseCode: event.closeCode,
+          }),
+        );
+      notify(selection.onEvidence, event);
+    },
     onCorrection: selection.onCorrection,
     onTiming: timing,
   });

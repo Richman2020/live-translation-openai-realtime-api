@@ -56,6 +56,149 @@ export const CAPTION_FAILURE_REASONS = [
   'CAPTION_TRANSLATION_CONNECTION_FAILED',
 ] as const;
 
+/** Application-defined Alibaba failures only; never accept a prefix or raw
+ * supplier error string as a reason. Keep this static list independent of all
+ * provider implementations so failure handling can use it without a cycle. */
+export const PLAN_B_FAILURE_REASONS = [
+  'PLANB_ASR_APPEND_FAILED',
+  'PLANB_ASR_CREATION_FAILED',
+  'PLANB_ASR_INVALID_SOURCE',
+  'PLANB_ASR_NOT_READY',
+  'PLANB_ASR_SOURCE_CONFLICT',
+  'PLANB_BRIDGE_CANCELLED',
+  'PLANB_BRIDGE_CLOSED',
+  'PLANB_BRIDGE_INVALID_SELECTION',
+  'PLANB_BRIDGE_ROLE_INVALID',
+  'PLANB_CURRENT_MT_INPUT_INVALID',
+  'PLANB_CURRENT_MT_MEMORY_INVALID',
+  'PLANB_CURRENT_MT_MEMORY_REQUIRED',
+  'PLANB_CURRENT_MT_REQUEST_INVALID',
+  'PLANB_CURRENT_TRANSLATION_BODY_CONTROL',
+  'PLANB_CURRENT_TRANSLATION_BODY_FENCE',
+  'PLANB_CURRENT_TRANSLATION_BODY_JSON',
+  'PLANB_CURRENT_TRANSLATION_BODY_JSON_FRAGMENT',
+  'PLANB_CURRENT_TRANSLATION_BODY_LIMIT',
+  'PLANB_CURRENT_TRANSLATION_BODY_META_PREFIX',
+  'PLANB_CURRENT_TRANSLATION_BODY_RESERVED',
+  'PLANB_CURRENT_TRANSLATION_BODY_STRUCTURE',
+  'PLANB_CURRENT_TRANSLATION_BODY_TYPE',
+  'PLANB_CURRENT_TRANSLATION_EMPTY',
+  'PLANB_CURRENT_TRANSLATION_GUARD_UNISSUED',
+  'PLANB_CURRENT_TRANSLATION_HISTORY_REPLAY_SUSPECT',
+  'PLANB_CURRENT_TRANSLATION_JOB_INVALID',
+  'PLANB_CURRENT_TRANSLATION_MEMORY_INVALID',
+  'PLANB_CURRENT_TRANSLATION_MEMORY_UNISSUED',
+  'PLANB_CURRENT_TRANSLATION_RECEIPT_CONSUMED',
+  'PLANB_CURRENT_TRANSLATION_RECEIPT_INVALID',
+  'PLANB_CURRENT_TRANSLATION_RECEIPT_JOB_MISMATCH',
+  'PLANB_CURRENT_TRANSLATION_RECEIPT_UNCONSUMED',
+  'PLANB_CURRENT_TRANSLATION_RECEIPT_UNISSUED',
+  'PLANB_CURRENT_TRANSLATION_REQUEST_INVALID',
+  'PLANB_CURRENT_TRANSLATION_ROLE_INVALID',
+  'PLANB_CURRENT_TRANSLATION_SOURCE_REPLAY',
+  'PLANB_KEY_REQUIRED',
+  'PLANB_MT_ACCESS_DENIED',
+  'PLANB_MT_CANCELLED',
+  'PLANB_MT_EVENT_INVALID',
+  'PLANB_MT_HTTP_FAILED',
+  'PLANB_MT_INCOMPLETE',
+  'PLANB_MT_INPUT_INVALID',
+  'PLANB_MT_OUTPUT_LIMIT',
+  'PLANB_MT_PROVIDER_FAILED',
+  'PLANB_MT_RATE_LIMITED',
+  'PLANB_MT_STREAM_FAILED',
+  'PLANB_MT_STREAM_LIMIT',
+  'PLANB_MT_STREAM_MISSING',
+  'PLANB_MT_TIMEOUT',
+  'PLANB_MT_USAGE_INVALID',
+  'PLANB_PIPELINE_CANCELLED',
+  'PLANB_PIPELINE_CAPACITY',
+  'PLANB_PIPELINE_FINISH_FAILED',
+  'PLANB_PIPELINE_INVALID_OPTIONS',
+  'PLANB_PIPELINE_INVALID_PCM',
+  'PLANB_PIPELINE_PROVIDER_FAILED',
+  'PLANB_PIPELINE_QUEUE_CAPACITY',
+  'PLANB_PIPELINE_QUEUE_FAILED',
+  'PLANB_PIPELINE_REGION_UNSUPPORTED',
+  'PLANB_PLAYBACK_IDENTITY_MISSING',
+  'PLANB_PLAYBACK_UNCONFIRMED',
+  'PLANB_SOURCE_ORDER_UNRESOLVED',
+  'PLANB_SOURCE_WITHDRAWN',
+  'PLANB_TRANSLATION_INVALID_RESULT',
+  'PLANB_TTS_ALREADY_ACTIVE',
+  'PLANB_TTS_AUDIO_UNBOUND',
+  'PLANB_TTS_CANCELLED',
+  'PLANB_TTS_CONNECTION_CLOSED',
+  'PLANB_TTS_CONNECTION_FAILED',
+  'PLANB_TTS_EMPTY_AUDIO',
+  'PLANB_TTS_EVENT_INVALID',
+  'PLANB_TTS_EVENT_LIMIT',
+  'PLANB_TTS_INPUT_INVALID',
+  'PLANB_TTS_INVALID_PCM',
+  'PLANB_TTS_PROVIDER_FAILED',
+  'PLANB_TTS_QUEUE_LIMIT',
+  'PLANB_TTS_SEND_FAILED',
+  'PLANB_TTS_SENTENCE_ORDER',
+  'PLANB_TTS_TIMEOUT',
+  'PLANB_TTS_USAGE_INVALID',
+  'PLAN_B_ASR_CALLBACK_FAILED',
+  'PLAN_B_ASR_CANCELLED',
+  'PLAN_B_ASR_CLOCK_INVALID',
+  'PLAN_B_ASR_CLOSED',
+  'PLAN_B_ASR_CONFIG_INVALID',
+  'PLAN_B_ASR_CONTEXT_FAILED',
+  'PLAN_B_ASR_DISCONNECTED',
+  'PLAN_B_ASR_EVENT_INVALID',
+  'PLAN_B_ASR_EVENT_TOO_LARGE',
+  'PLAN_B_ASR_FINISH_TIMEOUT',
+  'PLAN_B_ASR_NOT_READY',
+  'PLAN_B_ASR_PCM_INVALID',
+  'PLAN_B_ASR_PROVIDER_FAILED',
+  'PLAN_B_ASR_SEND_FAILED',
+  'PLAN_B_ASR_SOURCE_BACKLOG',
+  'PLAN_B_ASR_SOURCE_ID_CONFLICT',
+  'PLAN_B_ASR_SOURCE_INVALID',
+  'PLAN_B_ASR_SOURCE_TIME_INVALID',
+  'PLAN_B_ASR_START_TIMEOUT',
+  'PLAN_B_ASR_TASK_NOT_STARTED',
+  'PLAN_B_ASR_TASK_STATE_INVALID',
+  'PLAN_B_ASR_TIMEOUT_INVALID',
+  'PLAN_B_ASR_TRANSPORT_FAILED',
+  'PLAN_B_ASR_TRANSPORT_UNAVAILABLE',
+  'PLAN_B_ASR_UNEXPECTED_BINARY',
+  'PLAN_B_ASR_UNEXPECTED_FINISH',
+] as const;
+const planBFailureReasons = new Set<string>(PLAN_B_FAILURE_REASONS);
+export function isPlanBFailureReason(
+  value: unknown,
+): value is (typeof PLAN_B_FAILURE_REASONS)[number] {
+  return typeof value === 'string' && planBFailureReasons.has(value);
+}
+
+export type CallTerminationComponent =
+  | 'asr'
+  | 'translation'
+  | 'tts'
+  | 'pipeline'
+  | 'playback';
+
+function planBFailureComponent(
+  reason: (typeof PLAN_B_FAILURE_REASONS)[number],
+): CallTerminationComponent {
+  // Prefix classification is safe only after exact static membership succeeds.
+  if (reason.startsWith('PLAN_B_ASR_') || reason.startsWith('PLANB_ASR_'))
+    return 'asr';
+  if (
+    reason.startsWith('PLANB_MT_') ||
+    reason.startsWith('PLANB_CURRENT_') ||
+    reason === 'PLANB_TRANSLATION_INVALID_RESULT'
+  )
+    return 'translation';
+  if (reason.startsWith('PLANB_TTS_')) return 'tts';
+  if (reason.startsWith('PLANB_PLAYBACK_')) return 'playback';
+  return 'pipeline';
+}
+
 const callReasons = [
   'UNCLASSIFIED_TERMINATION',
   'CALL_END_REQUESTED',
@@ -94,7 +237,8 @@ const callReasons = [
 export type CallTerminationReason =
   | (typeof NATIVE_FAILURE_REASONS)[number]
   | (typeof CAPTION_FAILURE_REASONS)[number]
-  | (typeof callReasons)[number];
+  | (typeof callReasons)[number]
+  | (typeof PLAN_B_FAILURE_REASONS)[number];
 export type CallTerminationLayer =
   | 'application'
   | 'authorization'
@@ -106,6 +250,10 @@ export type CallTerminationCause = Readonly<{
   reason: CallTerminationReason;
   layer: CallTerminationLayer;
   role: 'local' | 'remote' | 'unknown';
+  /** Fixed classification of an exact application-defined Alibaba failure. */
+  component?: CallTerminationComponent;
+  /** Locally generated per-call UUID, never a Twilio/provider/account SID. */
+  callId?: string;
   wsCloseCode?: number;
   sessionExpiresAtEpochSeconds?: number;
 }>;
@@ -120,12 +268,14 @@ const reasons = new Set<string>([
   ...NATIVE_FAILURE_REASONS,
   ...CAPTION_FAILURE_REASONS,
   ...callReasons,
+  ...PLAN_B_FAILURE_REASONS,
 ]);
 const providerReasons = new Set<string>([
   ...NATIVE_FAILURE_REASONS,
   ...CAPTION_FAILURE_REASONS,
   'CONTINUOUS_PROVIDER_FAILED',
   'REMOTE_CAPTIONS_UNAVAILABLE',
+  ...PLAN_B_FAILURE_REASONS,
 ]);
 const layers = new Set<string>([
   'application',
@@ -174,10 +324,20 @@ export function sanitizeTerminationCause(value: unknown): CallTerminationCause {
       : 'unknown';
   const wsCloseCode = field(value, 'wsCloseCode');
   const expiry = field(value, 'sessionExpiresAtEpochSeconds');
+  const callId = field(value, 'callId');
   return Object.freeze({
     reason,
     layer,
     role,
+    ...(isPlanBFailureReason(reason)
+      ? { component: planBFailureComponent(reason) }
+      : {}),
+    ...(typeof callId === 'string' &&
+    /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/iu.test(
+      callId,
+    )
+      ? { callId }
+      : {}),
     ...(numberIn(wsCloseCode, 1000, 4999) ? { wsCloseCode } : {}),
     ...(numberIn(expiry, 1, MAX_EPOCH_SECONDS)
       ? { sessionExpiresAtEpochSeconds: expiry }
@@ -231,6 +391,7 @@ export function createCallTerminationDiagnostic(
   cause: unknown,
   observedAtMs: unknown,
   startedAtMs: unknown,
+  callId?: unknown,
 ): CallTerminationDiagnostic {
   const observed = numberIn(observedAtMs, 0, MAX_EPOCH_SECONDS * 1000)
     ? observedAtMs
@@ -238,9 +399,11 @@ export function createCallTerminationDiagnostic(
   const started = numberIn(startedAtMs, 0, MAX_EPOCH_SECONDS * 1000)
     ? startedAtMs
     : null;
+  const safeCallId = sanitizeTerminationCause({ callId }).callId;
   return Object.freeze({
     event: 'CLOUD_CALL_TERMINATION',
     ...sanitizeTerminationCause(cause),
+    ...(safeCallId ? { callId: safeCallId } : {}),
     observedAtMs: observed,
     elapsedMs:
       observed !== null && started !== null && observed >= started

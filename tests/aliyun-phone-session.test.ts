@@ -9,6 +9,7 @@ import { createAliyunPlanBBridge } from '../src/solo/aliyun-planb-bridge';
 import type { AliyunPlanBConfig } from '../src/solo/aliyun-planb-types';
 import type { SoloConfig } from '../src/solo/config';
 import { SessionManager } from '../src/solo/session-manager';
+import { reportCloudCallTermination } from '../src/solo/cloud-service';
 import { ALIYUN_PHONE_STREAM_METADATA } from './fixtures/aliyun-phone-stream-metadata';
 
 const phoneConfig = {
@@ -91,7 +92,10 @@ class Supplier extends EventEmitter {
 
   controls: any[] = [];
 
-  constructor(readonly spoken: string[]) {
+  constructor(
+    readonly spoken: string[],
+    readonly ttsCloseCode?: number,
+  ) {
     super();
     queueMicrotask(() => {
       this.readyState = WebSocket.OPEN;
@@ -140,6 +144,13 @@ class Supplier extends EventEmitter {
     ) {
       queueMicrotask(() => {
         if (this.readyState !== WebSocket.OPEN) return;
+        if (this.ttsCloseCode !== undefined) {
+          this.close(
+            this.ttsCloseCode,
+            Buffer.from('private supplier close reason words and key'),
+          );
+          return;
+        }
         this.event('result-generated', {
           output: { type: 'sentence-synthesis', sentence: { index: 0 } },
         });
@@ -164,10 +175,10 @@ class Supplier extends EventEmitter {
     });
   }
 
-  close() {
+  close(code = 1000, reason = Buffer.alloc(0)) {
     if (this.readyState === WebSocket.CLOSED) return;
     this.readyState = WebSocket.CLOSED;
-    this.emit('close', 1000);
+    this.emit('close', code, reason);
   }
 
   terminate() {
@@ -199,6 +210,7 @@ async function harness(
     body: any,
     signal: AbortSignal,
   ) => Promise<Response>,
+  supplierBehavior: { ttsCloseCode?: number; throwOnEvidence?: boolean } = {},
 ) {
   let now = 100000;
   let remoteNonce = '';
@@ -208,6 +220,8 @@ async function harness(
   const requests: any[] = [];
   const hungup: string[] = [];
   const failures: string[] = [];
+  const terminations: any[] = [];
+  const terminationLines: string[] = [];
   const local = new Phone(`MZ${'3'.repeat(32)}`);
   const remote = new Phone(`MZ${'4'.repeat(32)}`);
   const manager = new SessionManager({
@@ -236,11 +250,16 @@ async function harness(
           config: aliyun,
           onEvidence: (e) => {
             if (e.event === 'failed' && e.code) failures.push(e.code);
+            if (supplierBehavior.throwOnEvidence)
+              throw new Error('private observer failure');
           },
           deps: {
             createWebSocket: (address) => {
               assert.equal(address, aliyun.webSocketUrl);
-              const socket = new Supplier(spoken);
+              const socket = new Supplier(
+                spoken,
+                supplierBehavior.ttsCloseCode,
+              );
               suppliers.push(socket);
               return socket as unknown as WebSocket;
             },
@@ -261,6 +280,10 @@ async function harness(
     await manager.close();
   });
   manager.on('event', (event) => events.push(event));
+  manager.on('diagnostic', (event) => {
+    terminations.push(event);
+    reportCloudCallTermination(event, (line) => terminationLines.push(line));
+  });
   manager.setPresence(true);
   const call = manager.createOutbound(
     phoneConfig,
@@ -304,6 +327,8 @@ async function harness(
     requests,
     hungup,
     failures,
+    terminations,
+    terminationLines,
     asr,
     advance(ms: number) {
       now += ms;
@@ -559,4 +584,70 @@ test('captured ASR metadata order and revisions integrate using explicitly synth
     'Correction: the fee is twenty-five yuan.',
   ]);
   assert.equal(h.failures.length, 0);
+});
+
+for (const [role, code] of [
+  ['local', 1006],
+  ['remote', 1011],
+] as const) {
+  test(`actual ${role} ASR close code ${code} reaches the first call termination without its private close reason`, async (t) => {
+    const h = await harness(t, async () => sse('Hello.'), {
+      throwOnEvidence: true,
+    });
+    h.asr(role).close(
+      code,
+      Buffer.from('private supplier words token and phone'),
+    );
+    await flush();
+    assert.equal(h.terminations.length, 1);
+    assert.deepEqual(h.terminations[0], {
+      event: 'CLOUD_CALL_TERMINATION',
+      reason: 'PLAN_B_ASR_DISCONNECTED',
+      component: 'asr',
+      layer: 'provider',
+      role,
+      callId: h.call.id,
+      wsCloseCode: code,
+      observedAtMs: 100000,
+      elapsedMs: 0,
+    });
+    assert.deepEqual(JSON.parse(h.terminationLines[0]), h.terminations[0]);
+    assert.doesNotMatch(h.terminationLines[0], /private|token|phone/);
+    assert.deepEqual(new Set(h.hungup), new Set([localSid, remoteSid]));
+    h.asr(role).emit('close', 1000, Buffer.from('private late cleanup'));
+    assert.equal(h.terminations.length, 1);
+  });
+}
+
+test('actual TTS close code reaches first termination before pipeline cleanup can replace it with a generic reason', async (t) => {
+  const h = await harness(t, async () => sse('Do not cancel the booking.'), {
+    ttsCloseCode: 1011,
+  });
+  h.advance(1000);
+  h.local.media(Buffer.alloc(8000, 0xff));
+  h.asr('local').source(1, '不要取消预约。');
+  await flush();
+  assert.equal(h.terminations.length, 1);
+  assert.equal(h.terminations[0].reason, 'PLANB_TTS_CONNECTION_CLOSED');
+  assert.equal(h.terminations[0].component, 'tts');
+  assert.equal(h.terminations[0].role, 'local');
+  assert.equal(h.terminations[0].wsCloseCode, 1011);
+  assert.equal(h.terminations[0].callId, h.call.id);
+  assert.equal(h.manager.isCleanupConfirmed(h.call.id), true);
+  assert.doesNotMatch(h.terminationLines[0], /private|supplier|words|key/);
+  assert.deepEqual(new Set(h.hungup), new Set([localSid, remoteSid]));
+});
+
+test('manual hangup fences provider close metadata and cannot manufacture a provider fault', async (t) => {
+  const h = await harness(t, async () => sse('Hello.'));
+  await h.manager.end(h.call.id);
+  for (const supplier of h.suppliers)
+    supplier.emit('close', 1011, Buffer.from('private late supplier reason'));
+  await flush();
+  assert.equal(h.terminations.length, 1);
+  assert.equal(h.terminations[0].reason, 'CALL_END_REQUESTED');
+  assert.equal(h.terminations[0].component, undefined);
+  assert.equal(h.terminations[0].wsCloseCode, undefined);
+  assert.equal(h.terminations[0].callId, h.call.id);
+  assert.doesNotMatch(h.terminationLines[0], /private|supplier/);
 });

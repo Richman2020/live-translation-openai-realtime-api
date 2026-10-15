@@ -917,3 +917,260 @@ test('withdrawal reentered by audio-completion observer cannot republish an expo
   assert.deepEqual(h.failures, []);
   h.pipeline.abort();
 });
+
+test('allowlisted MT and TTS failures preserve exact fixed causes while arbitrary provider messages remain redacted', async () => {
+  for (const failure of [
+    {
+      text: 'PLANB_CURRENT_MT_MEMORY_INVALID',
+      expected: 'PLANB_CURRENT_MT_MEMORY_INVALID',
+    },
+    { text: 'PLANB_MT_TIMEOUT', expected: 'PLANB_MT_TIMEOUT' },
+    {
+      text: 'PLANB_TTS_CONNECTION_CLOSED',
+      expected: 'PLANB_TTS_CONNECTION_CLOSED',
+    },
+    {
+      text: 'PLAN_B_TTS_SECRET_TOKEN_provider_body',
+      expected: 'PLANB_PIPELINE_PROVIDER_FAILED',
+    },
+    {
+      text: 'PLANB_CURRENT_TRANSLATION_SECRET_UNREGISTERED',
+      expected: 'PLANB_PIPELINE_PROVIDER_FAILED',
+    },
+  ]) {
+    const h = harness('local', {
+      translate: async () => {
+        throw new Error(failure.text);
+      },
+    });
+    h.source(1, '这是纯离线合成原文。');
+    // eslint-disable-next-line no-await-in-loop -- Isolated fixed-reason failures with no live model calls.
+    await assert.rejects(
+      h.pipeline.finish(),
+      (error) => error instanceof Error && error.message === failure.expected,
+    );
+    assert.deepEqual(h.failures, [failure.expected]);
+    assert.equal(h.counts().aborted, 1);
+    assert.equal(h.counts().ttsCreated, 0);
+  }
+});
+
+// Only stage times/IDs below come from the 2026-10-15 incident metadata.
+// All text, ASR revisions and failure frames are SYNTHETIC; no original audio
+// or raw supplier frames were retained, so these do not establish the cause.
+const incidentTimes = {
+  first: {
+    call: '9312038a-ec2f-4b89-bb9c-f47872b11d86',
+    endpoint: 1792037184863,
+    final: 1792037193587,
+    translated: 1792037194613,
+    synthesis: 1792037194614,
+    audio: 1792037195982,
+    ended: 1792037198133,
+  },
+  second: {
+    call: 'fa54eaff-313a-4323-84eb-ffff371220c1',
+    first: {
+      endpoint: 1792037221610,
+      final: 1792037226778,
+      translated: 1792037228378,
+      audio: 1792037229749,
+      drained: 1792037235430,
+    },
+    head: {
+      endpoint: 1792037232300,
+      final: 1792037238306,
+      translated: 1792037240044,
+      audio: 1792037241379,
+      drained: 1792037243970,
+    },
+    tail: {
+      translated: 1792037245343,
+      audio: 1792037247162,
+      drained: 1792037250710,
+    },
+    remote: {
+      endpoint: 1792037245686,
+      final: 1792037246590,
+      translated: 1792037247670,
+      ended: 1792037255953,
+    },
+  },
+};
+
+test('first-call observed epoch replay fences a synthetic local ASR failure after first audio, without treating browser hangup as its cause', async () => {
+  const trace = incidentTimes.first;
+  let clock = trace.final;
+  let release: () => void;
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const timings: any[] = [];
+  const h = harness('local', {
+    now: () => clock,
+    onTiming: (event: any) => {
+      timings.push(event);
+      if (event.stage === 'translation_complete') clock = trace.synthesis;
+    },
+    translate: async (options: any) => {
+      h.translated.push(options);
+      clock = trace.translated;
+      return { text: 'This is a synthetic translated sentence.' };
+    },
+    createTts: () => ({
+      async *synthesize() {
+        clock = trace.audio;
+        yield Buffer.alloc(480);
+        await blocked;
+        yield Buffer.alloc(480);
+      },
+      abort() {
+        release();
+      },
+    }),
+  });
+  for (let revision = 1; revision <= 9; revision += 1)
+    h.asr().onSource({
+      sequence: 6,
+      revision,
+      text: `离线合成修订${revision}`,
+      final: false,
+      at: trace.endpoint - 1000,
+    });
+  h.asr().onSource({
+    sequence: 6,
+    revision: 10,
+    text: '这是纯离线合成句段。',
+    final: true,
+    at: trace.endpoint - 1000,
+    endAt: trace.endpoint,
+  });
+  await tick();
+  assert.equal(h.audio.length, 1);
+  const stage = (name: string) =>
+    timings.find((event) => event.stage === name).at;
+  assert.equal(stage('asr_final') - stage('provider_endpoint_estimate'), 8724);
+  assert.equal(
+    stage('audio_first_sample') - stage('provider_endpoint_estimate'),
+    11119,
+  );
+  assert.equal(stage('audio_first_sample') - stage('synthesis_start'), 1368);
+  clock = trace.ended;
+  // This compatible synthetic failure is not the unrecorded real first cause.
+  h.asr().onError('PLAN_B_ASR_DISCONNECTED');
+  await tick();
+  h.source(20, '挂断后的合成迟到事件。');
+  assert.equal(h.audio.length, 1);
+  assert.equal(h.translated.length, 1);
+  assert.deepEqual(h.failures, ['PLAN_B_ASR_DISCONNECTED']);
+  assert.equal(h.counts().aborted, 1);
+});
+
+test('second-call observed epoch replay preserves natural tail FIFO and bilingual directions, then fences a synthetic remote failure', async () => {
+  const trace = incidentTimes.second;
+  let clock = trace.first.final;
+  const timings: any[] = [];
+  let segment = 0;
+  const phases = [trace.first, trace.head, trace.tail];
+  const texts = [
+    'Do not charge twice.',
+    'This is the first synthetic clause.',
+    'This is the preserved synthetic tail.',
+  ];
+  const local = harness('local', {
+    now: () => clock,
+    waitForPlayback: true,
+    onTiming: (event: any) => timings.push(event),
+    translate: async (options: any) => {
+      local.translated.push(options);
+      clock = phases[segment].translated;
+      return { text: texts[segment] };
+    },
+    createTts: () => ({
+      async *synthesize(text: string) {
+        local.spoken.push(text);
+        clock = phases[segment].audio;
+        yield Buffer.alloc(480);
+      },
+      abort() {},
+    }),
+    onAudioComplete: (metadata: any) => {
+      clock = phases[segment].drained;
+      segment += 1;
+      local.pipeline.acknowledgeAudio(metadata.utteranceId);
+    },
+  });
+  local.asr().onSource({
+    sequence: 4,
+    revision: 1,
+    text: '不要重复收费。',
+    final: true,
+    at: trace.first.endpoint - 1000,
+    endAt: trace.first.endpoint,
+  });
+  await tick();
+  await tick();
+  assert.equal(local.spoken.length, 1);
+  clock = trace.head.final;
+  local.asr().onSource({
+    sequence: 7,
+    revision: 1,
+    text: 'The first synthetic caller clause is complete. The second synthetic caller clause is the tail.',
+    final: true,
+    at: trace.head.endpoint - 1000,
+    endAt: trace.head.endpoint,
+  });
+  await local.pipeline.finish();
+  assert.deepEqual(local.spoken, texts);
+  assert.equal(local.audio.length, 3);
+  const tailStages = timings.filter((event) =>
+    event.utteranceId.endsWith('caption:source_7:2'),
+  );
+  const tailAt = (name: string) =>
+    tailStages.find((event) => event.stage === name).at;
+  assert.equal(tailAt('translation_start'), trace.head.drained);
+  assert(tailAt('translation_start') - tailAt('section_ready') >= 5660);
+  assert.equal(
+    tailAt('audio_first_sample') - tailAt('provider_endpoint_estimate'),
+    14862,
+  );
+  assert(
+    local.translated.every((request) => request.context.entries.length === 0),
+  );
+  let remoteClock = trace.remote.final;
+  const remote = harness('remote', {
+    now: () => remoteClock,
+    translate: async (options: any) => {
+      remote.translated.push(options);
+      remoteClock = trace.remote.translated;
+      return { text: '请勿取消这次预约。' };
+    },
+  });
+  remote.asr().onSource({
+    sequence: 5,
+    revision: 1,
+    text: 'Do not cancel the synthetic appointment.',
+    final: true,
+    at: trace.remote.endpoint - 1000,
+    endAt: trace.remote.endpoint,
+  });
+  await tick();
+  assert.equal(remote.counts().ttsCreated, 0);
+  assert.equal(remote.audio.length, 0);
+  assert(
+    remote.transcripts.some(
+      (event) =>
+        event.kind === 'translation' &&
+        event.final &&
+        event.text === '请勿取消这次预约。',
+    ),
+  );
+  remoteClock = trace.remote.ended;
+  remote.asr().onError('PLAN_B_ASR_SOURCE_ID_CONFLICT');
+  local.pipeline.abort(); // The real bridge owns cross-role cleanup.
+  remote.source(6, 'Synthetic late source after provider failure.');
+  assert.equal(remote.translated.length, 1);
+  assert.deepEqual(remote.failures, ['PLAN_B_ASR_SOURCE_ID_CONFLICT']);
+  assert.equal(local.counts().aborted, 1);
+  assert.equal(remote.counts().aborted, 1);
+});

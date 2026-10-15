@@ -9,6 +9,9 @@ import type { SoloConfig } from '../src/solo/config';
 import {
   sanitizeTerminationCause,
   createCallTerminationDiagnostic,
+  classifyCallTermination,
+  isPlanBFailureReason,
+  PLAN_B_FAILURE_REASONS,
   type CallTerminationDiagnostic,
 } from '../src/solo/call-termination-diagnostics';
 import { ContinuousTranslationBridge } from '../src/solo/continuous-translation-bridge';
@@ -68,6 +71,7 @@ async function fixture(t: TestContext, maintain = false, fatalCaptions = true) {
   const hangups: string[] = [];
   const creates: Record<string, unknown>[] = [];
   const diagnostics: CallTerminationDiagnostic[] = [];
+  let providerOptions: Parameters<typeof createContinuousTranslationClient>[0];
   const manager = new SessionManager({
     now: () => time,
     maxCallMs: null,
@@ -86,6 +90,10 @@ async function fixture(t: TestContext, maintain = false, fatalCaptions = true) {
         ...settings,
         remoteCaptions: true,
         captionFailureEndsCall: fatalCaptions,
+        createClient: (options) => {
+          providerOptions = options;
+          return createContinuousTranslationClient(options);
+        },
         createWebSocket: () => {
           const socket = new Socket();
           providers.push(socket);
@@ -165,6 +173,7 @@ async function fixture(t: TestContext, maintain = false, fatalCaptions = true) {
     phones,
     native,
     diagnostics,
+    providerError: (code: string) => providerOptions.onError?.(code),
     hangups,
     setTime: (value: number) => {
       time = value;
@@ -196,6 +205,7 @@ test('native provider close preserves safe first cause and numeric expiry, never
   assert.deepEqual(f.diagnostics, [
     {
       event: 'CLOUD_CALL_TERMINATION',
+      callId: f.call.id,
       reason: 'PROVIDER_CLOSED_UNEXPECTEDLY',
       layer: 'provider',
       role: 'local',
@@ -226,6 +236,7 @@ test('media close records its own numeric code first while cleanup failure remai
   assert.deepEqual(f.diagnostics, [
     {
       event: 'CLOUD_CALL_TERMINATION',
+      callId: f.call.id,
       reason: 'PHONE_STREAM_CLOSED',
       layer: 'media',
       role: 'remote',
@@ -348,6 +359,7 @@ for (const [index, reason] of [
     assert.deepEqual(f.diagnostics, [
       {
         event: 'CLOUD_CALL_TERMINATION',
+        callId: f.call.id,
         reason,
         layer: 'provider',
         role: 'remote',
@@ -413,4 +425,128 @@ test('nonfatal caption failure cannot contaminate a later media termination caus
   assert.equal(f.diagnostics[0].reason, 'PHONE_STREAM_CLOSED');
   assert.equal(f.diagnostics[0].role, 'local');
   assert.equal(f.manager.isCleanupConfirmed(f.call.id), true);
+});
+
+test('Plan B failure reasons have exact static membership and finite component classification', () => {
+  assert.equal(
+    new Set(PLAN_B_FAILURE_REASONS).size,
+    PLAN_B_FAILURE_REASONS.length,
+  );
+  for (const reason of PLAN_B_FAILURE_REASONS) {
+    assert.equal(isPlanBFailureReason(reason), true);
+    const cause = classifyCallTermination(reason);
+    assert.equal(cause.reason, reason);
+    assert.equal(cause.layer, 'provider');
+    assert(
+      cause.component &&
+        ['asr', 'translation', 'tts', 'pipeline', 'playback'].includes(
+          cause.component,
+        ),
+    );
+  }
+  for (const value of [
+    undefined,
+    null,
+    7,
+    'PLAN_B_ASR_PROVIDER_FAILED private transcript',
+    'PLANB_CURRENT_TRANSLATION_UNTRUSTED_SUFFIX',
+    'PLANB_TTS_PRIVATE_CREDENTIAL',
+    privateText,
+  ]) {
+    assert.equal(isPlanBFailureReason(value), false);
+    const cause = sanitizeTerminationCause({ reason: value, component: 'tts' });
+    assert.equal(cause.reason, 'UNCLASSIFIED_TERMINATION');
+    assert.equal(cause.component, undefined);
+  }
+  assert.equal(
+    sanitizeTerminationCause({ reason: 'PLAN_B_ASR_SOURCE_ID_CONFLICT' })
+      .component,
+    'asr',
+  );
+  assert.equal(
+    sanitizeTerminationCause({ reason: 'PLANB_MT_TIMEOUT' }).component,
+    'translation',
+  );
+  assert.equal(
+    sanitizeTerminationCause({ reason: 'PLANB_CURRENT_TRANSLATION_BODY_JSON' })
+      .component,
+    'translation',
+  );
+  assert.equal(
+    sanitizeTerminationCause({ reason: 'PLANB_TTS_TIMEOUT' }).component,
+    'tts',
+  );
+  assert.equal(
+    sanitizeTerminationCause({ reason: 'PLANB_PLAYBACK_UNCONFIRMED' })
+      .component,
+    'playback',
+  );
+});
+
+test('termination UUID is bound by the session and cannot be a provider identity or accessor', () => {
+  const sessionId = 'aa112233-4455-4667-8899-aabbccddeeff';
+  const untrustedId = 'bb112233-4455-4667-8899-aabbccddeeff';
+  const diagnostic = createCallTerminationDiagnostic(
+    {
+      reason: 'PLANB_TTS_TIMEOUT',
+      layer: 'provider',
+      role: 'local',
+      callId: untrustedId,
+      component: 'asr',
+      wsCloseCode: undefined,
+      privateText,
+    },
+    1000,
+    100,
+    sessionId,
+  );
+  assert.equal(diagnostic.callId, sessionId);
+  assert.equal(diagnostic.component, 'tts');
+  assert.equal(diagnostic.wsCloseCode, undefined);
+  assert(!JSON.stringify(diagnostic).includes(privateText));
+  let accessorCalls = 0;
+  const accessor = {
+    reason: 'PLAN_B_ASR_DISCONNECTED',
+    get callId() {
+      accessorCalls += 1;
+      throw new Error(privateText);
+    },
+  };
+  assert.equal(sanitizeTerminationCause(accessor).callId, undefined);
+  assert.equal(accessorCalls, 0);
+  for (const callId of [
+    localSid,
+    `MZ${'a'.repeat(32)}`,
+    privateText,
+    'https://private.invalid',
+    untrustedId + privateText,
+  ])
+    assert.equal(sanitizeTerminationCause({ callId }).callId, undefined);
+});
+
+test('a fixed Alibaba reason survives the shared bridge and session cleanup with the exact anonymous call UUID', async (t) => {
+  const f = await fixture(t);
+  f.setTime(25000);
+  f.providerError('PLAN_B_ASR_SOURCE_ID_CONFLICT');
+  await tick();
+  assert.deepEqual(f.diagnostics, [
+    {
+      event: 'CLOUD_CALL_TERMINATION',
+      reason: 'PLAN_B_ASR_SOURCE_ID_CONFLICT',
+      component: 'asr',
+      layer: 'provider',
+      role: 'local',
+      callId: f.call.id,
+      observedAtMs: 25000,
+      elapsedMs: 15000,
+    },
+  ]);
+  assert.equal(f.manager.isCleanupConfirmed(f.call.id), true);
+  assert.deepEqual(new Set(f.hangups), new Set([localSid, remoteSid]));
+  f.providerError('PLANB_TTS_TIMEOUT');
+  await f.manager.end(f.call.id, 'CALL_END_REQUESTED');
+  assert.equal(f.diagnostics.length, 1);
+  assert.equal(f.diagnostics[0].reason, 'PLAN_B_ASR_SOURCE_ID_CONFLICT');
+  assert.equal(f.diagnostics[0].wsCloseCode, undefined);
+  assert.ok(!JSON.stringify(f.diagnostics).includes(privateText));
 });

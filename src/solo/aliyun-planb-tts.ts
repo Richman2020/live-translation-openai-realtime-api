@@ -64,6 +64,7 @@ export function createAliyunPlanBTts(options: PlanBTtsOptions): PlanBTtsClient {
       const evidence = (
         event: 'configured' | 'ready' | 'completed' | 'cancelled' | 'failed',
         code?: string,
+        closeCode?: unknown,
       ) => {
         try {
           options.onEvidence?.({
@@ -76,6 +77,11 @@ export function createAliyunPlanBTts(options: PlanBTtsOptions): PlanBTtsClient {
             voice: options.config.voice,
             sampleRate: 24000,
             ...(code ? { code } : {}),
+            ...(Number.isSafeInteger(closeCode) &&
+            Number(closeCode) >= 1000 &&
+            Number(closeCode) <= 4999
+              ? { closeCode: Number(closeCode) }
+              : {}),
           });
         } catch {
           // Observer exceptions must not keep an active synthesis alive.
@@ -122,7 +128,7 @@ export function createAliyunPlanBTts(options: PlanBTtsOptions): PlanBTtsClient {
         header: { action, task_id: taskId, streaming: 'duplex' },
         payload: { input },
       });
-      const stop = (code: string) => {
+      const stop = (code: string, closeCode?: unknown) => {
         if (
           consumerCancelled ||
           (terminal && !providerFinished) ||
@@ -156,7 +162,11 @@ export function createAliyunPlanBTts(options: PlanBTtsOptions): PlanBTtsClient {
           }
         }
         if (!alreadyFinished) reportUsage();
-        evidence(code === 'PLANB_TTS_CANCELLED' ? 'cancelled' : 'failed', code);
+        evidence(
+          code === 'PLANB_TTS_CANCELLED' ? 'cancelled' : 'failed',
+          code,
+          closeCode,
+        );
         const pending = waiter;
         waiter = undefined;
         pending?.reject(new Error(code));
@@ -319,9 +329,9 @@ export function createAliyunPlanBTts(options: PlanBTtsOptions): PlanBTtsClient {
           }
         });
         socket.on('error', () => stop('PLANB_TTS_CONNECTION_FAILED'));
-        socket.on('close', () => {
+        socket.on('close', (code: unknown) => {
           clearTimeout(closeTimer);
-          if (!terminal) stop('PLANB_TTS_CONNECTION_CLOSED');
+          if (!terminal) stop('PLANB_TTS_CONNECTION_CLOSED', code);
         });
         armTimeout();
         while (true) {

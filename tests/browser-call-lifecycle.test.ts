@@ -2123,7 +2123,7 @@ test('canonical text completion, queued delivery and actual line confirmation re
   f.conversationEvent({ ...base, type: 'playback', deliveryId: 'delivery-a', status: 'sent', evidence: 'transport' }); assert.equal(status(), 'sent');
   f.conversationEvent({ ...base, revision: 2, type: 'playback', deliveryId: 'delivery-a', status: 'played', evidence: 'transport', sealed: true, expectedDeliveryCount: 1 }); assert.equal(status(), 'sent', 'a transport receipt cannot claim line playback');
   f.conversationEvent({ ...base, revision: 2, type: 'playback', deliveryId: 'delivery-a', status: 'played', evidence: 'twilio_mark', sealed: true, expectedDeliveryCount: 1 }); assert.equal(status(), 'played');
-  assert.equal(f.element('transcript').children[0], row); assert.match(row.children[2].textContent, /线路已确认播放/);
+  assert.equal(f.element('transcript').children[0], row); assert.match(row.children[2].textContent, /线路缓冲已排空/);
   assert.match(row.children[2].title, /不等于人耳/); await f.element('end-call').events.click();
 });
 

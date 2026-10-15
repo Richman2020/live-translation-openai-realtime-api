@@ -929,13 +929,13 @@ try {
   await eventually(
     () =>
       page.evaluate(
-        `document.querySelectorAll('.conversation-segment[data-utterance-id]').length===${(outgoingPairedCaptions ? 2 : 1) + (continuous ? 3 : 0)}`,
+        `document.querySelectorAll('[data-utterance-id]').length===${(outgoingPairedCaptions ? 2 : 1) + (continuous ? 3 : 0)}`,
       ),
     'Native SSE paired captions',
   );
   check(
     await page.evaluate(
-      `[...document.querySelectorAll('.conversation-segment[data-utterance-id]')].map(row=>({id:row.dataset.utteranceId,original:row.querySelector('.conversation-original .transcript-text').textContent,translation:row.querySelector('.conversation-translation .transcript-text').textContent}))`,
+      `[...document.querySelectorAll('[data-utterance-id]')].map(row=>{const grouped=row.matches('.conversation-source-fragment');return {id:row.dataset.utteranceId,original:row.querySelector(grouped?'.original-text':'.conversation-original .transcript-text').textContent,translation:(grouped?row.closest('.conversation-block').querySelector('.conversation-translation [data-source-id=\"'+row.dataset.utteranceId+'\"] .translation-text'):row.querySelector('.conversation-translation .transcript-text')).textContent};})`,
     ),
     [
       ...(outgoingPairedCaptions ? [{
@@ -955,7 +955,7 @@ try {
     outgoingPairedCaptions ? 'source-ordered speaker blocks and unbound native auxiliary text remain separate' : 'default shows paired remote captions and unbound native English without inventing a local source pair',
   );
   if (continuous) check(
-    await page.evaluate(`({blocks:[...document.querySelectorAll('.conversation-block')].map(block=>[...block.querySelectorAll('.conversation-segment')].map(row=>row.dataset.utteranceId)),auxiliary:document.querySelectorAll('.conversation-auxiliary').length,repeatedSpeakerHeaders:document.querySelectorAll('.conversation-segment .utterance-meta').length})`),
+    await page.evaluate(`({blocks:[...document.querySelectorAll('.conversation-block')].map(block=>[...block.querySelectorAll('[data-utterance-id]')].map(row=>row.dataset.utteranceId)),auxiliary:document.querySelectorAll('.conversation-auxiliary').length,repeatedSpeakerHeaders:document.querySelectorAll('.conversation-segment .utterance-meta').length})`),
     { blocks: [...(outgoingPairedCaptions ? [['browser-local']] : []), ['browser-remote', 'browser-remote-next']], auxiliary: 2, repeatedSpeakerHeaders: 0 },
     'actual cloud SSE keeps same-speaker completed semantic paragraphs in one block and native text in separate unbound auxiliary entries',
   );
@@ -970,12 +970,12 @@ try {
     'actual native text stays visible without a fabricated Chinese pair or played claim',
   );
   if (continuous && outgoingPairedCaptions) check(
-    await page.evaluate(`document.querySelector('.conversation-segment[data-caption-source="independent_text"] .conversation-translation .conversation-language').textContent`),
+    await page.evaluate(`document.querySelector('[data-caption-source="independent_text"]').closest('.conversation-block').querySelector('.conversation-translation .conversation-language').textContent`),
     'English 参考翻译',
     'independent English wording is labelled reference translation alongside different native text',
   );
   if (continuous && outgoingPairedCaptions) check(
-    await page.evaluate(`document.querySelector('.conversation-segment[data-utterance-id="browser-local"] .utterance-playback').dataset.playbackStatus`),
+    await page.evaluate(`document.querySelector('[data-utterance-id="browser-local"]').closest('.conversation-block').querySelector(':scope>.utterance-playback').dataset.playbackStatus`),
     'unknown',
     'paired independent text cannot invent native translated audio playback confirmation',
   );

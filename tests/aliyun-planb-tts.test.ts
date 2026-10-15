@@ -7,6 +7,7 @@ import WebSocket from 'ws';
 import { createAliyunPlanBTts } from '../src/solo/aliyun-planb-tts';
 import type {
   AliyunPlanBConfig,
+  PlanBEvidence,
   PlanBUsage,
 } from '../src/solo/aliyun-planb-types';
 
@@ -42,10 +43,10 @@ class Socket extends EventEmitter {
     this.emit('open');
   }
 
-  close() {
+  close(code: unknown = 1000, reason = Buffer.alloc(0)) {
     this.closeCount += 1;
     this.readyState = WebSocket.CLOSED;
-    this.emit('close');
+    this.emit('close', code, reason);
   }
 
   terminate() {
@@ -88,6 +89,7 @@ class Socket extends EventEmitter {
 function fixture(region: 'beijing' | 'singapore' = 'beijing') {
   const sockets: Socket[] = [];
   const usages: PlanBUsage[] = [];
+  const evidence: PlanBEvidence[] = [];
   const client = createAliyunPlanBTts({
     config: {
       ...config,
@@ -108,8 +110,9 @@ function fixture(region: 'beijing' | 'singapore' = 'beijing') {
     },
     timeoutMs: 1000,
     onUsage: (usage) => usages.push(usage),
+    onEvidence: (event) => evidence.push(event),
   });
-  return { client, sockets, usages };
+  return { client, sockets, usages, evidence };
 }
 
 test('CosyVoice run/continue/finish share one UUID and explicitly fix English PCM voice', async () => {
@@ -389,13 +392,52 @@ test('consumer stopping early cancels its task and later binary is discarded', a
 });
 
 test('a real socket close is an error and cannot reconnect itself', async () => {
-  const { client, sockets } = fixture();
+  const { client, sockets, evidence } = fixture();
   const pending = client.synthesize('Hello.', 1)[Symbol.asyncIterator]().next();
   sockets[0].open();
   sockets[0].message('task-started');
-  sockets[0].close();
+  sockets[0].close(
+    1011,
+    Buffer.from('private close reason transcript and key'),
+  );
   await assert.rejects(pending, /PLANB_TTS_CONNECTION_CLOSED/);
   assert.equal(sockets.length, 1);
+  const failures = evidence.filter((event) => event.event === 'failed');
+  assert.equal(failures.length, 1);
+  assert.equal(failures[0].code, 'PLANB_TTS_CONNECTION_CLOSED');
+  assert.equal(failures[0].closeCode, 1011);
+  assert(!JSON.stringify(evidence).includes('private'));
+});
+
+test('TTS close metadata rejects invalid codes and cancellation-induced close is not another failure', async () => {
+  for (const code of [999, 5000, NaN, '1011', undefined]) {
+    const { client, sockets, evidence } = fixture();
+    const pending = client
+      .synthesize('Hello.', 1)
+      [Symbol.asyncIterator]()
+      .next();
+    sockets[0].open();
+    sockets[0].message('task-started');
+    sockets[0].emit('close', code, Buffer.from('private close payload'));
+    await assert.rejects(pending, /PLANB_TTS_CONNECTION_CLOSED/);
+    assert.equal(
+      evidence.find((event) => event.event === 'failed')?.closeCode,
+      undefined,
+    );
+    client.abort();
+    assert.equal(
+      evidence.filter((event) => event.event === 'failed').length,
+      1,
+    );
+  }
+  const { client, sockets, evidence } = fixture();
+  const pending = client.synthesize('Hello.', 1)[Symbol.asyncIterator]().next();
+  sockets[0].open();
+  sockets[0].message('task-started');
+  client.abort();
+  await assert.rejects(pending, /PLANB_TTS_CANCELLED/);
+  sockets[0].emit('close', 1011, Buffer.from('private late close reason'));
+  assert.equal(evidence.filter((event) => event.event === 'failed').length, 0);
 });
 
 test('binary before task acknowledgement is refused', async () => {

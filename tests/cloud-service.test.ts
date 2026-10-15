@@ -305,6 +305,37 @@ test('signal refresh termination sink emits only fixed sanitized metadata and ne
   assert.equal(invalid.sessionExpiresAtEpochSeconds, undefined);
 });
 
+test('Alibaba termination sink retains exact local call correlation and fixed component only', () => {
+  const lines: string[] = [];
+  const callId = 'aa112233-4455-4667-8899-aabbccddeeff';
+  reportCloudCallTermination(
+    {
+      reason: 'PLAN_B_ASR_SOURCE_ID_CONFLICT',
+      layer: 'provider',
+      role: 'remote',
+      callId,
+      component: 'tts',
+      observedAtMs: 5000,
+      elapsedMs: 1000,
+      rawReason: 'private transcript and credential',
+      providerTaskId: 'private supplier ID',
+      text: 'private words',
+    },
+    (line) => lines.push(line),
+  );
+  assert.deepEqual(JSON.parse(lines[0]), {
+    event: 'CLOUD_CALL_TERMINATION',
+    reason: 'PLAN_B_ASR_SOURCE_ID_CONFLICT',
+    component: 'asr',
+    layer: 'provider',
+    role: 'remote',
+    callId,
+    observedAtMs: 5000,
+    elapsedMs: 1000,
+  });
+  assert.doesNotMatch(lines[0], /private|rawReason|providerTaskId|text/);
+});
+
 test('Twilio signer refuses subsecond TTL, stale or wrong app/identity grants without widening default lifetime', async () => {
   const time = Date.now();
   const signer = createCloudVoiceSigner(configuration(time));

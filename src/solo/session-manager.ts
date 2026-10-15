@@ -1770,6 +1770,7 @@ export class SessionManager extends EventEmitter {
           firstCause,
           this.diagnosticTime(),
           session.diagnosticStartedAtMs,
+          session.view.id,
         ),
       );
     } catch {

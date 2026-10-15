@@ -49,6 +49,8 @@ export type PlanBEvidence = {
   voice?: 'loongandy_v3';
   sampleRate?: 24000;
   code?: string;
+  /** Actual transport close code only; no provider close reason is exposed. */
+  closeCode?: number;
 };
 export type PlanBAsrSource = {
   sequence: number;

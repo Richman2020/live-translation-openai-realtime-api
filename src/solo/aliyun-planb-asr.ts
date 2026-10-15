@@ -171,7 +171,11 @@ export function createAliyunPlanBAsrClient(
   const socket = createPlanBWebSocket(config, options.createWebSocket);
   const isClosed = () => state === 'closed';
 
-  const evidence = (event: PlanBEvidence['event'], code?: string) => {
+  const evidence = (
+    event: PlanBEvidence['event'],
+    code?: string,
+    closeCode?: number,
+  ) => {
     try {
       options.onEvidence?.({
         layer: 'asr',
@@ -182,6 +186,9 @@ export function createAliyunPlanBAsrClient(
         model: config.asrModel,
         sampleRate: config.sampleRate,
         ...(code ? { code } : {}),
+        ...(integer(closeCode) && closeCode >= 1000 && closeCode <= 4999
+          ? { closeCode }
+          : {}),
       });
     } catch {
       /* Evidence callbacks cannot expose raw provider exceptions. */
@@ -200,14 +207,14 @@ export function createAliyunPlanBAsrClient(
       /* Local state remains fenced even if transport teardown fails. */
     }
   };
-  const fail = (code: string) => {
+  const fail = (code: string, closeCode?: number) => {
     if (state === 'closed') return;
     failure = code;
     state = 'closed';
     cleanup();
     readyReject(new Error(code));
     finishReject(new Error(code));
-    evidence('failed', code);
+    evidence('failed', code, closeCode);
     try {
       options.onError(code);
     } catch {
@@ -569,6 +576,9 @@ export function createAliyunPlanBAsrClient(
           format: 'pcm',
           sample_rate: 24000,
           language_hints: [role === 'local' ? 'zh' : 'en'],
+          // Official Fun-ASR silence keepalive; genuine close/error still fails
+          // this task and no automatic reconnect or provider fallback exists.
+          heartbeat: true,
         },
         input: context.length ? { context } : {},
       },
@@ -656,7 +666,9 @@ export function createAliyunPlanBAsrClient(
     }
   });
   socket.on('error', () => fail('PLAN_B_ASR_TRANSPORT_FAILED'));
-  socket.on('close', () => fail('PLAN_B_ASR_DISCONNECTED'));
+  socket.on('close', (closeCode: number) =>
+    fail('PLAN_B_ASR_DISCONNECTED', closeCode),
+  );
   evidence('configured');
   arm('PLAN_B_ASR_START_TIMEOUT');
 

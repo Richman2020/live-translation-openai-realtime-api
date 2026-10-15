@@ -4,7 +4,20 @@
 
 需求见 [PROJECT_BRIEF.md](PROJECT_BRIEF.md)，工作规则见 [AGENTS.md](AGENTS.md)，运行步骤见 [LOCAL_SETUP.md](LOCAL_SETUP.md)，后续执行入口见 [LOCAL_CODEX_HANDOFF.md](LOCAL_CODEX_HANDOFF.md)。
 
-## 最新：阿里 Plan B 电话集成离线完成，未推送/发布（2026-10-15）
+## 最新：两次真实通话异常诊断及修复候选（2026-10-15，未推送/部署）
+
+- 实际线上基线6d061820d8cbb062ec3e3a168f05dd3bbd9b63ec / 部署f2609bcc-7ec3-456b-80e9-50ba03a8b431。用户两次实测失败，不能将此前构建、健康或短试听视为电话验收通过。以该精确基线另建 `codex/ai-phone-aliyun-call-fix-20261015` / `/workspace/ai-phone-aliyun-call-fix-20261015`，原集成目录及未提交PROGRESS/427 tracked内容已单独保护和核验；既有OpenAI、上下文、A原型/试听及附件不动。
+- 已按应用UUID与HTTP voice/hangup、pipelineId关联两通：9312038a-ec2f-4b89-bb9c-f47872b11d86、fa54eaff-313a-4323-84eb-ffff371220c1。服务端12:06:38.133/12:07:35.953（北京时间）先记录provider local/remote终止，浏览器hangup分别约359/383ms后。终止行旧版无callId，elapsed及单活动通话强关联；Twilio两腿SID、浏览器SDK错误、首个阿里具体故障未取得，不能把用户点击、completed或最后清理当根因。续约均200；后来的revoke403不是首异常。
+- 确认并修复诊断原因丢失：107项精确PlanB固定码白名单、按组件分类、SessionManager权威本地callUUID，以及ASR/TTS真实数值WSclosecode。未知正文/伪前缀/访问器不进日志；正常挂断、取消与迟到关闭不覆盖首因；鉴权、绑定及双腿清理不变。
+- 依据当日官方Fun-ASR客户端文档，只新增 `heartbeat:true` 保持一方静音任务。600秒假静音不自停、真实close仍清理、0自动重连。**这是确定配置缺口，尚非两次历史断线首因确证**；不改VAD/语义断句阈值，不放宽ASR校验、不恢复总时长/金额限制。
+- 显示缺陷在view重复为每来源画一套原文/译文；现每可靠说话块一组阅读区，来源稳定追加及partial/final原位更新，保留真正重复、更正/撤回/迟到，不按文字语言猜人。raw与整理分开核对；native未知来源仍独立辅助，不倒推原文。音频队列不等待显示块；播放状态准确表述线路排空，非实际听到。
+- 数字音轨审查和离线探针未发现TTS回灌ASR或交换腿；日志缺原始ASR/PCM/设备声学证据，不能把farmer/刚开直接归因MT、回声、口音或说话人。本轮不通过隐藏异语言或文字去重遮住来源异常。
+- 实际时序：本方估计终点→ASR final为5168/6006/8724ms，MT1023–1733ms、TTS首PCM1335–1818ms；一个第二小节MT前FIFO等5660ms。供应商估计终点与真实声学终点不同，接收端播放开始未知。未通过任意截句/临时稿发声提速；MT预取仅方案，可能增加早挂断场景实际请求，未实施。
+- **本轮最终离线**：npm test **1881 total /1876 pass /5 Windows条件skip /0 fail/cancel**；typecheck、build、7个修改生产TS文件ESLint、diff-check均通过。浏览器DOM43组、controlled84组、continuous91组通过，外网/真实供应商调用0。两通metadata epoch+合成正文/修订/故障的回放不能称真实原音重现。独立显示170+43、后端144及边界探针通过；重叠不合计冒充全量。
+- 原有两个测试文件17项style问题与基线相同，未为了清零扩改。最终统一检查日志、官方摘录、文件哈希和独审留存在 `/workspace/ai-phone-reference/aliyun-call-incident-20261015`；合成截图及显示独审在 `/workspace/ai-phone-reference/aliyun-call-fix-display-20261015`。
+- 结束回读指定AI服务仍6d/f260、SUCCESS、staged为空。无安装、模型/录音上传、拨号、推送、PR、部署或配置/凭据/网络变更，不操作portal-test。本地候选交dot核对；新候选的推送CI、发布及用户亲自实测另行安排，旧发布批准不复用。完整证据、文件范围及方案见 [异常诊断与修复](docs/ALIYUN_CALL_INCIDENT_FIX_2026-10-15.md)。
+
+## 历史：阿里 Plan B 电话集成离线完成（2026-10-15，后续已由用户发布6d）
 
 - 用户固定来源 `da3bfbf09a5580de268ad8a2c0e12e572c24f267`，附件SHA256 `707868f36894c54476d7e5886f4ee0f06d8157b0483cc1250e0a8917450bfb3d`；双清单67/67、完整source/Git443/443、摘录43/43及两补丁tree核验通过。bundle仅在新inspect clone恢复声明d7浅边界；未改原仓库shallow，不继承附件旧授权。PATCH_PREIMAGES只对b072，不用于覆盖当前开发。
 - 本轮开始时实际开发HEAD为eb10，da3b为其后代；从精确 `eb10bf98a2606eb476af5314fde02c243f741fbd` 建 `codex/ai-phone-aliyun-integration-20261015`、`/workspace/ai-phone-aliyun-integration-20261015`。选择性移植ASR alias修复及current-only/TM/guard思路到生产，不整树覆盖，不合入whole/试听runner/已消费锁和旧进度。最终集成完整SHA见本轮RECEIPT（与来源da3b区分）。原七工作树HEAD/未提交tracked内容/依赖链接前后保护；OpenAI、上下文字幕、A原型、试听执行器与备份保持，package/lock未改。
