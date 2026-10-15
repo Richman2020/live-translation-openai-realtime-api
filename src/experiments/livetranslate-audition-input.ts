@@ -17,9 +17,9 @@ export const LIVETRANSLATE_AUDITION_VOICE = 'Aiden';
 export const LIVETRANSLATE_AUDITION_SCOPE =
   'livetranslate-comparison-audition-v1';
 export const LIVETRANSLATE_SINGLE_LOCAL_SCOPE =
-  'livetranslate-single-local-aiden-audition-v1';
+  'livetranslate-single-local-protocol-aiden-audition-v1';
 export const LIVETRANSLATE_SINGLE_LOCAL_PARENT =
-  'bccaf3350c353b9f3227635e763e419aa059555e';
+  '79d22d2df0977f28cc02b896f133b6b2494f6dc0';
 export type LiveTranslateAuditionMode = 'dual' | 'single-local';
 export const LIVETRANSLATE_AUDITION_LIMITS = Object.freeze({
   sessions: 2,

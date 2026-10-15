@@ -16,6 +16,8 @@ import type {
   LiveTranslateTiming,
   LiveTranslateSession,
   LiveTranslateSessionConfiguration,
+  LiveTranslateProtocolEvent,
+  LiveTranslateProtocolDiagnostic,
 } from './livetranslate-types';
 import {
   LIVETRANSLATE_AUDITION_LIMITS,
@@ -69,6 +71,9 @@ export type LiveTranslateAuditionResult = {
   })[];
   timing: (LiveTranslateTiming & { clipId: string })[];
   usage: (LiveTranslateUsage & { clipId: string })[];
+  protocolEvents: (LiveTranslateProtocolEvent & { clipId: string })[];
+  protocolDiagnostics: (LiveTranslateProtocolDiagnostic & { clipId: string })[];
+  protocolTraceTruncated: boolean;
   confirmedSessions: (LiveTranslateSession & { clipId: string })[];
   observedSessionConfigurations: (LiveTranslateSessionConfiguration & {
     clipId: string;
@@ -194,6 +199,9 @@ export async function runLiveTranslateAudition(
     translations: [],
     timing: [],
     usage: [],
+    protocolEvents: [],
+    protocolDiagnostics: [],
+    protocolTraceTruncated: false,
     confirmedSessions: [],
     observedSessionConfigurations: [],
     audio: [],
@@ -208,10 +216,12 @@ export async function runLiveTranslateAudition(
     })),
   };
   const clients = new Set<LiveTranslateClient>();
+  const transportClosures: Promise<unknown>[] = [];
   const responses = new Set<string>();
   const audioEvents = new Set<string>();
   let stopped = false;
   let eventCount = 0;
+  let journalOpen = true;
   let rejectStopped: (reason: Error) => void;
   const stoppedTask = new Promise<never>((_resolve, reject) => {
     rejectStopped = reject;
@@ -295,6 +305,24 @@ export async function runLiveTranslateAudition(
         proxyUrl: options.proxyUrl,
         now,
         timeoutMs: Math.min(timeoutMs, 15000),
+        onProtocolEvent: (event) => {
+          if (!journalOpen) return;
+          if (result.protocolEvents.length >= 8192) {
+            result.protocolTraceTruncated = true;
+            stop('LIVETRANSLATE_AUDITION_EVENT_LIMIT');
+            return;
+          }
+          result.protocolEvents.push({ ...event, clipId: clip.id });
+        },
+        onProtocolDiagnostic: (event) => {
+          if (!journalOpen) return;
+          if (result.protocolDiagnostics.length >= 4096) {
+            result.protocolTraceTruncated = true;
+            stop('LIVETRANSLATE_AUDITION_EVENT_LIMIT');
+            return;
+          }
+          result.protocolDiagnostics.push({ ...event, clipId: clip.id });
+        },
         onSessionConfiguration: (event) => {
           if (!active()) return;
           result.observedSessionConfigurations.push({
@@ -483,6 +511,7 @@ export async function runLiveTranslateAudition(
         },
       });
       clients.add(client);
+      if (client.transportClosed) transportClosures.push(client.transportClosed);
       result.counters.sessions += 1;
       if (stopped) {
         client.abort();
@@ -498,8 +527,12 @@ export async function runLiveTranslateAudition(
         session.targetLanguage !== (clip.role === 'local' ? 'en' : 'zh') ||
         session.configurationAcknowledgement?.basis !==
           'provider_session_updated' ||
-        typeof session.configurationAcknowledgement.eventId !== 'string' ||
-        !session.configurationAcknowledgement.eventId ||
+        (session.configurationAcknowledgement.eventId !== null &&
+          (typeof session.configurationAcknowledgement.eventId !== 'string' ||
+            !session.configurationAcknowledgement.eventId)) ||
+        typeof session.configurationAcknowledgement.receiveSequence !== 'number' ||
+        !Number.isSafeInteger(session.configurationAcknowledgement.receiveSequence) ||
+        session.configurationAcknowledgement.receiveSequence < 1 ||
         !Number.isFinite(session.configurationAcknowledgement.receivedAt) ||
         session.role !== clip.role ||
         session.inputSampleRate !== 16000 ||
@@ -602,7 +635,22 @@ export async function runLiveTranslateAudition(
         /* Local fence is already active. */
       }
     }
+    const closeWaitMs = Math.min(250, Math.max(0, timeoutMs - (now() - startedAt)));
+    if (transportClosures.length && closeWaitMs > 0) {
+      let closeTimer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          Promise.allSettled(transportClosures),
+          new Promise<void>((resolve) => {
+            closeTimer = setTimeout(resolve, closeWaitMs);
+          }),
+        ]);
+      } finally {
+        clearTimeout(closeTimer);
+      }
+    }
     stopped = true;
+    journalOpen = false;
     result.endedAt = now();
   }
   return result;

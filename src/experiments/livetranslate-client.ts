@@ -1,9 +1,14 @@
 /* eslint-disable no-continue -- Retired event/item snapshots must not be replayed. */
 import { createHash } from 'node:crypto';
+import { TextDecoder } from 'node:util';
 import createHttpsProxyAgent from 'https-proxy-agent';
 import WebSocket from 'ws';
 
 import { validOpenAIProxyUrl } from '../solo/openai-websocket';
+import {
+  LIVE_TRANSLATE_PROTOCOL_EVENT_TYPES,
+  LIVE_TRANSLATE_PROTOCOL_SCHEMA_PATHS,
+} from './livetranslate-types';
 import type {
   LiveTranslateClient,
   LiveTranslateClientOptions,
@@ -13,6 +18,10 @@ import type {
   LiveTranslateTiming,
   LiveTranslateTranslation,
   LiveTranslateUsage,
+  LiveTranslateProtocolEvent,
+  LiveTranslateProtocolDiagnostic,
+  LiveTranslateProtocolValueType,
+  LiveTranslateProtocolEventType,
 } from './livetranslate-types';
 
 export * from './livetranslate-types';
@@ -24,7 +33,7 @@ const MAX_TEXT = 32768;
 const MAX_BYTES = 1024 * 1024;
 const MAX_QUEUED_AUDIO_BYTES = 2 * 1024 * 1024;
 const identifier = (value: unknown): value is string =>
-  typeof value === 'string' && /^[A-Za-z0-9_:-]{1,200}$/u.test(value);
+  typeof value === 'string' && value.length > 0 && value.length <= 1024;
 const integer = (value: unknown): value is number =>
   typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 function sessionValue<T extends string>(
@@ -55,8 +64,56 @@ function canonicalEvent(value: any): string {
     .map((key) => `${JSON.stringify(key)}:${canonicalEvent(value[key])}`)
     .join(',')}}`;
 }
+const knownEventTypes = new Set<string>(LIVE_TRANSLATE_PROTOCOL_EVENT_TYPES);
+const protocolType = (event: any): LiveTranslateProtocolEventType =>
+  typeof event?.type !== 'string' ? null :
+    knownEventTypes.has(event.type) ? event.type : 'unknown';
+function valueType(value: unknown): LiveTranslateProtocolValueType {
+  if (value === undefined) return 'missing';
+  if (value === null) return 'null';
+  if (ArrayBuffer.isView(value) || value instanceof ArrayBuffer) return 'binary';
+  if (Array.isArray(value)) return 'array';
+  if (typeof value === 'boolean') return 'boolean';
+  if (typeof value === 'number') return 'number';
+  if (typeof value === 'string') return 'string';
+  return 'object';
+}
+function protocolPath(event: any, path: string): unknown {
+  let current = event;
+  for (const key of path.split('.')) {
+    if (!current || typeof current !== 'object' || !Object.hasOwn(current, key))
+      return undefined;
+    current = current[key];
+  }
+  return current;
+}
+function protocolSchema(event: any): Pick<LiveTranslateProtocolEvent, 'schema' | 'unknownKeyCount'> {
+  const schema: LiveTranslateProtocolEvent['schema'] = {};
+  const allowed = new Map<string, Set<string>>();
+  for (const path of LIVE_TRANSLATE_PROTOCOL_SCHEMA_PATHS) {
+    const keys = path.split('.');
+    const key = keys.pop()!;
+    const parent = keys.join('.');
+    if (!allowed.has(parent)) allowed.set(parent, new Set());
+    allowed.get(parent)!.add(key);
+    const value = protocolPath(event, path);
+    if (value !== undefined) schema[path] = valueType(value);
+  }
+  let unknownKeyCount = 0;
+  for (const [path, keys] of allowed) {
+    const value = path ? protocolPath(event, path) : event;
+    if (value && typeof value === 'object' && !Array.isArray(value))
+      unknownKeyCount += Object.keys(value).filter((key) => !keys.has(key)).length;
+  }
+  return { schema, unknownKeyCount };
+}
 
 type Source = LiveTranslateSource;
+type ProtocolFailureDetail = {
+  validationPath: LiveTranslateProtocolDiagnostic['validationPath'];
+  expected: LiveTranslateProtocolDiagnostic['expected'];
+  actual: unknown;
+};
 type Translation = LiveTranslateTranslation & {
   textDone: boolean;
   audioDone: boolean;
@@ -66,7 +123,12 @@ type ResponseState = {
   done: boolean;
   createdSeen: boolean;
   audioReleased: boolean;
-  audio: { pcm: Buffer; eventId: string; item: Translation }[];
+  audio: {
+    pcm: Buffer;
+    eventId: string;
+    eventIdBasis: 'provider_event_id' | 'local_receive_sequence';
+    item: Translation;
+  }[];
   outputs: Map<number, string>;
 };
 
@@ -124,6 +186,13 @@ export function createLiveTranslateClient(
   let finishRequested = false;
   let audioSequence = 0;
   let failure = '';
+  let receiveSequence = 0;
+  let currentEvent: any;
+  let transportCloseObserved = false;
+  let resolveTransportClosed: (event: { observed: true; code?: number; at: number }) => void;
+  const transportClosed = new Promise<{ observed: true; code?: number; at: number }>((resolve) => {
+    resolveTransportClosed = resolve;
+  });
   let readyResolve: (session: LiveTranslateSession) => void;
   let readyReject: (error: Error) => void;
   let finishResolve: () => void;
@@ -140,12 +209,34 @@ export function createLiveTranslateClient(
   finished.catch(() => {});
   let timer: ReturnType<typeof setTimeout> | undefined;
   const closed = () => state === 'closed';
+  const protocolEvent = (
+    stage: LiveTranslateProtocolEvent['stage'],
+    event?: any,
+    metadata: Partial<Pick<LiveTranslateProtocolEvent, 'at' | 'frameBytes' | 'frameBinary' | 'httpStatusCode' | 'closeCode' | 'providerError'>> = {},
+  ) => {
+    try {
+      options.onProtocolEvent?.({
+        role, at: now(), stage,
+        eventType: protocolType(event),
+        eventIdPresent: event?.event_id !== undefined,
+        ...protocolSchema(event),
+        ...metadata,
+      });
+    } catch {
+      if (!closed()) fail('LIVETRANSLATE_CALLBACK_FAILED');
+    }
+  };
   const cleanup = (graceful = false) => {
     clearTimeout(timer);
     timer = undefined;
-    socket.removeAllListeners();
+    socket.removeAllListeners('message');
+    socket.removeAllListeners('open');
+    socket.removeAllListeners('unexpected-response');
+    socket.removeAllListeners('error');
     socket.on('error', () => {});
     try {
+      if (socket.readyState !== WebSocket.CLOSED)
+        protocolEvent('transport_close_requested', undefined, graceful ? { closeCode: 1000 } : {});
       if (graceful && socket.readyState === WebSocket.OPEN) socket.close(1000);
       else if (socket.readyState !== WebSocket.CLOSED) socket.terminate();
     } catch {
@@ -165,8 +256,75 @@ export function createLiveTranslateClient(
     code: string,
     closeCode?: unknown,
     httpStatusCode?: unknown,
+    detail?: ProtocolFailureDetail,
   ) => {
     if (closed()) return;
+    const defaults: Partial<Record<string, ProtocolFailureDetail>> = {
+      LIVETRANSLATE_ITEM_CONFLICT: {
+        validationPath: 'item_id', expected: 'consistent_item_binding',
+        actual: currentEvent?.item_id ?? currentEvent?.item?.id,
+      },
+      LIVETRANSLATE_SOURCE_CONFLICT: {
+        validationPath: 'source.binding', expected: 'consistent_source_binding',
+        actual: currentEvent?.previous_item_id,
+      },
+      LIVETRANSLATE_RESPONSE_ORDER_UNKNOWN: {
+        validationPath: 'response.id', expected: 'response_created_before_output',
+        actual: currentEvent?.response_id ?? currentEvent?.response?.id,
+      },
+      LIVETRANSLATE_RESPONSE_INCOMPLETE: {
+        validationPath: 'response.output', expected: 'pending_output_complete',
+        actual: currentEvent?.response?.output,
+      },
+      LIVETRANSLATE_RESPONSE_AUDIO_MISSING: {
+        validationPath: 'response.audio.done', expected: 'pending_output_complete', actual: undefined,
+      },
+      LIVETRANSLATE_SEND_UNAVAILABLE: {
+        validationPath: 'transport.send', expected: 'send_available', actual: socket.readyState,
+      },
+      LIVETRANSLATE_SEND_FAILED: {
+        validationPath: 'transport.send', expected: 'send_available', actual: socket.readyState,
+      },
+      LIVETRANSLATE_READY_TIMEOUT: {
+        validationPath: 'transport.ready_timeout', expected: 'valid_protocol_transition', actual: state,
+      },
+      LIVETRANSLATE_FINISH_TIMEOUT: {
+        validationPath: 'transport.finish_timeout', expected: 'pending_output_complete', actual: state,
+      },
+      LIVETRANSLATE_CALLBACK_FAILED: {
+        validationPath: 'internal.handler', expected: 'valid_callback', actual: undefined,
+      },
+      LIVETRANSLATE_AUDIO_QUEUE_LIMIT: {
+        validationPath: 'delta', expected: 'bounded_capacity', actual: queuedAudioBytes,
+      },
+      LIVETRANSLATE_ITEM_CAPACITY: {
+        validationPath: 'item_id', expected: 'bounded_capacity', actual: currentEvent?.item_id ?? currentEvent?.item?.id,
+      },
+      LIVETRANSLATE_UNEXPECTED_AUDIO: {
+        validationPath: 'type', expected: 'output_modality', actual: currentEvent?.type,
+      },
+      LIVETRANSLATE_MODALITY_MISMATCH: {
+        validationPath: 'type', expected: 'output_modality', actual: currentEvent?.type,
+      },
+      LIVETRANSLATE_CONNECTION_FAILED: {
+        validationPath: 'frame', expected: 'error_free_transport', actual: httpStatusCode,
+      },
+    };
+    const diagnostic: ProtocolFailureDetail = detail ?? defaults[code] ?? {
+      validationPath: 'state', expected: 'valid_protocol_transition', actual: state,
+    };
+    try {
+      options.onProtocolDiagnostic?.({
+        role, at: now(), stage: state,
+        eventType: diagnostic.validationPath.startsWith('transport.') || code === 'LIVETRANSLATE_INPUT_INVALID'
+          ? null : protocolType(currentEvent),
+        validationPath: diagnostic.validationPath,
+        expected: diagnostic.expected,
+        actualType: valueType(diagnostic.actual), fatal: true, code,
+      });
+    } catch {
+      /* A diagnostic sink cannot replace the original failure or prevent cleanup. */
+    }
     state = 'closed';
     failure = code;
     cleanup();
@@ -187,6 +345,26 @@ export function createLiveTranslateClient(
       /* The original failure and cleanup cannot be overridden. */
     }
   };
+  const requireValue = (
+    accepted: boolean,
+    validationPath: LiveTranslateProtocolDiagnostic['validationPath'],
+    expected: LiveTranslateProtocolDiagnostic['expected'],
+    actual: unknown,
+    code = 'LIVETRANSLATE_EVENT_INVALID',
+  ) => {
+    if (!accepted) fail(code, undefined, undefined, { validationPath, expected, actual });
+    return accepted && !closed();
+  };
+  const responseConfiguration = (raw: any) =>
+    requireValue(raw?.voice === undefined || raw.voice === LIVE_TRANSLATE_VOICE,
+      'response.voice', 'Aiden', raw?.voice, 'LIVETRANSLATE_CONFIGURATION_REJECTED') &&
+    requireValue(raw?.modalities === undefined || (Array.isArray(raw.modalities) &&
+      raw.modalities.length === modalities.length &&
+      modalities.every((value) => raw.modalities.includes(value)) &&
+      new Set(raw.modalities).size === modalities.length),
+    'response.modalities', 'exact_output_modalities', raw?.modalities, 'LIVETRANSLATE_CONFIGURATION_REJECTED') &&
+    requireValue(raw?.output_audio_format === undefined || ['pcm', 'pcm16'].includes(raw.output_audio_format),
+      'response.output_audio_format', 'pcm', raw?.output_audio_format, 'LIVETRANSLATE_CONFIGURATION_REJECTED');
   const emit = <T>(callback: ((event: T) => void) | undefined, event: T) => {
     if (closed()) return;
     try {
@@ -219,6 +397,7 @@ export function createLiveTranslateClient(
     try {
       socket.send(JSON.stringify(event), (error) => {
         if (error) fail('LIVETRANSLATE_SEND_FAILED');
+        else protocolEvent('client_event_sent', event);
       });
     } catch {
       fail('LIVETRANSLATE_SEND_FAILED');
@@ -336,6 +515,7 @@ export function createLiveTranslateClient(
             ...(chunk.item.sourceId ? { sourceId: chunk.item.sourceId } : {}),
             pairing: chunk.item.pairing,
             eventId: chunk.eventId,
+            eventIdBasis: chunk.eventIdBasis,
             sequence: audioSequence,
           };
           try {
@@ -352,17 +532,12 @@ export function createLiveTranslateClient(
     }
   };
   const translation = (event: any) => {
-    if (
-      !identifier(event.response_id) ||
-      !identifier(event.item_id) ||
-      !integer(event.output_index) ||
-      event.output_index !== 0 ||
-      !integer(event.content_index) ||
-      event.content_index !== 0
-    ) {
-      fail('LIVETRANSLATE_EVENT_INVALID');
-      return undefined;
-    }
+    if (!requireValue(identifier(event.response_id), 'response_id', 'nonempty_identifier_string', event.response_id) ||
+      !requireValue(identifier(event.item_id), 'item_id', 'nonempty_identifier_string', event.item_id) ||
+      !requireValue(integer(event.output_index), 'output_index', 'nonnegative_integer', event.output_index) ||
+      !requireValue(event.output_index === 0, 'output_index', 'zero_index', event.output_index, 'LIVETRANSLATE_UNSUPPORTED_SCHEMA') ||
+      !requireValue(integer(event.content_index), 'content_index', 'nonnegative_integer', event.content_index) ||
+      !requireValue(event.content_index === 0, 'content_index', 'zero_index', event.content_index, 'LIVETRANSLATE_UNSUPPORTED_SCHEMA')) return undefined;
     if (sources.has(event.item_id)) {
       fail('LIVETRANSLATE_ITEM_CONFLICT');
       return undefined;
@@ -436,55 +611,86 @@ export function createLiveTranslateClient(
     return Boolean(source?.final && source.text.trim());
   };
   const incompleteBoundOutput = () =>
-    [...associations.keys()].some((translationId) => {
+    [...sources.values()].some((source) =>
+      source.final && source.text.trim() &&
+      ![...associations.values()].includes(source.sourceId),
+    ) || [...translations.values()].some((item) =>
+      (item.text.trim() || item.audioSeen) &&
+      (!item.sourceId || !sources.has(item.sourceId)),
+    ) || [...associations.keys()].some((translationId) => {
       if (!requiresTranslation(translationId)) return false;
       const item = translations.get(translationId);
       return (
         !item ||
         !item.text.trim() ||
         !responses.get(item.responseId)?.done ||
-        (role === 'local' && !item.audioSeen)
+        !item.textDone ||
+        (role === 'local' && (!item.audioSeen || !item.audioDone))
       );
     });
   const handle = (event: any) => {
-    if (
-      !event ||
-      !identifier(event.event_id) ||
-      typeof event.type !== 'string'
-    ) {
-      fail('LIVETRANSLATE_EVENT_INVALID');
+    if (!requireValue(event !== null && typeof event === 'object' && !Array.isArray(event),
+      'json', 'json_object', event)) return;
+    // The official quick start also recognizes a top-level gateway code.
+    // Classify errors before optional event metadata; never retain provider text.
+    if (event.type === 'error' ||
+      (typeof event.code === 'string' && event.code.length > 0) ||
+      typeof event.code === 'number') {
+      const nested = event.type === 'error';
+      const rawCode = nested ? event.error?.code : event.code;
+      protocolEvent('provider_error', event, {
+        providerError: {
+          shape: nested ? 'nested_error' : 'gateway_code',
+          code: sessionValue(rawCode, ['invalid_value']),
+          type: sessionValue(event.error?.type, ['invalid_request_error']),
+          parameter: sessionValue(event.error?.param, [
+            'session.modalities', 'session.voice', 'session.output_modalities',
+            'session.enable_voice_clone', 'session.translation.language',
+            'session.audio.input.format', 'session.audio.output.format',
+          ]),
+        },
+      });
+      fail('LIVETRANSLATE_PROVIDER_REJECTED', undefined, undefined, {
+        validationPath: event.type === 'error' ? 'error' : 'code',
+        expected: 'no_provider_error', actual: event.type === 'error' ? event.error : event.code,
+      });
       return;
     }
-    const digest = createHash('sha256')
-      .update(canonicalEvent(event))
-      .digest('hex');
-    const old = seen.get(event.event_id);
-    if (old) {
-      if (old !== digest) fail('LIVETRANSLATE_EVENT_CONFLICT');
-      return;
-    }
-    if (seen.size >= MAX_EVENTS) {
-      fail('LIVETRANSLATE_EVENT_CAPACITY');
-      return;
-    }
-    seen.set(event.event_id, digest);
-    if (event.session_id !== undefined && event.session_id !== sessionId) {
-      fail('LIVETRANSLATE_SESSION_MISMATCH');
-      return;
-    }
-    if (event.type === 'error') {
-      fail('LIVETRANSLATE_PROVIDER_REJECTED');
-      return;
-    }
-    if (event.type === 'session.created') {
-      if (
-        state !== 'connecting' ||
-        !identifier(event.session?.id) ||
-        event.session?.model !== LIVE_TRANSLATE_MODEL
-      ) {
-        fail('LIVETRANSLATE_SESSION_MISMATCH');
+    if (!requireValue(identifier(event.type), 'type', 'event_type_string', event.type)) return;
+    // Extension notifications cannot mutate readiness, sources, usage or completion.
+    if (!knownEventTypes.has(event.type)) return;
+    if (!requireValue(event.event_id === undefined || identifier(event.event_id),
+      'event_id', 'optional_identifier_string', event.event_id)) return;
+    if (event.event_id !== undefined) {
+      const digest = createHash('sha256').update(canonicalEvent(event)).digest('hex');
+      const old = seen.get(event.event_id);
+      if (old) {
+        if (old !== digest) fail('LIVETRANSLATE_EVENT_CONFLICT', undefined, undefined, {
+          validationPath: 'event_id', expected: 'consistent_item_binding', actual: event.event_id,
+        });
         return;
       }
+      seen.set(event.event_id, digest);
+    }
+    if (event.session_id !== undefined &&
+      event.session_id !== (event.type === 'session.created' ? event.session?.id : sessionId)) {
+      fail('LIVETRANSLATE_SESSION_MISMATCH', undefined, undefined, {
+        validationPath: 'session_id', expected: 'matching_session_id', actual: event.session_id,
+      });
+      return;
+    }
+    if ([
+      'response.output_item.added', 'response.output_item.done',
+      'response.content_part.added', 'response.content_part.done',
+      'input_audio_buffer.committed', 'input_audio_buffer.cleared',
+    ].includes(event.type)) return;
+    if (event.type === 'session.created') {
+      if (!requireValue(state === 'connecting', 'state', 'valid_protocol_transition', state,
+        'LIVETRANSLATE_SESSION_MISMATCH') ||
+        !requireValue(identifier(event.session?.id), 'session.id', 'nonempty_identifier_string', event.session?.id,
+          'LIVETRANSLATE_SESSION_MISMATCH') ||
+        !requireValue(event.session?.model === LIVE_TRANSLATE_MODEL, 'session.model', 'exact_model', event.session?.model,
+          'LIVETRANSLATE_SESSION_MISMATCH')) return;
       sessionId = event.session.id;
       state = 'configuring';
       send({
@@ -505,29 +711,35 @@ export function createLiveTranslateClient(
     }
     if (event.type === 'session.updated') {
       const s = event.session;
-      const rejected =
-        state !== 'configuring' ||
-        s?.id !== sessionId ||
-        s?.model !== LIVE_TRANSLATE_MODEL ||
-        !Array.isArray(s?.output_modalities) ||
-        s.output_modalities.length !== modalities.length ||
-        !modalities.every((value) => s.output_modalities.includes(value)) ||
-        new Set(s.output_modalities).size !== modalities.length ||
-        s.audio?.input?.format?.type !== 'pcm' ||
-        s.audio.input.format.sample_rate !== 16000 ||
-        s.audio?.output?.format?.type !== 'pcm' ||
-        s.audio.output.format.sample_rate !== 24000 ||
-        s.audio.output.voice !== LIVE_TRANSLATE_VOICE ||
-        (s.voice !== undefined && s.voice !== LIVE_TRANSLATE_VOICE) ||
-        s.enable_voice_clone !== false ||
-        s.audio.input.turn_detection?.type !== 'speaker_detection' ||
-        s.audio.input.turn_detection.threshold !== 0.5 ||
-        s.translation?.language !== target;
+      const checks: [boolean, LiveTranslateProtocolDiagnostic['validationPath'], LiveTranslateProtocolDiagnostic['expected'], unknown][] = [
+        [state === 'configuring', 'state', 'valid_protocol_transition', state],
+        [s?.id === sessionId, 'session.id', 'matching_session_id', s?.id],
+        [s?.model === LIVE_TRANSLATE_MODEL, 'session.model', 'exact_model', s?.model],
+        [s?.input_modalities === undefined || (Array.isArray(s.input_modalities) &&
+          s.input_modalities.includes('audio')),
+        'session.input_modalities', 'audio_input_enabled', s?.input_modalities],
+        [Array.isArray(s?.output_modalities) && s.output_modalities.length === modalities.length &&
+          modalities.every((value) => s.output_modalities.includes(value)) &&
+          new Set(s.output_modalities).size === modalities.length,
+        'session.output_modalities', 'exact_output_modalities', s?.output_modalities],
+        [s?.audio?.input?.format?.type === 'pcm', 'session.audio.input.format.type', 'pcm', s?.audio?.input?.format?.type],
+        [s?.audio?.input?.format?.sample_rate === 16000, 'session.audio.input.format.sample_rate', '16000', s?.audio?.input?.format?.sample_rate],
+        [s?.audio?.output?.format?.type === 'pcm', 'session.audio.output.format.type', 'pcm', s?.audio?.output?.format?.type],
+        [s?.audio?.output?.format?.sample_rate === 24000, 'session.audio.output.format.sample_rate', '24000', s?.audio?.output?.format?.sample_rate],
+        [s?.audio?.output?.voice === LIVE_TRANSLATE_VOICE, 'session.audio.output.voice', 'Aiden', s?.audio?.output?.voice],
+        [s?.voice === undefined || s.voice === LIVE_TRANSLATE_VOICE, 'session.voice', 'Aiden', s?.voice],
+        [s?.enable_voice_clone === false, 'session.enable_voice_clone', 'false', s?.enable_voice_clone],
+        [s?.audio?.input?.turn_detection?.type === 'speaker_detection', 'session.audio.input.turn_detection.type', 'speaker_detection', s?.audio?.input?.turn_detection?.type],
+        [s?.audio?.input?.turn_detection?.threshold === 0.5, 'session.audio.input.turn_detection.threshold', '0.5', s?.audio?.input?.turn_detection?.threshold],
+        [s?.translation?.language === target, 'session.translation.language', 'target_language', s?.translation?.language],
+      ];
+      const rejected = checks.find(([accepted]) => !accepted);
       const receivedAt = now();
       emit(options.onSessionConfiguration, {
         role,
         sessionId: identifier(s?.id) ? s.id : null,
-        eventId: event.event_id,
+        eventId: event.event_id ?? null,
+        receiveSequence,
         receivedAt,
         basis: 'provider_session_updated',
         model: sessionValue(s?.model, [LIVE_TRANSLATE_MODEL]),
@@ -541,12 +753,14 @@ export function createLiveTranslateClient(
       });
       if (closed()) return;
       if (rejected) {
-        fail('LIVETRANSLATE_CONFIGURATION_REJECTED');
+        const [, validationPath, expected, actual] = rejected;
+        fail('LIVETRANSLATE_CONFIGURATION_REJECTED', undefined, undefined, { validationPath, expected, actual });
         return;
       }
       clearTimeout(timer);
       timer = undefined;
       state = 'ready';
+      protocolEvent('configuration_accepted', event);
       readyResolve({
         sessionId,
         role,
@@ -555,7 +769,8 @@ export function createLiveTranslateClient(
         voiceCloneEnabled: s.enable_voice_clone,
         targetLanguage: s.translation.language,
         configurationAcknowledgement: {
-          eventId: event.event_id,
+          eventId: event.event_id ?? null,
+          receiveSequence,
           receivedAt,
           basis: 'provider_session_updated',
         },
@@ -586,7 +801,23 @@ export function createLiveTranslateClient(
         ) ||
         incompleteBoundOutput()
       ) {
-        fail('LIVETRANSLATE_FINISH_INCOMPLETE');
+        const unboundSource = [...sources.values()].some((source) => source.final && source.text.trim() &&
+          ![...associations.values()].includes(source.sourceId));
+        const unboundOutput = [...translations.values()].some((item) =>
+          (item.text.trim() || item.audioSeen) && (!item.sourceId || !sources.has(item.sourceId)));
+        const pendingResponse = [...responses.values()].some((value) => !value.done);
+        const pendingSource = [...sources.values()].some((source) =>
+          (source.text || speechSeen.has(source.sourceId)) && !source.final);
+        let validationPath: LiveTranslateProtocolDiagnostic['validationPath'] = 'source.translation';
+        if (unboundSource) validationPath = 'source.translation';
+        else if (unboundOutput) validationPath = 'source.binding';
+        else if (pendingResponse) validationPath = 'response.status';
+        else if (pendingSource) validationPath = 'transcript';
+        fail('LIVETRANSLATE_FINISH_INCOMPLETE', undefined, undefined, {
+          validationPath,
+          expected: unboundSource || unboundOutput ? 'consistent_source_binding' : 'pending_output_complete',
+          actual: undefined,
+        });
         return;
       }
       state = 'closed';
@@ -598,28 +829,22 @@ export function createLiveTranslateClient(
       event.type === 'input_audio_buffer.speech_started' ||
       event.type === 'input_audio_buffer.speech_stopped'
     ) {
-      if (!identifier(event.item_id)) {
-        fail('LIVETRANSLATE_EVENT_INVALID');
-        return;
-      }
+      if (!requireValue(identifier(event.item_id), 'item_id', 'nonempty_identifier_string', event.item_id)) return;
       const source = ensureSource(event.item_id);
       if (!source || source.final) return;
       speechSeen.add(source.sourceId);
       const started = event.type.endsWith('started');
       const offset = started ? event.audio_start_ms : event.audio_end_ms;
-      if (
-        !integer(offset) ||
-        (event.speaker_id !== undefined && !integer(event.speaker_id))
-      ) {
-        fail('LIVETRANSLATE_EVENT_INVALID');
-        return;
-      }
+      if (!requireValue(integer(offset), started ? 'audio_start_ms' : 'audio_end_ms', 'nonnegative_integer', offset) ||
+        !requireValue(event.speaker_id === undefined || integer(event.speaker_id), 'speaker_id', 'nonnegative_integer', event.speaker_id)) return;
       if (started) {
         source.startMs = offset;
         if (event.speaker_id !== undefined) source.speakerId = event.speaker_id;
       } else {
         if (source.startMs !== undefined && offset < source.startMs) {
-          fail('LIVETRANSLATE_EVENT_INVALID');
+          fail('LIVETRANSLATE_EVENT_INVALID', undefined, undefined, {
+            validationPath: 'audio_end_ms', expected: 'nondecreasing_offset', actual: offset,
+          });
           return;
         }
         source.endMs = offset;
@@ -631,19 +856,18 @@ export function createLiveTranslateClient(
       return;
     }
     if (event.type.startsWith('conversation.item.input_audio_transcription.')) {
-      if (!identifier(event.item_id) || event.content_index !== 0) {
-        fail('LIVETRANSLATE_EVENT_INVALID');
-        return;
-      }
+      if (!requireValue(identifier(event.item_id), 'item_id', 'nonempty_identifier_string', event.item_id) ||
+        !requireValue(integer(event.content_index), 'content_index', 'nonnegative_integer', event.content_index) ||
+        !requireValue(event.content_index === 0, 'content_index', 'zero_index', event.content_index, 'LIVETRANSLATE_UNSUPPORTED_SCHEMA')) return;
       if (event.type.endsWith('.failed')) {
-        fail('LIVETRANSLATE_ASR_FAILED');
+        fail('LIVETRANSLATE_ASR_FAILED', undefined, undefined, { validationPath: 'error', expected: 'no_provider_error', actual: event.error });
         return;
       }
       const source = ensureSource(event.item_id);
       if (!source || source.final) return;
       const final = event.type.endsWith('.completed');
       if (!final && !event.type.endsWith('.delta')) {
-        fail('LIVETRANSLATE_MODEL_EVENT_MISMATCH');
+        fail('LIVETRANSLATE_MODEL_EVENT_MISMATCH', undefined, undefined, { validationPath: 'type', expected: 'known_3_8_event', actual: event.type });
         return;
       }
       const text = final ? event.transcript : event.delta;
@@ -651,7 +875,9 @@ export function createLiveTranslateClient(
         !textValue(text) ||
         (!final && source.text.length + text.length > MAX_TEXT)
       ) {
-        fail('LIVETRANSLATE_TRANSCRIPT_INVALID');
+        fail('LIVETRANSLATE_TRANSCRIPT_INVALID', undefined, undefined, {
+          validationPath: final ? 'transcript' : 'delta', expected: 'text_within_limit', actual: text,
+        });
         return;
       }
       source.text = final ? text : source.text + text;
@@ -662,10 +888,7 @@ export function createLiveTranslateClient(
       return;
     }
     if (event.type === 'conversation.item.created') {
-      if (!identifier(event.item?.id)) {
-        fail('LIVETRANSLATE_EVENT_INVALID');
-        return;
-      }
+      if (!requireValue(identifier(event.item?.id), 'item.id', 'nonempty_identifier_string', event.item?.id)) return;
       if (event.item.role !== 'assistant') return;
       if (
         !identifier(event.previous_item_id) ||
@@ -693,8 +916,12 @@ export function createLiveTranslateClient(
       return;
     }
     if (event.type === 'response.created') {
-      if (!identifier(event.response?.id)) {
-        fail('LIVETRANSLATE_EVENT_INVALID');
+      if (!requireValue(identifier(event.response?.id), 'response.id', 'nonempty_identifier_string', event.response?.id)) return;
+      if (!responseConfiguration(event.response)) return;
+      if (event.response.status !== 'in_progress') {
+        fail('LIVETRANSLATE_RESPONSE_INCOMPLETE', undefined, undefined, {
+          validationPath: 'response.status', expected: 'in_progress', actual: event.response.status,
+        });
         return;
       }
       const item = response(event.response.id);
@@ -710,7 +937,7 @@ export function createLiveTranslateClient(
         event.type,
       )
     ) {
-      fail('LIVETRANSLATE_MODEL_EVENT_MISMATCH');
+      fail('LIVETRANSLATE_MODEL_EVENT_MISMATCH', undefined, undefined, { validationPath: 'type', expected: 'known_3_8_event', actual: event.type });
       return;
     }
     if (
@@ -745,12 +972,12 @@ export function createLiveTranslateClient(
             event.delta,
           )
         ) {
-          fail('LIVETRANSLATE_AUDIO_INVALID');
+          fail('LIVETRANSLATE_AUDIO_INVALID', undefined, undefined, { validationPath: 'delta', expected: 'base64_pcm16', actual: event.delta });
           return;
         }
         const pcm = Buffer.from(event.delta, 'base64');
         if (!pcm.length || pcm.length % 2 || pcm.length > 256 * 1024) {
-          fail('LIVETRANSLATE_AUDIO_INVALID');
+          fail('LIVETRANSLATE_AUDIO_INVALID', undefined, undefined, { validationPath: 'delta', expected: 'base64_pcm16', actual: event.delta });
           return;
         }
         const parent = responses.get(item.responseId)!;
@@ -771,7 +998,11 @@ export function createLiveTranslateClient(
           });
         }
         if (closed()) return;
-        parent.audio.push({ pcm, eventId: event.event_id, item });
+        parent.audio.push({
+          pcm, item,
+          eventId: event.event_id ?? `local_receive_${receiveSequence}`,
+          eventIdBasis: event.event_id === undefined ? 'local_receive_sequence' : 'provider_event_id',
+        });
         queuedAudioBytes += pcm.length;
         drainAudio();
       } else if (event.type === 'response.audio.done') {
@@ -783,12 +1014,17 @@ export function createLiveTranslateClient(
       } else {
         if (item.textDone) return;
         const final = event.type.endsWith('.done');
-        const text = final ? (event.text ?? event.transcript) : event.delta;
+        const text = final
+          ? (event.type === 'response.text.done' ? event.text : event.transcript)
+          : event.delta;
         if (
           !textValue(text) ||
           (!final && item.text.length + text.length > MAX_TEXT)
         ) {
-          fail('LIVETRANSLATE_TRANSCRIPT_INVALID');
+          fail('LIVETRANSLATE_TRANSCRIPT_INVALID', undefined, undefined, {
+            validationPath: final ? (event.type === 'response.text.done' ? 'text' : 'transcript') : 'delta',
+            expected: 'text_within_limit', actual: text,
+          });
           return;
         }
         if (!item.text && text)
@@ -810,10 +1046,7 @@ export function createLiveTranslateClient(
       return;
     }
     if (event.type === 'response.done') {
-      if (!identifier(event.response?.id)) {
-        fail('LIVETRANSLATE_EVENT_INVALID');
-        return;
-      }
+      if (!requireValue(identifier(event.response?.id), 'response.id', 'nonempty_identifier_string', event.response?.id)) return;
       const parent = response(event.response.id);
       if (!parent || parent.done) return;
       reportUsage(event.response.id, event.response.usage);
@@ -823,10 +1056,21 @@ export function createLiveTranslateClient(
         return;
       }
       if (event.response.status !== 'completed') {
-        fail('LIVETRANSLATE_RESPONSE_INCOMPLETE');
+        fail('LIVETRANSLATE_RESPONSE_INCOMPLETE', undefined, undefined, {
+          validationPath: 'response.status', expected: 'completed', actual: event.response.status,
+        });
         return;
       }
-      if (Array.isArray(event.response.output)) {
+      if (!responseConfiguration(event.response)) return;
+      if (!requireValue(Array.isArray(event.response.output), 'response.output', 'array', event.response.output) ||
+        !requireValue(event.response.output.length <= 1, 'response.output', 'single_output_item', event.response.output, 'LIVETRANSLATE_UNSUPPORTED_SCHEMA')) return;
+      if (event.response.output.length === 0 && parent.outputs.size > 0) {
+        fail('LIVETRANSLATE_ITEM_CONFLICT', undefined, undefined, {
+          validationPath: 'response.output', expected: 'consistent_item_binding', actual: event.response.output,
+        });
+        return;
+      }
+      {
         for (const [index, output] of event.response.output.entries()) {
           if (
             index !== 0 ||
@@ -834,7 +1078,9 @@ export function createLiveTranslateClient(
             !Array.isArray(output.content) ||
             output.content.length > 1
           ) {
-            fail('LIVETRANSLATE_EVENT_INVALID');
+            fail(index !== 0 || output?.content?.length > 1 ? 'LIVETRANSLATE_UNSUPPORTED_SCHEMA' : 'LIVETRANSLATE_EVENT_INVALID', undefined, undefined, {
+              validationPath: 'response.output', expected: index !== 0 ? 'single_output_item' : 'single_content_part', actual: event.response.output,
+            });
             return;
           }
           const item = translation({
@@ -844,14 +1090,29 @@ export function createLiveTranslateClient(
             content_index: 0,
           });
           if (!item) return;
+          if (!requireValue(output.role === undefined || output.role === 'assistant',
+            'response.output.0.role', 'output_modality', output.role) ||
+            !requireValue(output.type === undefined || output.type === 'message',
+              'response.output.0.type', 'output_modality', output.type) ||
+            !requireValue(output.status === undefined || output.status === 'completed',
+              'response.output.0.status', 'completed', output.status)) return;
           const content = output.content[0];
-          const text =
-            role === 'local'
-              ? (content?.transcript ?? content?.text)
-              : content?.text;
-          if (text !== undefined) {
+          if (content !== undefined && !requireValue(content?.type === (role === 'local' ? 'audio' : 'text'),
+            'response.output.0.content.0.type', 'output_modality', content?.type)) return;
+          const text = role === 'local' ? content?.transcript : content?.text;
+          if (content !== undefined) {
             if (!textValue(text)) {
-              fail('LIVETRANSLATE_TRANSCRIPT_INVALID');
+              fail('LIVETRANSLATE_TRANSCRIPT_INVALID', undefined, undefined, {
+                validationPath: role === 'local' ? 'response.output.0.content.0.transcript' : 'response.output.0.content.0.text',
+                expected: 'text_within_limit', actual: text,
+              });
+              return;
+            }
+            if (item.textDone && item.text !== text) {
+              fail('LIVETRANSLATE_TRANSCRIPT_INVALID', undefined, undefined, {
+                validationPath: role === 'local' ? 'response.output.0.content.0.transcript' : 'response.output.0.content.0.text',
+                expected: 'consistent_item_binding', actual: text,
+              });
               return;
             }
             item.text = text;
@@ -861,9 +1122,19 @@ export function createLiveTranslateClient(
                 responseId: item.responseId,
                 ...(item.sourceId ? { sourceId: item.sourceId } : {}),
               });
-            item.textDone = true;
           }
         }
+      }
+      const unfinished = [...translations.values()].find((item) =>
+        item.responseId === event.response.id &&
+        ((!item.textDone && (item.text.trim() || item.audioSeen)) ||
+          (role === 'local' && item.audioSeen && !item.audioDone)));
+      if (unfinished) {
+        fail('LIVETRANSLATE_RESPONSE_INCOMPLETE', undefined, undefined, {
+          validationPath: !unfinished.textDone ? 'response.text.done' : 'response.audio.done',
+          expected: 'pending_output_complete', actual: undefined,
+        });
+        return;
       }
       if (
         [...translations.values()].some(
@@ -892,8 +1163,6 @@ export function createLiveTranslateClient(
       for (const item of translations.values()) {
         if (item.responseId !== event.response.id) continue;
         item.final = true;
-        item.textDone = true;
-        item.audioDone = true;
         item.revision += 1;
         showTranslation(item);
       }
@@ -905,28 +1174,103 @@ export function createLiveTranslateClient(
   };
   socket.on('message', (raw: WebSocket.RawData, isBinary?: boolean) => {
     if (closed()) return;
+    const frameReceivedAt = now();
+    receiveSequence += 1;
+    currentEvent = undefined;
+    let bytes: Buffer;
     try {
-      const bytes = Buffer.isBuffer(raw)
+      bytes = Buffer.isBuffer(raw)
         ? raw
         : Buffer.concat(Array.isArray(raw) ? raw : [Buffer.from(raw)]);
-      if (isBinary || bytes.length > MAX_BYTES) {
-        fail('LIVETRANSLATE_EVENT_INVALID');
-        return;
-      }
-      handle(JSON.parse(bytes.toString('utf8')));
     } catch {
-      fail('LIVETRANSLATE_EVENT_INVALID');
+      protocolEvent('server_frame', undefined, { at: frameReceivedAt });
+      fail('LIVETRANSLATE_EVENT_INVALID', undefined, undefined, {
+        validationPath: 'frame', expected: 'text_json_frame', actual: raw,
+      });
+      return;
+    }
+    if (isBinary) {
+      protocolEvent('server_frame', undefined, { at: frameReceivedAt, frameBytes: bytes.length, frameBinary: true });
+      fail('LIVETRANSLATE_EVENT_INVALID', undefined, undefined, {
+        validationPath: 'frame.binary', expected: 'false', actual: true,
+      });
+      return;
+    }
+    if (bytes.length > MAX_BYTES) {
+      protocolEvent('server_frame', undefined, { at: frameReceivedAt, frameBytes: bytes.length, frameBinary: false });
+      fail('LIVETRANSLATE_EVENT_INVALID', undefined, undefined, {
+        validationPath: 'frame.bytes', expected: 'bounded_capacity', actual: bytes.length,
+      });
+      return;
+    }
+    let jsonText: string;
+    try {
+      jsonText = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    } catch {
+      protocolEvent('server_frame', undefined, { at: frameReceivedAt, frameBytes: bytes.length, frameBinary: false });
+      fail('LIVETRANSLATE_EVENT_INVALID', undefined, undefined, {
+        validationPath: 'frame.utf8', expected: 'valid_utf8', actual: bytes,
+      });
+      return;
+    }
+    try {
+      currentEvent = JSON.parse(jsonText);
+    } catch {
+      protocolEvent('server_frame', undefined, { at: frameReceivedAt, frameBytes: bytes.length, frameBinary: false });
+      fail('LIVETRANSLATE_EVENT_INVALID', undefined, undefined, {
+        validationPath: 'json', expected: 'valid_json', actual: jsonText,
+      });
+      return;
+    }
+    protocolEvent('server_frame', currentEvent, { at: frameReceivedAt, frameBytes: bytes.length, frameBinary: false });
+    if (closed()) return;
+    if (receiveSequence > MAX_EVENTS) {
+      fail('LIVETRANSLATE_EVENT_CAPACITY', undefined, undefined, {
+        validationPath: 'frame', expected: 'bounded_capacity', actual: receiveSequence,
+      });
+      return;
+    }
+    try {
+      handle(currentEvent);
+    } catch {
+      fail('LIVETRANSLATE_HANDLER_FAILED', undefined, undefined, {
+        validationPath: 'internal.handler', expected: 'handler_completed', actual: undefined,
+      });
     }
   });
-  socket.on('error', () => fail('LIVETRANSLATE_CONNECTION_FAILED'));
+  socket.on('open', () => protocolEvent('transport_open'));
+  socket.on('error', () => {
+    currentEvent = undefined;
+    protocolEvent('transport_error');
+    fail('LIVETRANSLATE_CONNECTION_FAILED', undefined, undefined, {
+      validationPath: 'frame', expected: 'error_free_transport', actual: undefined,
+    });
+  });
   socket.on('unexpected-response', (_request, response) => {
+    protocolEvent('transport_error', undefined,
+      integer(response.statusCode) && response.statusCode >= 100 && response.statusCode <= 599
+        ? { httpStatusCode: response.statusCode } : {});
     fail('LIVETRANSLATE_CONNECTION_FAILED', undefined, response.statusCode);
     response.destroy();
   });
-  socket.on('close', (code) => fail('LIVETRANSLATE_CONNECTION_CLOSED', code));
+  socket.on('close', (code) => {
+    if (transportCloseObserved) return;
+    transportCloseObserved = true;
+    const metadata = integer(code) && code >= 1000 && code <= 4999 ? { code } : {};
+    const at = now();
+    protocolEvent('transport_close', undefined, metadata.code ? { closeCode: metadata.code } : {});
+    resolveTransportClosed({ observed: true, at, ...metadata });
+    if (!closed()) {
+      currentEvent = undefined;
+      fail('LIVETRANSLATE_CONNECTION_CLOSED', code, undefined, {
+        validationPath: 'frame', expected: 'error_free_transport', actual: code,
+      });
+    }
+  });
   arm('LIVETRANSLATE_READY_TIMEOUT');
   return {
     ready,
+    transportClosed,
     append(pcm) {
       if (closed() || finishRequested || state !== 'ready')
         throw new Error(failure || 'LIVETRANSLATE_NOT_READY');
@@ -936,7 +1280,9 @@ export function createLiveTranslateClient(
         pcm.length % 2 ||
         pcm.length > 256 * 1024
       ) {
-        fail('LIVETRANSLATE_INPUT_INVALID');
+        fail('LIVETRANSLATE_INPUT_INVALID', undefined, undefined, {
+          validationPath: 'audio', expected: 'pcm16_bytes', actual: pcm,
+        });
         return;
       }
       send({

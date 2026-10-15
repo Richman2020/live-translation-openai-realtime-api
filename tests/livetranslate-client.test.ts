@@ -32,11 +32,13 @@ class Socket extends EventEmitter {
   terminate() {
     this.terminated += 1;
     this.readyState = WebSocket.CLOSED;
+    this.emit('close', 1006);
   }
 
   close() {
     this.closed += 1;
     this.readyState = WebSocket.CLOSED;
+    this.emit('close', 1000);
   }
 }
 function fixture(
@@ -52,6 +54,7 @@ function fixture(
   const timings: any[] = [];
   const usages: any[] = [];
   const sessionConfigurations: any[] = [];
+  const protocolDiagnostics: any[] = [];
   const addresses: string[] = [];
   const settings: any[] = [];
   let eventNumber = 0;
@@ -74,6 +77,7 @@ function fixture(
     onTiming: (event) => timings.push(event),
     onUsage: (event) => usages.push(event),
     onSessionConfiguration: (event) => sessionConfigurations.push(event),
+    onProtocolDiagnostic: (event) => protocolDiagnostics.push(event),
     ...extras,
   });
   const receive = (event: any) => {
@@ -147,9 +151,18 @@ function fixture(
   };
   const done = (id = 'response_1', extra: any = {}) => {
     created(id);
+    const latest = new Map<string, any>();
+    for (const item of translations)
+      if (item.responseId === id) latest.set(item.translationId, item);
+    const output = [...latest.values()].map((item) => ({
+      id: item.translationId,
+      content: item.text ? [role === 'local'
+        ? { type: 'audio', transcript: item.text }
+        : { type: 'text', text: item.text }] : [],
+    }));
     receive({
       type: 'response.done',
-      response: { id, status: 'completed', ...extra },
+      response: { id, status: 'completed', output, ...extra },
     });
   };
   return {
@@ -171,6 +184,7 @@ function fixture(
     timings,
     usages,
     sessionConfigurations,
+    protocolDiagnostics,
     addresses,
     settings,
   };
@@ -265,7 +279,7 @@ test('Aiden input remains fenced until a complete server configuration acknowled
   assert.equal(confirmed.voiceCloneEnabled, false);
   assert.equal(confirmed.targetLanguage, 'en');
   assert.deepEqual(confirmed.configurationAcknowledgement, {
-    eventId: 'e_2', receivedAt: 1234, basis: 'provider_session_updated',
+    eventId: 'e_2', receiveSequence: 2, receivedAt: 1234, basis: 'provider_session_updated',
   });
   f.client.append(Buffer.alloc(320));
   assert.deepEqual(f.socket.sent.map((event) => event.type), ['session.update', 'input_audio_buffer.append']);
@@ -383,6 +397,8 @@ test('3.8 append deltas preserve true repetition, completed raw source and direc
   f.delta('response.audio.delta', {
     delta: Buffer.alloc(480).toString('base64'),
   });
+  f.delta('response.audio_transcript.done', { transcript: 'Do not charge twice.' });
+  f.delta('response.audio.done', {});
   f.done();
   assert.equal(f.sources.at(-1).text, '不，不要重复收费。');
   assert.equal(f.translations.at(-1).text, 'Do not charge twice.');
@@ -455,13 +471,13 @@ test('distinct response IDs remain isolated across interleaving, repeated words 
   f.client.abort();
 });
 
-test('response.done reconciles full text, usage is consumed once and text.done alone does not imply successful completion', async () => {
+test('response.done confirms consistent full text, usage is consumed once and text.done alone does not imply successful completion', async () => {
   const f = fixture('remote');
   await f.start();
   f.source();
   f.link();
   f.delta('response.text.delta', { delta: '十五' });
-  f.delta('response.text.done', { text: '五十，不是十五。' });
+  f.delta('response.text.done', { text: '五十元，不是十五元。' });
   assert.equal(f.translations.at(-1).final, false);
   f.done('response_1', {
     output: [
@@ -497,6 +513,8 @@ test('normal finish drains late tail without response.create/cancel then closes 
   f.delta('response.audio.delta', {
     delta: Buffer.alloc(480).toString('base64'),
   });
+  f.delta('response.audio_transcript.done', { transcript: 'Final tail.' });
+  f.delta('response.audio.done', {});
   f.done();
   f.receive({ type: 'session.finished' });
   await done;
@@ -584,12 +602,18 @@ test('startup/drain timeouts never reconnect and provider rejection never falls 
   const f = fixture('local', { timeoutMs: 5 });
   await delay(12);
   await assert.rejects(f.client.ready, /READY_TIMEOUT/);
+  assert.equal(f.protocolDiagnostics[0].validationPath, 'transport.ready_timeout');
+  assert.equal(f.protocolDiagnostics[0].actualType, 'string');
+  assert.equal(f.protocolDiagnostics[0].eventType, null);
   assert.equal(f.addresses.length, 1);
   const drain = fixture('local', { timeoutMs: 5 });
   await drain.start();
   const finish = drain.client.finish();
   await delay(12);
   await assert.rejects(finish, /FINISH_TIMEOUT/);
+  assert.equal(drain.protocolDiagnostics[0].validationPath, 'transport.finish_timeout');
+  assert.equal(drain.protocolDiagnostics[0].actualType, 'string');
+  assert.equal(drain.protocolDiagnostics[0].eventType, null);
   const rejected = fixture();
   rejected.receive({
     type: 'error',
@@ -666,6 +690,8 @@ test('JSON field order does not create a false duplicate conflict, while identic
   assert.equal(f.translations.length, 1);
   const pcm = Buffer.alloc(480).toString('base64');
   f.delta('response.audio.delta', { delta: pcm }, 't1', 'r1');
+  f.delta('response.audio_transcript.done', { transcript: 'Repeat.' }, 't1', 'r1');
+  f.delta('response.audio.done', {}, 't1', 'r1');
   f.done('r1');
   f.delta('response.audio.delta', { delta: pcm }, 't1', 'r1');
   f.delta('response.audio.delta', { delta: pcm }, 't2', 'r2');
@@ -731,6 +757,8 @@ test('a translation output cannot reuse a known source item identity in either a
   positive.source('shared', 'Synthetic source.');
   positive.delta('response.text.delta', { delta: '合成译文' }, 'shared', 'r1');
   assert.equal(positive.errors[0].code, 'LIVETRANSLATE_ITEM_CONFLICT');
+  assert.equal(positive.protocolDiagnostics[0].validationPath, 'item_id');
+  assert.equal(positive.protocolDiagnostics[0].expected, 'consistent_item_binding');
   assert.equal(positive.translations.length, 0);
   const linked = fixture('remote');
   await linked.start();
@@ -819,6 +847,8 @@ test('audio without official response.created order is rejected instead of inven
     delta: Buffer.alloc(4).toString('base64'),
   });
   assert.equal(f.errors[0].code, 'LIVETRANSLATE_RESPONSE_ORDER_UNKNOWN');
+  assert.equal(f.protocolDiagnostics[0].validationPath, 'response.id');
+  assert.equal(f.protocolDiagnostics[0].expected, 'response_created_before_output');
   assert.equal(f.audio.length, 0);
   assert.equal(f.socket.terminated, 1);
 });
@@ -870,6 +900,8 @@ test('a silent nonempty local translation response cannot hide behind audio from
     't1',
     'r1',
   );
+  f.delta('response.audio_transcript.done', { transcript: 'First valid sentence.' }, 't1', 'r1');
+  f.delta('response.audio.done', {}, 't1', 'r1');
   f.done('r1');
   assert.equal(f.audio.length, 1);
   f.delta(
@@ -878,8 +910,10 @@ test('a silent nonempty local translation response cannot hide behind audio from
     't2',
     'r2',
   );
+  f.delta('response.audio_transcript.done', { transcript: 'Second sentence lacks all audio.' }, 't2', 'r2');
   f.done('r2');
   assert.equal(f.errors[0].code, 'LIVETRANSLATE_RESPONSE_AUDIO_MISSING');
+  assert.equal(f.protocolDiagnostics[0].validationPath, 'response.audio.done');
   assert(
     !f.translations.some(
       (event) => event.translationId === 't2' && event.final,
@@ -984,7 +1018,7 @@ test('audio from a directly bound nonempty source does not excuse its empty tran
   assert.equal(f.socket.terminated, 1);
 });
 
-test('explicit empty final noise can have no output, while unknown edges remain unpaired instead of guessing a source', async () => {
+test('explicit empty final noise can have no output, while a nonempty source with unknown edges cannot finish successfully', async () => {
   for (const role of ['local', 'remote'] as const) {
     for (const kind of ['emptyNoise', 'unknownEdge']) {
       const f = fixture(role);
@@ -997,15 +1031,59 @@ test('explicit empty final noise can have no output, while unknown edges remain 
       });
       const finished = f.client.finish();
       f.receive({ type: 'session.finished' });
-      // eslint-disable-next-line no-await-in-loop -- No source content or association may be fabricated for either case.
-      await finished;
-      assert.deepEqual(f.errors, []);
+      if (kind === 'unknownEdge') {
+        // eslint-disable-next-line no-await-in-loop -- Missing bindings fail independently in each synthetic role.
+        await assert.rejects(finished, /FINISH_INCOMPLETE/);
+        assert.equal(f.errors[0].code, 'LIVETRANSLATE_FINISH_INCOMPLETE');
+      } else {
+        // eslint-disable-next-line no-await-in-loop -- Explicit empty noise is allowed to finish without translation.
+        await finished;
+        assert.deepEqual(f.errors, []);
+      }
       assert.equal(f.audio.length, 0);
-      assert.equal(f.socket.closed, 1);
+      assert.equal(f.socket.closed, kind === 'unknownEdge' ? 0 : 1);
       if (kind === 'unknownEdge') {
         assert.equal(f.associations.length, 0);
         assert.equal(f.translations.at(-1).pairing, 'unpaired');
       }
     }
   }
+});
+
+test('speech ordering, source conflicts and send failures retain concrete safe validation paths', async () => {
+  const speech = fixture();
+  await speech.start();
+  speech.receive({ type: 'input_audio_buffer.speech_started', item_id: 's1', audio_start_ms: 100 });
+  speech.receive({ type: 'input_audio_buffer.speech_stopped', item_id: 's1', audio_end_ms: 50 });
+  assert.equal(speech.errors[0].code, 'LIVETRANSLATE_EVENT_INVALID');
+  assert.equal(speech.protocolDiagnostics[0].validationPath, 'audio_end_ms');
+  assert.equal(speech.protocolDiagnostics[0].expected, 'nondecreasing_offset');
+  assert.equal(speech.protocolDiagnostics[0].actualType, 'number');
+
+  const binding = fixture('remote');
+  await binding.start();
+  binding.source('s1', 'Synthetic first source.');
+  binding.source('s2', 'Synthetic second source.');
+  binding.link('t1', 's1');
+  binding.link('t1', 's2');
+  assert.equal(binding.errors[0].code, 'LIVETRANSLATE_SOURCE_CONFLICT');
+  assert.equal(binding.protocolDiagnostics[0].validationPath, 'source.binding');
+  assert.equal(binding.protocolDiagnostics[0].actualType, 'string');
+
+  const send = fixture();
+  await send.start();
+  send.socket.send = (_raw, callback) => callback?.(new Error('SYNTHETIC_PRIVATE_SEND_CANARY'));
+  send.client.append(Buffer.alloc(320));
+  assert.equal(send.errors[0].code, 'LIVETRANSLATE_SEND_FAILED');
+  assert.equal(send.protocolDiagnostics[0].validationPath, 'transport.send');
+  assert.equal(send.protocolDiagnostics[0].actualType, 'number');
+  assert.equal(send.protocolDiagnostics[0].eventType, null);
+  assert.equal(JSON.stringify(send.protocolDiagnostics).includes('SYNTHETIC_PRIVATE_SEND_CANARY'), false);
+
+  const unavailable = fixture();
+  await unavailable.start();
+  unavailable.socket.readyState = WebSocket.CLOSED;
+  unavailable.client.append(Buffer.alloc(320));
+  assert.equal(unavailable.errors[0].code, 'LIVETRANSLATE_SEND_UNAVAILABLE');
+  assert.equal(unavailable.protocolDiagnostics[0].validationPath, 'transport.send');
 });

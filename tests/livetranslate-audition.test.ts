@@ -163,6 +163,7 @@ function mock(
           targetLanguage: client.role === 'local' ? 'en' : 'zh',
           configurationAcknowledgement: {
             eventId: 'offline_ack',
+            receiveSequence: 1,
             receivedAt: clock,
             basis: 'provider_session_updated',
           },
@@ -1593,9 +1594,10 @@ test('single-local real client plus fake wire preserves default 20ms pacing and 
           return wire as unknown as WebSocket;
         },
       });
-      queueMicrotask(() =>
-        wire.receive({ type: 'session.created', session: wire.session() }),
-      );
+      queueMicrotask(() => {
+        wire.emit('open');
+        wire.receive({ type: 'session.created', session: wire.session() });
+      });
       return client;
     },
   });
@@ -1616,6 +1618,25 @@ test('single-local real client plus fake wire preserves default 20ms pacing and 
   assert.equal(result.audio[0].actualPlaybackStartedAt, null);
   assert.ok(!JSON.stringify(wire.sent).includes('Not fifteen'));
   assert.ok(!JSON.stringify(wire.sent).includes('不是十五'));
+  const stages = result.protocolEvents.map((event) => event.stage);
+  assert.ok(stages.includes('transport_open'));
+  assert.ok(stages.includes('transport_close_requested'));
+  assert.ok(stages.includes('transport_close'));
+  const ack = result.protocolEvents.findIndex((event) => event.stage === 'configuration_accepted');
+  const firstAppend = result.protocolEvents.findIndex((event) =>
+    event.stage === 'client_event_sent' && event.eventType === 'input_audio_buffer.append');
+  assert.ok(ack >= 0 && firstAppend > ack);
+  assert.equal(result.protocolDiagnostics.length, 0);
+  assert.ok(!JSON.stringify(result.protocolEvents).includes('Not fifteen'));
+  const reservation = reserveLiveTranslateAuditionOutput(join(f.directory, 'journal-output'));
+  writeLiveTranslateAuditionArtifacts(f.input(), result, reservation);
+  const report = JSON.parse(readFileSync(join(reservation.output, 'report.json'), 'utf8'));
+  assert.equal(report.protocolEvidence.timeline.connectionEstablished.status, 'captured');
+  assert.equal(report.protocolEvidence.timeline.sessionUpdateSubmitted.status, 'captured');
+  assert.equal(report.protocolEvidence.timeline.configurationAccepted.status, 'captured');
+  assert.equal(report.protocolEvidence.timeline.transportClosed.status, 'captured');
+  assert.equal(report.protocolEvidence.actualModelAndVoice, 'see_confirmed_sessions');
+  assert.equal(report.protocolTraceTruncated, false);
 });
 
 test('Aiden one-shot approval records pending in-session validation and rejects Tina or a fabricated prior access claim', (t) => {

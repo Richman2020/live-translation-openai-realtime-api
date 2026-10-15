@@ -1,0 +1,5583 @@
+{
+  "schemaVersion": 1,
+  "provenance": "synthetic_official_contract",
+  "capturedProviderPayload": false,
+  "modelSupportVerified": false,
+  "voiceSupportVerified": false,
+  "timingBasis": "simulation_fake_clock_ms_not_model_latency",
+  "officialSources": [
+    "https://help.aliyun.com/zh/model-studio/live-translator-client-events",
+    "https://help.aliyun.com/zh/model-studio/live-translator-server-events",
+    "https://help.aliyun.com/zh/model-studio/qwen3-5-livetranslate-flash-realtime"
+  ],
+  "notes": [
+    "All messages, text, audio bytes, identifiers and errors are manually constructed.",
+    "Aiden and explicit clone=false are this candidate contract, not an assertion of supplier availability.",
+    "Missing event_id and extension mutations exercise local tolerance, not documented provider guarantees.",
+    "No actual failed payload was captured, so these samples cannot establish the previous 1.18-second failure cause."
+  ],
+  "scenarios": [
+    {
+      "id": "official-3.8-complete-tail-and-close",
+      "source": "synthetic_official_contract",
+      "evidenceBasis": "manually_constructed_not_captured_provider_payload",
+      "mutation": null,
+      "actions": [
+        {
+          "kind": "open"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.created",
+            "session": {
+              "id": "synthetic.session/3.8",
+              "object": "realtime.session",
+              "model": "qwen3.8-livetranslate-flash-realtime",
+              "input_modalities": [
+                "audio"
+              ],
+              "output_modalities": [
+                "text",
+                "audio"
+              ],
+              "enable_voice_clone": false,
+              "audio": {
+                "input": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 16000
+                  },
+                  "turn_detection": {
+                    "type": "speaker_detection",
+                    "threshold": 0.5,
+                    "silence_duration_ms": 1000
+                  }
+                },
+                "output": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 24000
+                  },
+                  "voice": "Tina"
+                }
+              },
+              "translation": {
+                "language": "en"
+              }
+            },
+            "event_id": "synthetic.event/1"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.updated",
+            "session": {
+              "id": "synthetic.session/3.8",
+              "object": "realtime.session",
+              "model": "qwen3.8-livetranslate-flash-realtime",
+              "input_modalities": [
+                "audio"
+              ],
+              "output_modalities": [
+                "text",
+                "audio"
+              ],
+              "enable_voice_clone": false,
+              "audio": {
+                "input": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 16000
+                  },
+                  "turn_detection": {
+                    "type": "speaker_detection",
+                    "threshold": 0.5,
+                    "silence_duration_ms": 1000
+                  }
+                },
+                "output": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 24000
+                  },
+                  "voice": "Aiden"
+                }
+              },
+              "translation": {
+                "language": "en"
+              }
+            },
+            "event_id": "synthetic.event/2"
+          }
+        },
+        {
+          "kind": "append"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "input_audio_buffer.speech_started",
+            "item_id": "source.synthetic.1",
+            "audio_start_ms": 0,
+            "speaker_id": 1,
+            "event_id": "synthetic.event/4"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "conversation.item.input_audio_transcription.delta",
+            "item_id": "source.synthetic.1",
+            "content_index": 0,
+            "delta": "人工",
+            "event_id": "synthetic.event/5"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.created",
+            "response": {
+              "id": "response.synthetic.1",
+              "status": "in_progress",
+              "voice": "Aiden",
+              "modalities": [
+                "text",
+                "audio"
+              ],
+              "output_audio_format": "pcm16"
+            },
+            "event_id": "synthetic.event/6"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "conversation.item.created",
+            "previous_item_id": "source.synthetic.1",
+            "item": {
+              "id": "translation.synthetic.1",
+              "type": "message",
+              "object": "realtime.item",
+              "status": "in_progress",
+              "role": "assistant",
+              "content": []
+            },
+            "event_id": "synthetic.event/7"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.audio_transcript.delta",
+            "response_id": "response.synthetic.1",
+            "item_id": "translation.synthetic.1",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": "Synthetic ",
+            "event_id": "synthetic.event/8"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.audio.delta",
+            "response_id": "response.synthetic.1",
+            "item_id": "translation.synthetic.1",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": "AQACAAMA",
+            "event_id": "synthetic.event/9"
+          }
+        },
+        {
+          "kind": "finish"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "input_audio_buffer.speech_stopped",
+            "item_id": "source.synthetic.1",
+            "audio_end_ms": 20,
+            "event_id": "synthetic.event/11"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "conversation.item.input_audio_transcription.completed",
+            "item_id": "source.synthetic.1",
+            "content_index": 0,
+            "transcript": "人工样例。",
+            "event_id": "synthetic.event/12"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.audio_transcript.done",
+            "response_id": "response.synthetic.1",
+            "item_id": "translation.synthetic.1",
+            "output_index": 0,
+            "content_index": 0,
+            "transcript": "Synthetic sample.",
+            "event_id": "synthetic.event/13"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.audio.done",
+            "response_id": "response.synthetic.1",
+            "item_id": "translation.synthetic.1",
+            "output_index": 0,
+            "content_index": 0,
+            "event_id": "synthetic.event/14"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.done",
+            "response": {
+              "id": "response.synthetic.1",
+              "status": "completed",
+              "voice": "Aiden",
+              "modalities": [
+                "text",
+                "audio"
+              ],
+              "output_audio_format": "pcm16",
+              "output": [
+                {
+                  "id": "translation.synthetic.1",
+                  "type": "message",
+                  "object": "realtime.item",
+                  "status": "completed",
+                  "role": "assistant",
+                  "content": [
+                    {
+                      "type": "audio",
+                      "transcript": "Synthetic sample."
+                    }
+                  ]
+                }
+              ],
+              "usage": {
+                "input_tokens": 2,
+                "output_tokens": 3,
+                "total_tokens": 5,
+                "input_tokens_details": {
+                  "audio_tokens": 2,
+                  "text_tokens": 0
+                },
+                "output_tokens_details": {
+                  "audio_tokens": 1,
+                  "text_tokens": 2
+                }
+              }
+            },
+            "event_id": "synthetic.event/15"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.finished",
+            "event_id": "synthetic.event/16"
+          }
+        }
+      ],
+      "expected": {
+        "fatalCode": null,
+        "fatalPath": null,
+        "ready": true,
+        "appendCount": 1,
+        "finishResolved": true,
+        "closeCode": 1000
+      }
+    },
+    {
+      "id": "official-extension-notification-before-ready",
+      "source": "synthetic_official_contract",
+      "evidenceBasis": "manually_constructed_not_captured_provider_payload",
+      "mutation": "unknown_notification_is_ignored_without_unlocking",
+      "actions": [
+        {
+          "kind": "open"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "synthetic.future.notification",
+            "private_extension": "SYNTHETIC_PRIVATE_CANARY",
+            "future": {
+              "private_key": "SYNTHETIC_NESTED_CANARY"
+            },
+            "event_id": "synthetic.event/1"
+          }
+        },
+        {
+          "kind": "probeBeforeReady"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.created",
+            "session": {
+              "id": "synthetic.session/3.8",
+              "object": "realtime.session",
+              "model": "qwen3.8-livetranslate-flash-realtime",
+              "input_modalities": [
+                "audio"
+              ],
+              "output_modalities": [
+                "text",
+                "audio"
+              ],
+              "enable_voice_clone": false,
+              "audio": {
+                "input": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 16000
+                  },
+                  "turn_detection": {
+                    "type": "speaker_detection",
+                    "threshold": 0.5,
+                    "silence_duration_ms": 1000
+                  }
+                },
+                "output": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 24000
+                  },
+                  "voice": "Tina"
+                }
+              },
+              "translation": {
+                "language": "en"
+              }
+            },
+            "event_id": "synthetic.event/3"
+          }
+        },
+        {
+          "kind": "probeBeforeReady"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.updated",
+            "session": {
+              "id": "synthetic.session/3.8",
+              "object": "realtime.session",
+              "model": "qwen3.8-livetranslate-flash-realtime",
+              "input_modalities": [
+                "audio"
+              ],
+              "output_modalities": [
+                "text",
+                "audio"
+              ],
+              "enable_voice_clone": false,
+              "audio": {
+                "input": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 16000
+                  },
+                  "turn_detection": {
+                    "type": "speaker_detection",
+                    "threshold": 0.5,
+                    "silence_duration_ms": 1000
+                  }
+                },
+                "output": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 24000
+                  },
+                  "voice": "Aiden"
+                }
+              },
+              "translation": {
+                "language": "en"
+              }
+            },
+            "event_id": "synthetic.event/5"
+          }
+        },
+        {
+          "kind": "append"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "input_audio_buffer.speech_started",
+            "item_id": "source.synthetic.1",
+            "audio_start_ms": 0,
+            "speaker_id": 1,
+            "event_id": "synthetic.event/7"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "conversation.item.input_audio_transcription.delta",
+            "item_id": "source.synthetic.1",
+            "content_index": 0,
+            "delta": "人工",
+            "event_id": "synthetic.event/8"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.created",
+            "response": {
+              "id": "response.synthetic.1",
+              "status": "in_progress",
+              "voice": "Aiden",
+              "modalities": [
+                "text",
+                "audio"
+              ],
+              "output_audio_format": "pcm16"
+            },
+            "event_id": "synthetic.event/9"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "conversation.item.created",
+            "previous_item_id": "source.synthetic.1",
+            "item": {
+              "id": "translation.synthetic.1",
+              "type": "message",
+              "object": "realtime.item",
+              "status": "in_progress",
+              "role": "assistant",
+              "content": []
+            },
+            "event_id": "synthetic.event/10"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.audio_transcript.delta",
+            "response_id": "response.synthetic.1",
+            "item_id": "translation.synthetic.1",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": "Synthetic ",
+            "event_id": "synthetic.event/11"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.audio.delta",
+            "response_id": "response.synthetic.1",
+            "item_id": "translation.synthetic.1",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": "AQACAAMA",
+            "event_id": "synthetic.event/12"
+          }
+        },
+        {
+          "kind": "finish"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "input_audio_buffer.speech_stopped",
+            "item_id": "source.synthetic.1",
+            "audio_end_ms": 20,
+            "event_id": "synthetic.event/14"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "conversation.item.input_audio_transcription.completed",
+            "item_id": "source.synthetic.1",
+            "content_index": 0,
+            "transcript": "人工样例。",
+            "event_id": "synthetic.event/15"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.audio_transcript.done",
+            "response_id": "response.synthetic.1",
+            "item_id": "translation.synthetic.1",
+            "output_index": 0,
+            "content_index": 0,
+            "transcript": "Synthetic sample.",
+            "event_id": "synthetic.event/16"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.audio.done",
+            "response_id": "response.synthetic.1",
+            "item_id": "translation.synthetic.1",
+            "output_index": 0,
+            "content_index": 0,
+            "event_id": "synthetic.event/17"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.done",
+            "response": {
+              "id": "response.synthetic.1",
+              "status": "completed",
+              "voice": "Aiden",
+              "modalities": [
+                "text",
+                "audio"
+              ],
+              "output_audio_format": "pcm16",
+              "output": [
+                {
+                  "id": "translation.synthetic.1",
+                  "type": "message",
+                  "object": "realtime.item",
+                  "status": "completed",
+                  "role": "assistant",
+                  "content": [
+                    {
+                      "type": "audio",
+                      "transcript": "Synthetic sample."
+                    }
+                  ]
+                }
+              ],
+              "usage": {
+                "input_tokens": 2,
+                "output_tokens": 3,
+                "total_tokens": 5,
+                "input_tokens_details": {
+                  "audio_tokens": 2,
+                  "text_tokens": 0
+                },
+                "output_tokens_details": {
+                  "audio_tokens": 1,
+                  "text_tokens": 2
+                }
+              }
+            },
+            "event_id": "synthetic.event/18"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.finished",
+            "event_id": "synthetic.event/19"
+          }
+        }
+      ],
+      "expected": {
+        "fatalCode": null,
+        "fatalPath": null,
+        "ready": true,
+        "appendCount": 1,
+        "finishResolved": true,
+        "closeCode": 1000
+      }
+    },
+    {
+      "id": "optional-event-id-receive-sequence",
+      "source": "synthetic_official_contract",
+      "evidenceBasis": "manually_constructed_not_captured_provider_payload",
+      "mutation": "event_id_omitted_tolerance_not_provider_guarantee",
+      "actions": [
+        {
+          "kind": "open"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.created",
+            "session": {
+              "id": "synthetic.session/3.8",
+              "object": "realtime.session",
+              "model": "qwen3.8-livetranslate-flash-realtime",
+              "input_modalities": [
+                "audio"
+              ],
+              "output_modalities": [
+                "text",
+                "audio"
+              ],
+              "enable_voice_clone": false,
+              "audio": {
+                "input": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 16000
+                  },
+                  "turn_detection": {
+                    "type": "speaker_detection",
+                    "threshold": 0.5,
+                    "silence_duration_ms": 1000
+                  }
+                },
+                "output": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 24000
+                  },
+                  "voice": "Tina"
+                }
+              },
+              "translation": {
+                "language": "en"
+              }
+            }
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.updated",
+            "session": {
+              "id": "synthetic.session/3.8",
+              "object": "realtime.session",
+              "model": "qwen3.8-livetranslate-flash-realtime",
+              "input_modalities": [
+                "audio"
+              ],
+              "output_modalities": [
+                "text",
+                "audio"
+              ],
+              "enable_voice_clone": false,
+              "audio": {
+                "input": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 16000
+                  },
+                  "turn_detection": {
+                    "type": "speaker_detection",
+                    "threshold": 0.5,
+                    "silence_duration_ms": 1000
+                  }
+                },
+                "output": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 24000
+                  },
+                  "voice": "Aiden"
+                }
+              },
+              "translation": {
+                "language": "en"
+              }
+            }
+          }
+        },
+        {
+          "kind": "append"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "input_audio_buffer.speech_started",
+            "item_id": "source.synthetic.1",
+            "audio_start_ms": 0,
+            "speaker_id": 1
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "conversation.item.input_audio_transcription.delta",
+            "item_id": "source.synthetic.1",
+            "content_index": 0,
+            "delta": "人工"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.created",
+            "response": {
+              "id": "response.synthetic.1",
+              "status": "in_progress",
+              "voice": "Aiden",
+              "modalities": [
+                "text",
+                "audio"
+              ],
+              "output_audio_format": "pcm16"
+            }
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "conversation.item.created",
+            "previous_item_id": "source.synthetic.1",
+            "item": {
+              "id": "translation.synthetic.1",
+              "type": "message",
+              "object": "realtime.item",
+              "status": "in_progress",
+              "role": "assistant",
+              "content": []
+            }
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.audio_transcript.delta",
+            "response_id": "response.synthetic.1",
+            "item_id": "translation.synthetic.1",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": "Synthetic "
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.audio.delta",
+            "response_id": "response.synthetic.1",
+            "item_id": "translation.synthetic.1",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": "AQACAAMA"
+          }
+        },
+        {
+          "kind": "finish"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "input_audio_buffer.speech_stopped",
+            "item_id": "source.synthetic.1",
+            "audio_end_ms": 20
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "conversation.item.input_audio_transcription.completed",
+            "item_id": "source.synthetic.1",
+            "content_index": 0,
+            "transcript": "人工样例。"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.audio_transcript.done",
+            "response_id": "response.synthetic.1",
+            "item_id": "translation.synthetic.1",
+            "output_index": 0,
+            "content_index": 0,
+            "transcript": "Synthetic sample."
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.audio.done",
+            "response_id": "response.synthetic.1",
+            "item_id": "translation.synthetic.1",
+            "output_index": 0,
+            "content_index": 0
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.done",
+            "response": {
+              "id": "response.synthetic.1",
+              "status": "completed",
+              "voice": "Aiden",
+              "modalities": [
+                "text",
+                "audio"
+              ],
+              "output_audio_format": "pcm16",
+              "output": [
+                {
+                  "id": "translation.synthetic.1",
+                  "type": "message",
+                  "object": "realtime.item",
+                  "status": "completed",
+                  "role": "assistant",
+                  "content": [
+                    {
+                      "type": "audio",
+                      "transcript": "Synthetic sample."
+                    }
+                  ]
+                }
+              ],
+              "usage": {
+                "input_tokens": 2,
+                "output_tokens": 3,
+                "total_tokens": 5,
+                "input_tokens_details": {
+                  "audio_tokens": 2,
+                  "text_tokens": 0
+                },
+                "output_tokens_details": {
+                  "audio_tokens": 1,
+                  "text_tokens": 2
+                }
+              }
+            }
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.finished"
+          }
+        }
+      ],
+      "expected": {
+        "fatalCode": null,
+        "fatalPath": null,
+        "ready": true,
+        "appendCount": 1,
+        "finishResolved": true,
+        "closeCode": 1000
+      }
+    },
+    {
+      "id": "tina-fallback",
+      "source": "synthetic_official_contract",
+      "evidenceBasis": "manually_constructed_not_captured_provider_payload",
+      "mutation": "negative_configuration",
+      "actions": [
+        {
+          "kind": "open"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.created",
+            "session": {
+              "id": "synthetic.session/3.8",
+              "object": "realtime.session",
+              "model": "qwen3.8-livetranslate-flash-realtime",
+              "input_modalities": [
+                "audio"
+              ],
+              "output_modalities": [
+                "text",
+                "audio"
+              ],
+              "enable_voice_clone": false,
+              "audio": {
+                "input": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 16000
+                  },
+                  "turn_detection": {
+                    "type": "speaker_detection",
+                    "threshold": 0.5,
+                    "silence_duration_ms": 1000
+                  }
+                },
+                "output": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 24000
+                  },
+                  "voice": "Tina"
+                }
+              },
+              "translation": {
+                "language": "en"
+              }
+            },
+            "event_id": "synthetic.event/1"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.updated",
+            "session": {
+              "id": "synthetic.session/3.8",
+              "object": "realtime.session",
+              "model": "qwen3.8-livetranslate-flash-realtime",
+              "input_modalities": [
+                "audio"
+              ],
+              "output_modalities": [
+                "text",
+                "audio"
+              ],
+              "enable_voice_clone": false,
+              "audio": {
+                "input": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 16000
+                  },
+                  "turn_detection": {
+                    "type": "speaker_detection",
+                    "threshold": 0.5,
+                    "silence_duration_ms": 1000
+                  }
+                },
+                "output": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 24000
+                  },
+                  "voice": "Tina"
+                }
+              },
+              "translation": {
+                "language": "en"
+              }
+            },
+            "event_id": "synthetic.event/2"
+          }
+        }
+      ],
+      "expected": {
+        "fatalCode": "LIVETRANSLATE_CONFIGURATION_REJECTED",
+        "fatalPath": "session.audio.output.voice",
+        "ready": false,
+        "appendCount": 0,
+        "finishResolved": false,
+        "closeCode": 1006
+      }
+    },
+    {
+      "id": "voice-missing",
+      "source": "synthetic_official_contract",
+      "evidenceBasis": "manually_constructed_not_captured_provider_payload",
+      "mutation": "negative_configuration",
+      "actions": [
+        {
+          "kind": "open"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.created",
+            "session": {
+              "id": "synthetic.session/3.8",
+              "object": "realtime.session",
+              "model": "qwen3.8-livetranslate-flash-realtime",
+              "input_modalities": [
+                "audio"
+              ],
+              "output_modalities": [
+                "text",
+                "audio"
+              ],
+              "enable_voice_clone": false,
+              "audio": {
+                "input": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 16000
+                  },
+                  "turn_detection": {
+                    "type": "speaker_detection",
+                    "threshold": 0.5,
+                    "silence_duration_ms": 1000
+                  }
+                },
+                "output": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 24000
+                  },
+                  "voice": "Tina"
+                }
+              },
+              "translation": {
+                "language": "en"
+              }
+            },
+            "event_id": "synthetic.event/1"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.updated",
+            "session": {
+              "id": "synthetic.session/3.8",
+              "object": "realtime.session",
+              "model": "qwen3.8-livetranslate-flash-realtime",
+              "input_modalities": [
+                "audio"
+              ],
+              "output_modalities": [
+                "text",
+                "audio"
+              ],
+              "enable_voice_clone": false,
+              "audio": {
+                "input": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 16000
+                  },
+                  "turn_detection": {
+                    "type": "speaker_detection",
+                    "threshold": 0.5,
+                    "silence_duration_ms": 1000
+                  }
+                },
+                "output": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 24000
+                  }
+                }
+              },
+              "translation": {
+                "language": "en"
+              }
+            },
+            "event_id": "synthetic.event/2"
+          }
+        }
+      ],
+      "expected": {
+        "fatalCode": "LIVETRANSLATE_CONFIGURATION_REJECTED",
+        "fatalPath": "session.audio.output.voice",
+        "ready": false,
+        "appendCount": 0,
+        "finishResolved": false,
+        "closeCode": 1006
+      }
+    },
+    {
+      "id": "clone-true",
+      "source": "synthetic_official_contract",
+      "evidenceBasis": "manually_constructed_not_captured_provider_payload",
+      "mutation": "negative_configuration",
+      "actions": [
+        {
+          "kind": "open"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.created",
+            "session": {
+              "id": "synthetic.session/3.8",
+              "object": "realtime.session",
+              "model": "qwen3.8-livetranslate-flash-realtime",
+              "input_modalities": [
+                "audio"
+              ],
+              "output_modalities": [
+                "text",
+                "audio"
+              ],
+              "enable_voice_clone": false,
+              "audio": {
+                "input": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 16000
+                  },
+                  "turn_detection": {
+                    "type": "speaker_detection",
+                    "threshold": 0.5,
+                    "silence_duration_ms": 1000
+                  }
+                },
+                "output": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 24000
+                  },
+                  "voice": "Tina"
+                }
+              },
+              "translation": {
+                "language": "en"
+              }
+            },
+            "event_id": "synthetic.event/1"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.updated",
+            "session": {
+              "id": "synthetic.session/3.8",
+              "object": "realtime.session",
+              "model": "qwen3.8-livetranslate-flash-realtime",
+              "input_modalities": [
+                "audio"
+              ],
+              "output_modalities": [
+                "text",
+                "audio"
+              ],
+              "enable_voice_clone": true,
+              "audio": {
+                "input": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 16000
+                  },
+                  "turn_detection": {
+                    "type": "speaker_detection",
+                    "threshold": 0.5,
+                    "silence_duration_ms": 1000
+                  }
+                },
+                "output": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 24000
+                  },
+                  "voice": "Aiden"
+                }
+              },
+              "translation": {
+                "language": "en"
+              }
+            },
+            "event_id": "synthetic.event/2"
+          }
+        }
+      ],
+      "expected": {
+        "fatalCode": "LIVETRANSLATE_CONFIGURATION_REJECTED",
+        "fatalPath": "session.enable_voice_clone",
+        "ready": false,
+        "appendCount": 0,
+        "finishResolved": false,
+        "closeCode": 1006
+      }
+    },
+    {
+      "id": "clone-missing",
+      "source": "synthetic_official_contract",
+      "evidenceBasis": "manually_constructed_not_captured_provider_payload",
+      "mutation": "negative_configuration",
+      "actions": [
+        {
+          "kind": "open"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.created",
+            "session": {
+              "id": "synthetic.session/3.8",
+              "object": "realtime.session",
+              "model": "qwen3.8-livetranslate-flash-realtime",
+              "input_modalities": [
+                "audio"
+              ],
+              "output_modalities": [
+                "text",
+                "audio"
+              ],
+              "enable_voice_clone": false,
+              "audio": {
+                "input": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 16000
+                  },
+                  "turn_detection": {
+                    "type": "speaker_detection",
+                    "threshold": 0.5,
+                    "silence_duration_ms": 1000
+                  }
+                },
+                "output": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 24000
+                  },
+                  "voice": "Tina"
+                }
+              },
+              "translation": {
+                "language": "en"
+              }
+            },
+            "event_id": "synthetic.event/1"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.updated",
+            "session": {
+              "id": "synthetic.session/3.8",
+              "object": "realtime.session",
+              "model": "qwen3.8-livetranslate-flash-realtime",
+              "input_modalities": [
+                "audio"
+              ],
+              "output_modalities": [
+                "text",
+                "audio"
+              ],
+              "audio": {
+                "input": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 16000
+                  },
+                  "turn_detection": {
+                    "type": "speaker_detection",
+                    "threshold": 0.5,
+                    "silence_duration_ms": 1000
+                  }
+                },
+                "output": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 24000
+                  },
+                  "voice": "Aiden"
+                }
+              },
+              "translation": {
+                "language": "en"
+              }
+            },
+            "event_id": "synthetic.event/2"
+          }
+        }
+      ],
+      "expected": {
+        "fatalCode": "LIVETRANSLATE_CONFIGURATION_REJECTED",
+        "fatalPath": "session.enable_voice_clone",
+        "ready": false,
+        "appendCount": 0,
+        "finishResolved": false,
+        "closeCode": 1006
+      }
+    },
+    {
+      "id": "target-not-english",
+      "source": "synthetic_official_contract",
+      "evidenceBasis": "manually_constructed_not_captured_provider_payload",
+      "mutation": "negative_configuration",
+      "actions": [
+        {
+          "kind": "open"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.created",
+            "session": {
+              "id": "synthetic.session/3.8",
+              "object": "realtime.session",
+              "model": "qwen3.8-livetranslate-flash-realtime",
+              "input_modalities": [
+                "audio"
+              ],
+              "output_modalities": [
+                "text",
+                "audio"
+              ],
+              "enable_voice_clone": false,
+              "audio": {
+                "input": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 16000
+                  },
+                  "turn_detection": {
+                    "type": "speaker_detection",
+                    "threshold": 0.5,
+                    "silence_duration_ms": 1000
+                  }
+                },
+                "output": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 24000
+                  },
+                  "voice": "Tina"
+                }
+              },
+              "translation": {
+                "language": "en"
+              }
+            },
+            "event_id": "synthetic.event/1"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.updated",
+            "session": {
+              "id": "synthetic.session/3.8",
+              "object": "realtime.session",
+              "model": "qwen3.8-livetranslate-flash-realtime",
+              "input_modalities": [
+                "audio"
+              ],
+              "output_modalities": [
+                "text",
+                "audio"
+              ],
+              "enable_voice_clone": false,
+              "audio": {
+                "input": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 16000
+                  },
+                  "turn_detection": {
+                    "type": "speaker_detection",
+                    "threshold": 0.5,
+                    "silence_duration_ms": 1000
+                  }
+                },
+                "output": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 24000
+                  },
+                  "voice": "Aiden"
+                }
+              },
+              "translation": {
+                "language": "zh"
+              }
+            },
+            "event_id": "synthetic.event/2"
+          }
+        }
+      ],
+      "expected": {
+        "fatalCode": "LIVETRANSLATE_CONFIGURATION_REJECTED",
+        "fatalPath": "session.translation.language",
+        "ready": false,
+        "appendCount": 0,
+        "finishResolved": false,
+        "closeCode": 1006
+      }
+    },
+    {
+      "id": "output-rate-wrong",
+      "source": "synthetic_official_contract",
+      "evidenceBasis": "manually_constructed_not_captured_provider_payload",
+      "mutation": "negative_configuration",
+      "actions": [
+        {
+          "kind": "open"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.created",
+            "session": {
+              "id": "synthetic.session/3.8",
+              "object": "realtime.session",
+              "model": "qwen3.8-livetranslate-flash-realtime",
+              "input_modalities": [
+                "audio"
+              ],
+              "output_modalities": [
+                "text",
+                "audio"
+              ],
+              "enable_voice_clone": false,
+              "audio": {
+                "input": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 16000
+                  },
+                  "turn_detection": {
+                    "type": "speaker_detection",
+                    "threshold": 0.5,
+                    "silence_duration_ms": 1000
+                  }
+                },
+                "output": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 24000
+                  },
+                  "voice": "Tina"
+                }
+              },
+              "translation": {
+                "language": "en"
+              }
+            },
+            "event_id": "synthetic.event/1"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.updated",
+            "session": {
+              "id": "synthetic.session/3.8",
+              "object": "realtime.session",
+              "model": "qwen3.8-livetranslate-flash-realtime",
+              "input_modalities": [
+                "audio"
+              ],
+              "output_modalities": [
+                "text",
+                "audio"
+              ],
+              "enable_voice_clone": false,
+              "audio": {
+                "input": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 16000
+                  },
+                  "turn_detection": {
+                    "type": "speaker_detection",
+                    "threshold": 0.5,
+                    "silence_duration_ms": 1000
+                  }
+                },
+                "output": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 16000
+                  },
+                  "voice": "Aiden"
+                }
+              },
+              "translation": {
+                "language": "en"
+              }
+            },
+            "event_id": "synthetic.event/2"
+          }
+        }
+      ],
+      "expected": {
+        "fatalCode": "LIVETRANSLATE_CONFIGURATION_REJECTED",
+        "fatalPath": "session.audio.output.format.sample_rate",
+        "ready": false,
+        "appendCount": 0,
+        "finishResolved": false,
+        "closeCode": 1006
+      }
+    },
+    {
+      "id": "input-not-pcm",
+      "source": "synthetic_official_contract",
+      "evidenceBasis": "manually_constructed_not_captured_provider_payload",
+      "mutation": "negative_configuration",
+      "actions": [
+        {
+          "kind": "open"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.created",
+            "session": {
+              "id": "synthetic.session/3.8",
+              "object": "realtime.session",
+              "model": "qwen3.8-livetranslate-flash-realtime",
+              "input_modalities": [
+                "audio"
+              ],
+              "output_modalities": [
+                "text",
+                "audio"
+              ],
+              "enable_voice_clone": false,
+              "audio": {
+                "input": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 16000
+                  },
+                  "turn_detection": {
+                    "type": "speaker_detection",
+                    "threshold": 0.5,
+                    "silence_duration_ms": 1000
+                  }
+                },
+                "output": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 24000
+                  },
+                  "voice": "Tina"
+                }
+              },
+              "translation": {
+                "language": "en"
+              }
+            },
+            "event_id": "synthetic.event/1"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.updated",
+            "session": {
+              "id": "synthetic.session/3.8",
+              "object": "realtime.session",
+              "model": "qwen3.8-livetranslate-flash-realtime",
+              "input_modalities": [
+                "audio"
+              ],
+              "output_modalities": [
+                "text",
+                "audio"
+              ],
+              "enable_voice_clone": false,
+              "audio": {
+                "input": {
+                  "format": {
+                    "type": "opus",
+                    "sample_rate": 16000
+                  },
+                  "turn_detection": {
+                    "type": "speaker_detection",
+                    "threshold": 0.5,
+                    "silence_duration_ms": 1000
+                  }
+                },
+                "output": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 24000
+                  },
+                  "voice": "Aiden"
+                }
+              },
+              "translation": {
+                "language": "en"
+              }
+            },
+            "event_id": "synthetic.event/2"
+          }
+        }
+      ],
+      "expected": {
+        "fatalCode": "LIVETRANSLATE_CONFIGURATION_REJECTED",
+        "fatalPath": "session.audio.input.format.type",
+        "ready": false,
+        "appendCount": 0,
+        "finishResolved": false,
+        "closeCode": 1006
+      }
+    },
+    {
+      "id": "created-model-missing",
+      "source": "synthetic_official_contract",
+      "evidenceBasis": "manually_constructed_not_captured_provider_payload",
+      "mutation": "missing_critical_field",
+      "actions": [
+        {
+          "kind": "open"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.created",
+            "session": {
+              "id": "synthetic.session/3.8",
+              "object": "realtime.session",
+              "input_modalities": [
+                "audio"
+              ],
+              "output_modalities": [
+                "text",
+                "audio"
+              ],
+              "enable_voice_clone": false,
+              "audio": {
+                "input": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 16000
+                  },
+                  "turn_detection": {
+                    "type": "speaker_detection",
+                    "threshold": 0.5,
+                    "silence_duration_ms": 1000
+                  }
+                },
+                "output": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 24000
+                  },
+                  "voice": "Tina"
+                }
+              },
+              "translation": {
+                "language": "en"
+              }
+            },
+            "event_id": "synthetic.event/1"
+          }
+        }
+      ],
+      "expected": {
+        "fatalCode": "LIVETRANSLATE_SESSION_MISMATCH",
+        "fatalPath": "session.model",
+        "ready": false,
+        "appendCount": 0,
+        "finishResolved": false,
+        "closeCode": 1006
+      }
+    },
+    {
+      "id": "nested-error-before-event-id-validation",
+      "source": "synthetic_official_contract",
+      "evidenceBasis": "manually_constructed_not_captured_provider_payload",
+      "mutation": "official_error_shape",
+      "actions": [
+        {
+          "kind": "open"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "error",
+            "error": {
+              "type": "invalid_request_error",
+              "code": "invalid_value",
+              "param": "session.voice",
+              "message": "SYNTHETIC_PRIVATE_ERROR_CANARY"
+            }
+          }
+        }
+      ],
+      "expected": {
+        "fatalCode": "LIVETRANSLATE_PROVIDER_REJECTED",
+        "fatalPath": "error",
+        "ready": false,
+        "appendCount": 0,
+        "finishResolved": false,
+        "closeCode": 1006
+      }
+    },
+    {
+      "id": "gateway-code-without-type",
+      "source": "synthetic_official_contract",
+      "evidenceBasis": "manually_constructed_not_captured_provider_payload",
+      "mutation": "official_quick_start_gateway_detection_with_artificial_values",
+      "actions": [
+        {
+          "kind": "open"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "code": "SYNTHETIC_UNLISTED_CODE",
+            "message": "SYNTHETIC_PRIVATE_ERROR_CANARY",
+            "request_id": "SYNTHETIC_PRIVATE_REQUEST",
+            "event_id": "synthetic.event/1"
+          }
+        }
+      ],
+      "expected": {
+        "fatalCode": "LIVETRANSLATE_PROVIDER_REJECTED",
+        "fatalPath": "code",
+        "ready": false,
+        "appendCount": 0,
+        "finishResolved": false,
+        "closeCode": 1006
+      }
+    },
+    {
+      "id": "malformed-json-first-frame",
+      "source": "synthetic_official_contract",
+      "evidenceBasis": "manually_constructed_not_captured_provider_payload",
+      "mutation": "malformed_input",
+      "actions": [
+        {
+          "kind": "open"
+        },
+        {
+          "kind": "raw",
+          "raw": "SYNTHETIC_NOT_JSON"
+        }
+      ],
+      "expected": {
+        "fatalCode": "LIVETRANSLATE_EVENT_INVALID",
+        "fatalPath": "json",
+        "ready": false,
+        "appendCount": 0,
+        "finishResolved": false,
+        "closeCode": 1006
+      }
+    },
+    {
+      "id": "missing-audio-delta",
+      "source": "synthetic_official_contract",
+      "evidenceBasis": "manually_constructed_not_captured_provider_payload",
+      "mutation": "missing_critical_field",
+      "actions": [
+        {
+          "kind": "open"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.created",
+            "session": {
+              "id": "synthetic.session/3.8",
+              "object": "realtime.session",
+              "model": "qwen3.8-livetranslate-flash-realtime",
+              "input_modalities": [
+                "audio"
+              ],
+              "output_modalities": [
+                "text",
+                "audio"
+              ],
+              "enable_voice_clone": false,
+              "audio": {
+                "input": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 16000
+                  },
+                  "turn_detection": {
+                    "type": "speaker_detection",
+                    "threshold": 0.5,
+                    "silence_duration_ms": 1000
+                  }
+                },
+                "output": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 24000
+                  },
+                  "voice": "Tina"
+                }
+              },
+              "translation": {
+                "language": "en"
+              }
+            },
+            "event_id": "synthetic.event/1"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.updated",
+            "session": {
+              "id": "synthetic.session/3.8",
+              "object": "realtime.session",
+              "model": "qwen3.8-livetranslate-flash-realtime",
+              "input_modalities": [
+                "audio"
+              ],
+              "output_modalities": [
+                "text",
+                "audio"
+              ],
+              "enable_voice_clone": false,
+              "audio": {
+                "input": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 16000
+                  },
+                  "turn_detection": {
+                    "type": "speaker_detection",
+                    "threshold": 0.5,
+                    "silence_duration_ms": 1000
+                  }
+                },
+                "output": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 24000
+                  },
+                  "voice": "Aiden"
+                }
+              },
+              "translation": {
+                "language": "en"
+              }
+            },
+            "event_id": "synthetic.event/2"
+          }
+        },
+        {
+          "kind": "append"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "input_audio_buffer.speech_started",
+            "item_id": "source.synthetic.1",
+            "audio_start_ms": 0,
+            "speaker_id": 1,
+            "event_id": "synthetic.event/4"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "conversation.item.input_audio_transcription.delta",
+            "item_id": "source.synthetic.1",
+            "content_index": 0,
+            "delta": "人工",
+            "event_id": "synthetic.event/5"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.created",
+            "response": {
+              "id": "response.synthetic.1",
+              "status": "in_progress",
+              "voice": "Aiden",
+              "modalities": [
+                "text",
+                "audio"
+              ],
+              "output_audio_format": "pcm16"
+            },
+            "event_id": "synthetic.event/6"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "conversation.item.created",
+            "previous_item_id": "source.synthetic.1",
+            "item": {
+              "id": "translation.synthetic.1",
+              "type": "message",
+              "object": "realtime.item",
+              "status": "in_progress",
+              "role": "assistant",
+              "content": []
+            },
+            "event_id": "synthetic.event/7"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.audio_transcript.delta",
+            "response_id": "response.synthetic.1",
+            "item_id": "translation.synthetic.1",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": "Synthetic ",
+            "event_id": "synthetic.event/8"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.audio.delta",
+            "response_id": "response.synthetic.1",
+            "item_id": "translation.synthetic.1",
+            "output_index": 0,
+            "content_index": 0,
+            "event_id": "synthetic.event/9"
+          }
+        },
+        {
+          "kind": "finish"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "input_audio_buffer.speech_stopped",
+            "item_id": "source.synthetic.1",
+            "audio_end_ms": 20,
+            "event_id": "synthetic.event/11"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "conversation.item.input_audio_transcription.completed",
+            "item_id": "source.synthetic.1",
+            "content_index": 0,
+            "transcript": "人工样例。",
+            "event_id": "synthetic.event/12"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.audio_transcript.done",
+            "response_id": "response.synthetic.1",
+            "item_id": "translation.synthetic.1",
+            "output_index": 0,
+            "content_index": 0,
+            "transcript": "Synthetic sample.",
+            "event_id": "synthetic.event/13"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.audio.done",
+            "response_id": "response.synthetic.1",
+            "item_id": "translation.synthetic.1",
+            "output_index": 0,
+            "content_index": 0,
+            "event_id": "synthetic.event/14"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.done",
+            "response": {
+              "id": "response.synthetic.1",
+              "status": "completed",
+              "voice": "Aiden",
+              "modalities": [
+                "text",
+                "audio"
+              ],
+              "output_audio_format": "pcm16",
+              "output": [
+                {
+                  "id": "translation.synthetic.1",
+                  "type": "message",
+                  "object": "realtime.item",
+                  "status": "completed",
+                  "role": "assistant",
+                  "content": [
+                    {
+                      "type": "audio",
+                      "transcript": "Synthetic sample."
+                    }
+                  ]
+                }
+              ],
+              "usage": {
+                "input_tokens": 2,
+                "output_tokens": 3,
+                "total_tokens": 5,
+                "input_tokens_details": {
+                  "audio_tokens": 2,
+                  "text_tokens": 0
+                },
+                "output_tokens_details": {
+                  "audio_tokens": 1,
+                  "text_tokens": 2
+                }
+              }
+            },
+            "event_id": "synthetic.event/15"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.finished",
+            "event_id": "synthetic.event/16"
+          }
+        }
+      ],
+      "expected": {
+        "fatalCode": "LIVETRANSLATE_AUDIO_INVALID",
+        "fatalPath": "delta",
+        "ready": true,
+        "appendCount": 1,
+        "finishResolved": false,
+        "closeCode": 1006
+      }
+    },
+    {
+      "id": "unsupported-output-index",
+      "source": "synthetic_official_contract",
+      "evidenceBasis": "manually_constructed_not_captured_provider_payload",
+      "mutation": "explicit_local_index_limit",
+      "actions": [
+        {
+          "kind": "open"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.created",
+            "session": {
+              "id": "synthetic.session/3.8",
+              "object": "realtime.session",
+              "model": "qwen3.8-livetranslate-flash-realtime",
+              "input_modalities": [
+                "audio"
+              ],
+              "output_modalities": [
+                "text",
+                "audio"
+              ],
+              "enable_voice_clone": false,
+              "audio": {
+                "input": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 16000
+                  },
+                  "turn_detection": {
+                    "type": "speaker_detection",
+                    "threshold": 0.5,
+                    "silence_duration_ms": 1000
+                  }
+                },
+                "output": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 24000
+                  },
+                  "voice": "Tina"
+                }
+              },
+              "translation": {
+                "language": "en"
+              }
+            },
+            "event_id": "synthetic.event/1"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.updated",
+            "session": {
+              "id": "synthetic.session/3.8",
+              "object": "realtime.session",
+              "model": "qwen3.8-livetranslate-flash-realtime",
+              "input_modalities": [
+                "audio"
+              ],
+              "output_modalities": [
+                "text",
+                "audio"
+              ],
+              "enable_voice_clone": false,
+              "audio": {
+                "input": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 16000
+                  },
+                  "turn_detection": {
+                    "type": "speaker_detection",
+                    "threshold": 0.5,
+                    "silence_duration_ms": 1000
+                  }
+                },
+                "output": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 24000
+                  },
+                  "voice": "Aiden"
+                }
+              },
+              "translation": {
+                "language": "en"
+              }
+            },
+            "event_id": "synthetic.event/2"
+          }
+        },
+        {
+          "kind": "append"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "input_audio_buffer.speech_started",
+            "item_id": "source.synthetic.1",
+            "audio_start_ms": 0,
+            "speaker_id": 1,
+            "event_id": "synthetic.event/4"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "conversation.item.input_audio_transcription.delta",
+            "item_id": "source.synthetic.1",
+            "content_index": 0,
+            "delta": "人工",
+            "event_id": "synthetic.event/5"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.created",
+            "response": {
+              "id": "response.synthetic.1",
+              "status": "in_progress",
+              "voice": "Aiden",
+              "modalities": [
+                "text",
+                "audio"
+              ],
+              "output_audio_format": "pcm16"
+            },
+            "event_id": "synthetic.event/6"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "conversation.item.created",
+            "previous_item_id": "source.synthetic.1",
+            "item": {
+              "id": "translation.synthetic.1",
+              "type": "message",
+              "object": "realtime.item",
+              "status": "in_progress",
+              "role": "assistant",
+              "content": []
+            },
+            "event_id": "synthetic.event/7"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.audio_transcript.delta",
+            "response_id": "response.synthetic.1",
+            "item_id": "translation.synthetic.1",
+            "output_index": 1,
+            "content_index": 0,
+            "delta": "Synthetic ",
+            "event_id": "synthetic.event/8"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.audio.delta",
+            "response_id": "response.synthetic.1",
+            "item_id": "translation.synthetic.1",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": "AQACAAMA",
+            "event_id": "synthetic.event/9"
+          }
+        },
+        {
+          "kind": "finish"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "input_audio_buffer.speech_stopped",
+            "item_id": "source.synthetic.1",
+            "audio_end_ms": 20,
+            "event_id": "synthetic.event/11"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "conversation.item.input_audio_transcription.completed",
+            "item_id": "source.synthetic.1",
+            "content_index": 0,
+            "transcript": "人工样例。",
+            "event_id": "synthetic.event/12"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.audio_transcript.done",
+            "response_id": "response.synthetic.1",
+            "item_id": "translation.synthetic.1",
+            "output_index": 0,
+            "content_index": 0,
+            "transcript": "Synthetic sample.",
+            "event_id": "synthetic.event/13"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.audio.done",
+            "response_id": "response.synthetic.1",
+            "item_id": "translation.synthetic.1",
+            "output_index": 0,
+            "content_index": 0,
+            "event_id": "synthetic.event/14"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.done",
+            "response": {
+              "id": "response.synthetic.1",
+              "status": "completed",
+              "voice": "Aiden",
+              "modalities": [
+                "text",
+                "audio"
+              ],
+              "output_audio_format": "pcm16",
+              "output": [
+                {
+                  "id": "translation.synthetic.1",
+                  "type": "message",
+                  "object": "realtime.item",
+                  "status": "completed",
+                  "role": "assistant",
+                  "content": [
+                    {
+                      "type": "audio",
+                      "transcript": "Synthetic sample."
+                    }
+                  ]
+                }
+              ],
+              "usage": {
+                "input_tokens": 2,
+                "output_tokens": 3,
+                "total_tokens": 5,
+                "input_tokens_details": {
+                  "audio_tokens": 2,
+                  "text_tokens": 0
+                },
+                "output_tokens_details": {
+                  "audio_tokens": 1,
+                  "text_tokens": 2
+                }
+              }
+            },
+            "event_id": "synthetic.event/15"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.finished",
+            "event_id": "synthetic.event/16"
+          }
+        }
+      ],
+      "expected": {
+        "fatalCode": "LIVETRANSLATE_UNSUPPORTED_SCHEMA",
+        "fatalPath": "output_index",
+        "ready": true,
+        "appendCount": 1,
+        "finishResolved": false,
+        "closeCode": 1006
+      }
+    },
+    {
+      "id": "missing-response.audio_transcript.done",
+      "source": "synthetic_official_contract",
+      "evidenceBasis": "manually_constructed_not_captured_provider_payload",
+      "mutation": "missing_required_tail_event",
+      "actions": [
+        {
+          "kind": "open"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.created",
+            "session": {
+              "id": "synthetic.session/3.8",
+              "object": "realtime.session",
+              "model": "qwen3.8-livetranslate-flash-realtime",
+              "input_modalities": [
+                "audio"
+              ],
+              "output_modalities": [
+                "text",
+                "audio"
+              ],
+              "enable_voice_clone": false,
+              "audio": {
+                "input": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 16000
+                  },
+                  "turn_detection": {
+                    "type": "speaker_detection",
+                    "threshold": 0.5,
+                    "silence_duration_ms": 1000
+                  }
+                },
+                "output": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 24000
+                  },
+                  "voice": "Tina"
+                }
+              },
+              "translation": {
+                "language": "en"
+              }
+            },
+            "event_id": "synthetic.event/1"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.updated",
+            "session": {
+              "id": "synthetic.session/3.8",
+              "object": "realtime.session",
+              "model": "qwen3.8-livetranslate-flash-realtime",
+              "input_modalities": [
+                "audio"
+              ],
+              "output_modalities": [
+                "text",
+                "audio"
+              ],
+              "enable_voice_clone": false,
+              "audio": {
+                "input": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 16000
+                  },
+                  "turn_detection": {
+                    "type": "speaker_detection",
+                    "threshold": 0.5,
+                    "silence_duration_ms": 1000
+                  }
+                },
+                "output": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 24000
+                  },
+                  "voice": "Aiden"
+                }
+              },
+              "translation": {
+                "language": "en"
+              }
+            },
+            "event_id": "synthetic.event/2"
+          }
+        },
+        {
+          "kind": "append"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "input_audio_buffer.speech_started",
+            "item_id": "source.synthetic.1",
+            "audio_start_ms": 0,
+            "speaker_id": 1,
+            "event_id": "synthetic.event/4"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "conversation.item.input_audio_transcription.delta",
+            "item_id": "source.synthetic.1",
+            "content_index": 0,
+            "delta": "人工",
+            "event_id": "synthetic.event/5"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.created",
+            "response": {
+              "id": "response.synthetic.1",
+              "status": "in_progress",
+              "voice": "Aiden",
+              "modalities": [
+                "text",
+                "audio"
+              ],
+              "output_audio_format": "pcm16"
+            },
+            "event_id": "synthetic.event/6"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "conversation.item.created",
+            "previous_item_id": "source.synthetic.1",
+            "item": {
+              "id": "translation.synthetic.1",
+              "type": "message",
+              "object": "realtime.item",
+              "status": "in_progress",
+              "role": "assistant",
+              "content": []
+            },
+            "event_id": "synthetic.event/7"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.audio_transcript.delta",
+            "response_id": "response.synthetic.1",
+            "item_id": "translation.synthetic.1",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": "Synthetic ",
+            "event_id": "synthetic.event/8"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.audio.delta",
+            "response_id": "response.synthetic.1",
+            "item_id": "translation.synthetic.1",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": "AQACAAMA",
+            "event_id": "synthetic.event/9"
+          }
+        },
+        {
+          "kind": "finish"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "input_audio_buffer.speech_stopped",
+            "item_id": "source.synthetic.1",
+            "audio_end_ms": 20,
+            "event_id": "synthetic.event/11"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "conversation.item.input_audio_transcription.completed",
+            "item_id": "source.synthetic.1",
+            "content_index": 0,
+            "transcript": "人工样例。",
+            "event_id": "synthetic.event/12"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.audio.done",
+            "response_id": "response.synthetic.1",
+            "item_id": "translation.synthetic.1",
+            "output_index": 0,
+            "content_index": 0,
+            "event_id": "synthetic.event/13"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.done",
+            "response": {
+              "id": "response.synthetic.1",
+              "status": "completed",
+              "voice": "Aiden",
+              "modalities": [
+                "text",
+                "audio"
+              ],
+              "output_audio_format": "pcm16",
+              "output": [
+                {
+                  "id": "translation.synthetic.1",
+                  "type": "message",
+                  "object": "realtime.item",
+                  "status": "completed",
+                  "role": "assistant",
+                  "content": [
+                    {
+                      "type": "audio",
+                      "transcript": "Synthetic sample."
+                    }
+                  ]
+                }
+              ],
+              "usage": {
+                "input_tokens": 2,
+                "output_tokens": 3,
+                "total_tokens": 5,
+                "input_tokens_details": {
+                  "audio_tokens": 2,
+                  "text_tokens": 0
+                },
+                "output_tokens_details": {
+                  "audio_tokens": 1,
+                  "text_tokens": 2
+                }
+              }
+            },
+            "event_id": "synthetic.event/14"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.finished",
+            "event_id": "synthetic.event/15"
+          }
+        }
+      ],
+      "expected": {
+        "fatalCode": "LIVETRANSLATE_RESPONSE_INCOMPLETE",
+        "fatalPath": "response.text.done",
+        "ready": true,
+        "appendCount": 1,
+        "finishResolved": false,
+        "closeCode": 1006
+      }
+    },
+    {
+      "id": "missing-response.audio.done",
+      "source": "synthetic_official_contract",
+      "evidenceBasis": "manually_constructed_not_captured_provider_payload",
+      "mutation": "missing_required_tail_event",
+      "actions": [
+        {
+          "kind": "open"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.created",
+            "session": {
+              "id": "synthetic.session/3.8",
+              "object": "realtime.session",
+              "model": "qwen3.8-livetranslate-flash-realtime",
+              "input_modalities": [
+                "audio"
+              ],
+              "output_modalities": [
+                "text",
+                "audio"
+              ],
+              "enable_voice_clone": false,
+              "audio": {
+                "input": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 16000
+                  },
+                  "turn_detection": {
+                    "type": "speaker_detection",
+                    "threshold": 0.5,
+                    "silence_duration_ms": 1000
+                  }
+                },
+                "output": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 24000
+                  },
+                  "voice": "Tina"
+                }
+              },
+              "translation": {
+                "language": "en"
+              }
+            },
+            "event_id": "synthetic.event/1"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.updated",
+            "session": {
+              "id": "synthetic.session/3.8",
+              "object": "realtime.session",
+              "model": "qwen3.8-livetranslate-flash-realtime",
+              "input_modalities": [
+                "audio"
+              ],
+              "output_modalities": [
+                "text",
+                "audio"
+              ],
+              "enable_voice_clone": false,
+              "audio": {
+                "input": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 16000
+                  },
+                  "turn_detection": {
+                    "type": "speaker_detection",
+                    "threshold": 0.5,
+                    "silence_duration_ms": 1000
+                  }
+                },
+                "output": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 24000
+                  },
+                  "voice": "Aiden"
+                }
+              },
+              "translation": {
+                "language": "en"
+              }
+            },
+            "event_id": "synthetic.event/2"
+          }
+        },
+        {
+          "kind": "append"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "input_audio_buffer.speech_started",
+            "item_id": "source.synthetic.1",
+            "audio_start_ms": 0,
+            "speaker_id": 1,
+            "event_id": "synthetic.event/4"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "conversation.item.input_audio_transcription.delta",
+            "item_id": "source.synthetic.1",
+            "content_index": 0,
+            "delta": "人工",
+            "event_id": "synthetic.event/5"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.created",
+            "response": {
+              "id": "response.synthetic.1",
+              "status": "in_progress",
+              "voice": "Aiden",
+              "modalities": [
+                "text",
+                "audio"
+              ],
+              "output_audio_format": "pcm16"
+            },
+            "event_id": "synthetic.event/6"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "conversation.item.created",
+            "previous_item_id": "source.synthetic.1",
+            "item": {
+              "id": "translation.synthetic.1",
+              "type": "message",
+              "object": "realtime.item",
+              "status": "in_progress",
+              "role": "assistant",
+              "content": []
+            },
+            "event_id": "synthetic.event/7"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.audio_transcript.delta",
+            "response_id": "response.synthetic.1",
+            "item_id": "translation.synthetic.1",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": "Synthetic ",
+            "event_id": "synthetic.event/8"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.audio.delta",
+            "response_id": "response.synthetic.1",
+            "item_id": "translation.synthetic.1",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": "AQACAAMA",
+            "event_id": "synthetic.event/9"
+          }
+        },
+        {
+          "kind": "finish"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "input_audio_buffer.speech_stopped",
+            "item_id": "source.synthetic.1",
+            "audio_end_ms": 20,
+            "event_id": "synthetic.event/11"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "conversation.item.input_audio_transcription.completed",
+            "item_id": "source.synthetic.1",
+            "content_index": 0,
+            "transcript": "人工样例。",
+            "event_id": "synthetic.event/12"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.audio_transcript.done",
+            "response_id": "response.synthetic.1",
+            "item_id": "translation.synthetic.1",
+            "output_index": 0,
+            "content_index": 0,
+            "transcript": "Synthetic sample.",
+            "event_id": "synthetic.event/13"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.done",
+            "response": {
+              "id": "response.synthetic.1",
+              "status": "completed",
+              "voice": "Aiden",
+              "modalities": [
+                "text",
+                "audio"
+              ],
+              "output_audio_format": "pcm16",
+              "output": [
+                {
+                  "id": "translation.synthetic.1",
+                  "type": "message",
+                  "object": "realtime.item",
+                  "status": "completed",
+                  "role": "assistant",
+                  "content": [
+                    {
+                      "type": "audio",
+                      "transcript": "Synthetic sample."
+                    }
+                  ]
+                }
+              ],
+              "usage": {
+                "input_tokens": 2,
+                "output_tokens": 3,
+                "total_tokens": 5,
+                "input_tokens_details": {
+                  "audio_tokens": 2,
+                  "text_tokens": 0
+                },
+                "output_tokens_details": {
+                  "audio_tokens": 1,
+                  "text_tokens": 2
+                }
+              }
+            },
+            "event_id": "synthetic.event/14"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.finished",
+            "event_id": "synthetic.event/15"
+          }
+        }
+      ],
+      "expected": {
+        "fatalCode": "LIVETRANSLATE_RESPONSE_INCOMPLETE",
+        "fatalPath": "response.audio.done",
+        "ready": true,
+        "appendCount": 1,
+        "finishResolved": false,
+        "closeCode": 1006
+      }
+    },
+    {
+      "id": "late-explicit-source-binding",
+      "source": "synthetic_official_contract",
+      "evidenceBasis": "manually_constructed_not_captured_provider_payload",
+      "mutation": "explicit_binding_after_output_before_finished",
+      "actions": [
+        {
+          "kind": "open"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.created",
+            "session": {
+              "id": "synthetic.session/3.8",
+              "object": "realtime.session",
+              "model": "qwen3.8-livetranslate-flash-realtime",
+              "input_modalities": [
+                "audio"
+              ],
+              "output_modalities": [
+                "text",
+                "audio"
+              ],
+              "enable_voice_clone": false,
+              "audio": {
+                "input": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 16000
+                  },
+                  "turn_detection": {
+                    "type": "speaker_detection",
+                    "threshold": 0.5,
+                    "silence_duration_ms": 1000
+                  }
+                },
+                "output": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 24000
+                  },
+                  "voice": "Tina"
+                }
+              },
+              "translation": {
+                "language": "en"
+              }
+            },
+            "event_id": "synthetic.event/1"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.updated",
+            "session": {
+              "id": "synthetic.session/3.8",
+              "object": "realtime.session",
+              "model": "qwen3.8-livetranslate-flash-realtime",
+              "input_modalities": [
+                "audio"
+              ],
+              "output_modalities": [
+                "text",
+                "audio"
+              ],
+              "enable_voice_clone": false,
+              "audio": {
+                "input": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 16000
+                  },
+                  "turn_detection": {
+                    "type": "speaker_detection",
+                    "threshold": 0.5,
+                    "silence_duration_ms": 1000
+                  }
+                },
+                "output": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 24000
+                  },
+                  "voice": "Aiden"
+                }
+              },
+              "translation": {
+                "language": "en"
+              }
+            },
+            "event_id": "synthetic.event/2"
+          }
+        },
+        {
+          "kind": "append"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "input_audio_buffer.speech_started",
+            "item_id": "source.synthetic.1",
+            "audio_start_ms": 0,
+            "speaker_id": 1,
+            "event_id": "synthetic.event/4"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "conversation.item.input_audio_transcription.delta",
+            "item_id": "source.synthetic.1",
+            "content_index": 0,
+            "delta": "人工",
+            "event_id": "synthetic.event/5"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.created",
+            "response": {
+              "id": "response.synthetic.1",
+              "status": "in_progress",
+              "voice": "Aiden",
+              "modalities": [
+                "text",
+                "audio"
+              ],
+              "output_audio_format": "pcm16"
+            },
+            "event_id": "synthetic.event/6"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.audio_transcript.delta",
+            "response_id": "response.synthetic.1",
+            "item_id": "translation.synthetic.1",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": "Synthetic ",
+            "event_id": "synthetic.event/7"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.audio.delta",
+            "response_id": "response.synthetic.1",
+            "item_id": "translation.synthetic.1",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": "AQACAAMA",
+            "event_id": "synthetic.event/8"
+          }
+        },
+        {
+          "kind": "finish"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "input_audio_buffer.speech_stopped",
+            "item_id": "source.synthetic.1",
+            "audio_end_ms": 20,
+            "event_id": "synthetic.event/10"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "conversation.item.input_audio_transcription.completed",
+            "item_id": "source.synthetic.1",
+            "content_index": 0,
+            "transcript": "人工样例。",
+            "event_id": "synthetic.event/11"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.audio_transcript.done",
+            "response_id": "response.synthetic.1",
+            "item_id": "translation.synthetic.1",
+            "output_index": 0,
+            "content_index": 0,
+            "transcript": "Synthetic sample.",
+            "event_id": "synthetic.event/12"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.audio.done",
+            "response_id": "response.synthetic.1",
+            "item_id": "translation.synthetic.1",
+            "output_index": 0,
+            "content_index": 0,
+            "event_id": "synthetic.event/13"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.done",
+            "response": {
+              "id": "response.synthetic.1",
+              "status": "completed",
+              "voice": "Aiden",
+              "modalities": [
+                "text",
+                "audio"
+              ],
+              "output_audio_format": "pcm16",
+              "output": [
+                {
+                  "id": "translation.synthetic.1",
+                  "type": "message",
+                  "object": "realtime.item",
+                  "status": "completed",
+                  "role": "assistant",
+                  "content": [
+                    {
+                      "type": "audio",
+                      "transcript": "Synthetic sample."
+                    }
+                  ]
+                }
+              ],
+              "usage": {
+                "input_tokens": 2,
+                "output_tokens": 3,
+                "total_tokens": 5,
+                "input_tokens_details": {
+                  "audio_tokens": 2,
+                  "text_tokens": 0
+                },
+                "output_tokens_details": {
+                  "audio_tokens": 1,
+                  "text_tokens": 2
+                }
+              }
+            },
+            "event_id": "synthetic.event/14"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "conversation.item.created",
+            "previous_item_id": "source.synthetic.1",
+            "item": {
+              "id": "translation.synthetic.1",
+              "type": "message",
+              "object": "realtime.item",
+              "status": "in_progress",
+              "role": "assistant",
+              "content": []
+            },
+            "event_id": "synthetic.event/15"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.finished",
+            "event_id": "synthetic.event/16"
+          }
+        }
+      ],
+      "expected": {
+        "fatalCode": null,
+        "fatalPath": null,
+        "ready": true,
+        "appendCount": 1,
+        "finishResolved": true,
+        "closeCode": 1000
+      }
+    },
+    {
+      "id": "nonempty-source-never-translated",
+      "source": "synthetic_official_contract",
+      "evidenceBasis": "manually_constructed_not_captured_provider_payload",
+      "mutation": "missing_explicit_translation_binding",
+      "actions": [
+        {
+          "kind": "open"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.created",
+            "session": {
+              "id": "synthetic.session/3.8",
+              "object": "realtime.session",
+              "model": "qwen3.8-livetranslate-flash-realtime",
+              "input_modalities": [
+                "audio"
+              ],
+              "output_modalities": [
+                "text",
+                "audio"
+              ],
+              "enable_voice_clone": false,
+              "audio": {
+                "input": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 16000
+                  },
+                  "turn_detection": {
+                    "type": "speaker_detection",
+                    "threshold": 0.5,
+                    "silence_duration_ms": 1000
+                  }
+                },
+                "output": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 24000
+                  },
+                  "voice": "Tina"
+                }
+              },
+              "translation": {
+                "language": "en"
+              }
+            },
+            "event_id": "synthetic.event/1"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.updated",
+            "session": {
+              "id": "synthetic.session/3.8",
+              "object": "realtime.session",
+              "model": "qwen3.8-livetranslate-flash-realtime",
+              "input_modalities": [
+                "audio"
+              ],
+              "output_modalities": [
+                "text",
+                "audio"
+              ],
+              "enable_voice_clone": false,
+              "audio": {
+                "input": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 16000
+                  },
+                  "turn_detection": {
+                    "type": "speaker_detection",
+                    "threshold": 0.5,
+                    "silence_duration_ms": 1000
+                  }
+                },
+                "output": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 24000
+                  },
+                  "voice": "Aiden"
+                }
+              },
+              "translation": {
+                "language": "en"
+              }
+            },
+            "event_id": "synthetic.event/2"
+          }
+        },
+        {
+          "kind": "append"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "conversation.item.input_audio_transcription.completed",
+            "item_id": "source.synthetic.1",
+            "content_index": 0,
+            "transcript": "人工样例。",
+            "event_id": "synthetic.event/4"
+          }
+        },
+        {
+          "kind": "finish"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.finished",
+            "event_id": "synthetic.event/6"
+          }
+        }
+      ],
+      "expected": {
+        "fatalCode": "LIVETRANSLATE_FINISH_INCOMPLETE",
+        "fatalPath": "source.translation",
+        "ready": true,
+        "appendCount": 1,
+        "finishResolved": false,
+        "closeCode": 1006
+      }
+    },
+    {
+      "id": "output-without-known-source",
+      "source": "synthetic_official_contract",
+      "evidenceBasis": "manually_constructed_not_captured_provider_payload",
+      "mutation": "missing_explicit_source_binding",
+      "actions": [
+        {
+          "kind": "open"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.created",
+            "session": {
+              "id": "synthetic.session/3.8",
+              "object": "realtime.session",
+              "model": "qwen3.8-livetranslate-flash-realtime",
+              "input_modalities": [
+                "audio"
+              ],
+              "output_modalities": [
+                "text",
+                "audio"
+              ],
+              "enable_voice_clone": false,
+              "audio": {
+                "input": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 16000
+                  },
+                  "turn_detection": {
+                    "type": "speaker_detection",
+                    "threshold": 0.5,
+                    "silence_duration_ms": 1000
+                  }
+                },
+                "output": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 24000
+                  },
+                  "voice": "Tina"
+                }
+              },
+              "translation": {
+                "language": "en"
+              }
+            },
+            "event_id": "synthetic.event/1"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.updated",
+            "session": {
+              "id": "synthetic.session/3.8",
+              "object": "realtime.session",
+              "model": "qwen3.8-livetranslate-flash-realtime",
+              "input_modalities": [
+                "audio"
+              ],
+              "output_modalities": [
+                "text",
+                "audio"
+              ],
+              "enable_voice_clone": false,
+              "audio": {
+                "input": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 16000
+                  },
+                  "turn_detection": {
+                    "type": "speaker_detection",
+                    "threshold": 0.5,
+                    "silence_duration_ms": 1000
+                  }
+                },
+                "output": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 24000
+                  },
+                  "voice": "Aiden"
+                }
+              },
+              "translation": {
+                "language": "en"
+              }
+            },
+            "event_id": "synthetic.event/2"
+          }
+        },
+        {
+          "kind": "append"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.created",
+            "response": {
+              "id": "response.synthetic.1",
+              "status": "in_progress",
+              "voice": "Aiden",
+              "modalities": [
+                "text",
+                "audio"
+              ],
+              "output_audio_format": "pcm16"
+            },
+            "event_id": "synthetic.event/4"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.audio_transcript.delta",
+            "response_id": "response.synthetic.1",
+            "item_id": "translation.synthetic.1",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": "Synthetic ",
+            "event_id": "synthetic.event/5"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.audio.delta",
+            "response_id": "response.synthetic.1",
+            "item_id": "translation.synthetic.1",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": "AQACAAMA",
+            "event_id": "synthetic.event/6"
+          }
+        },
+        {
+          "kind": "finish"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.audio_transcript.done",
+            "response_id": "response.synthetic.1",
+            "item_id": "translation.synthetic.1",
+            "output_index": 0,
+            "content_index": 0,
+            "transcript": "Synthetic sample.",
+            "event_id": "synthetic.event/8"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.audio.done",
+            "response_id": "response.synthetic.1",
+            "item_id": "translation.synthetic.1",
+            "output_index": 0,
+            "content_index": 0,
+            "event_id": "synthetic.event/9"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.done",
+            "response": {
+              "id": "response.synthetic.1",
+              "status": "completed",
+              "voice": "Aiden",
+              "modalities": [
+                "text",
+                "audio"
+              ],
+              "output_audio_format": "pcm16",
+              "output": [
+                {
+                  "id": "translation.synthetic.1",
+                  "type": "message",
+                  "object": "realtime.item",
+                  "status": "completed",
+                  "role": "assistant",
+                  "content": [
+                    {
+                      "type": "audio",
+                      "transcript": "Synthetic sample."
+                    }
+                  ]
+                }
+              ],
+              "usage": {
+                "input_tokens": 2,
+                "output_tokens": 3,
+                "total_tokens": 5,
+                "input_tokens_details": {
+                  "audio_tokens": 2,
+                  "text_tokens": 0
+                },
+                "output_tokens_details": {
+                  "audio_tokens": 1,
+                  "text_tokens": 2
+                }
+              }
+            },
+            "event_id": "synthetic.event/10"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.finished",
+            "event_id": "synthetic.event/11"
+          }
+        }
+      ],
+      "expected": {
+        "fatalCode": "LIVETRANSLATE_FINISH_INCOMPLETE",
+        "fatalPath": "source.binding",
+        "ready": true,
+        "appendCount": 1,
+        "finishResolved": false,
+        "closeCode": 1006
+      }
+    },
+    {
+      "id": "response-created-voice-conflict",
+      "source": "synthetic_official_contract",
+      "evidenceBasis": "manually_constructed_not_captured_provider_payload",
+      "mutation": "contradictory_response_voice",
+      "actions": [
+        {
+          "kind": "open"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.created",
+            "session": {
+              "id": "synthetic.session/3.8",
+              "object": "realtime.session",
+              "model": "qwen3.8-livetranslate-flash-realtime",
+              "input_modalities": [
+                "audio"
+              ],
+              "output_modalities": [
+                "text",
+                "audio"
+              ],
+              "enable_voice_clone": false,
+              "audio": {
+                "input": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 16000
+                  },
+                  "turn_detection": {
+                    "type": "speaker_detection",
+                    "threshold": 0.5,
+                    "silence_duration_ms": 1000
+                  }
+                },
+                "output": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 24000
+                  },
+                  "voice": "Tina"
+                }
+              },
+              "translation": {
+                "language": "en"
+              }
+            },
+            "event_id": "synthetic.event/1"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.updated",
+            "session": {
+              "id": "synthetic.session/3.8",
+              "object": "realtime.session",
+              "model": "qwen3.8-livetranslate-flash-realtime",
+              "input_modalities": [
+                "audio"
+              ],
+              "output_modalities": [
+                "text",
+                "audio"
+              ],
+              "enable_voice_clone": false,
+              "audio": {
+                "input": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 16000
+                  },
+                  "turn_detection": {
+                    "type": "speaker_detection",
+                    "threshold": 0.5,
+                    "silence_duration_ms": 1000
+                  }
+                },
+                "output": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 24000
+                  },
+                  "voice": "Aiden"
+                }
+              },
+              "translation": {
+                "language": "en"
+              }
+            },
+            "event_id": "synthetic.event/2"
+          }
+        },
+        {
+          "kind": "append"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "input_audio_buffer.speech_started",
+            "item_id": "source.synthetic.1",
+            "audio_start_ms": 0,
+            "speaker_id": 1,
+            "event_id": "synthetic.event/4"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "conversation.item.input_audio_transcription.delta",
+            "item_id": "source.synthetic.1",
+            "content_index": 0,
+            "delta": "人工",
+            "event_id": "synthetic.event/5"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.created",
+            "response": {
+              "id": "response.synthetic.1",
+              "status": "in_progress",
+              "voice": "Tina",
+              "modalities": [
+                "text",
+                "audio"
+              ],
+              "output_audio_format": "pcm16"
+            },
+            "event_id": "synthetic.event/6"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "conversation.item.created",
+            "previous_item_id": "source.synthetic.1",
+            "item": {
+              "id": "translation.synthetic.1",
+              "type": "message",
+              "object": "realtime.item",
+              "status": "in_progress",
+              "role": "assistant",
+              "content": []
+            },
+            "event_id": "synthetic.event/7"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.audio_transcript.delta",
+            "response_id": "response.synthetic.1",
+            "item_id": "translation.synthetic.1",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": "Synthetic ",
+            "event_id": "synthetic.event/8"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.audio.delta",
+            "response_id": "response.synthetic.1",
+            "item_id": "translation.synthetic.1",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": "AQACAAMA",
+            "event_id": "synthetic.event/9"
+          }
+        },
+        {
+          "kind": "finish"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "input_audio_buffer.speech_stopped",
+            "item_id": "source.synthetic.1",
+            "audio_end_ms": 20,
+            "event_id": "synthetic.event/11"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "conversation.item.input_audio_transcription.completed",
+            "item_id": "source.synthetic.1",
+            "content_index": 0,
+            "transcript": "人工样例。",
+            "event_id": "synthetic.event/12"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.audio_transcript.done",
+            "response_id": "response.synthetic.1",
+            "item_id": "translation.synthetic.1",
+            "output_index": 0,
+            "content_index": 0,
+            "transcript": "Synthetic sample.",
+            "event_id": "synthetic.event/13"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.audio.done",
+            "response_id": "response.synthetic.1",
+            "item_id": "translation.synthetic.1",
+            "output_index": 0,
+            "content_index": 0,
+            "event_id": "synthetic.event/14"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.done",
+            "response": {
+              "id": "response.synthetic.1",
+              "status": "completed",
+              "voice": "Aiden",
+              "modalities": [
+                "text",
+                "audio"
+              ],
+              "output_audio_format": "pcm16",
+              "output": [
+                {
+                  "id": "translation.synthetic.1",
+                  "type": "message",
+                  "object": "realtime.item",
+                  "status": "completed",
+                  "role": "assistant",
+                  "content": [
+                    {
+                      "type": "audio",
+                      "transcript": "Synthetic sample."
+                    }
+                  ]
+                }
+              ],
+              "usage": {
+                "input_tokens": 2,
+                "output_tokens": 3,
+                "total_tokens": 5,
+                "input_tokens_details": {
+                  "audio_tokens": 2,
+                  "text_tokens": 0
+                },
+                "output_tokens_details": {
+                  "audio_tokens": 1,
+                  "text_tokens": 2
+                }
+              }
+            },
+            "event_id": "synthetic.event/15"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.finished",
+            "event_id": "synthetic.event/16"
+          }
+        }
+      ],
+      "expected": {
+        "fatalCode": "LIVETRANSLATE_CONFIGURATION_REJECTED",
+        "fatalPath": "response.voice",
+        "ready": true,
+        "appendCount": 1,
+        "finishResolved": false,
+        "closeCode": 1006
+      }
+    },
+    {
+      "id": "done-output-not-array",
+      "source": "synthetic_official_contract",
+      "evidenceBasis": "manually_constructed_not_captured_provider_payload",
+      "mutation": "wrong_critical_field_type",
+      "actions": [
+        {
+          "kind": "open"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.created",
+            "session": {
+              "id": "synthetic.session/3.8",
+              "object": "realtime.session",
+              "model": "qwen3.8-livetranslate-flash-realtime",
+              "input_modalities": [
+                "audio"
+              ],
+              "output_modalities": [
+                "text",
+                "audio"
+              ],
+              "enable_voice_clone": false,
+              "audio": {
+                "input": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 16000
+                  },
+                  "turn_detection": {
+                    "type": "speaker_detection",
+                    "threshold": 0.5,
+                    "silence_duration_ms": 1000
+                  }
+                },
+                "output": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 24000
+                  },
+                  "voice": "Tina"
+                }
+              },
+              "translation": {
+                "language": "en"
+              }
+            },
+            "event_id": "synthetic.event/1"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.updated",
+            "session": {
+              "id": "synthetic.session/3.8",
+              "object": "realtime.session",
+              "model": "qwen3.8-livetranslate-flash-realtime",
+              "input_modalities": [
+                "audio"
+              ],
+              "output_modalities": [
+                "text",
+                "audio"
+              ],
+              "enable_voice_clone": false,
+              "audio": {
+                "input": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 16000
+                  },
+                  "turn_detection": {
+                    "type": "speaker_detection",
+                    "threshold": 0.5,
+                    "silence_duration_ms": 1000
+                  }
+                },
+                "output": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 24000
+                  },
+                  "voice": "Aiden"
+                }
+              },
+              "translation": {
+                "language": "en"
+              }
+            },
+            "event_id": "synthetic.event/2"
+          }
+        },
+        {
+          "kind": "append"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "input_audio_buffer.speech_started",
+            "item_id": "source.synthetic.1",
+            "audio_start_ms": 0,
+            "speaker_id": 1,
+            "event_id": "synthetic.event/4"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "conversation.item.input_audio_transcription.delta",
+            "item_id": "source.synthetic.1",
+            "content_index": 0,
+            "delta": "人工",
+            "event_id": "synthetic.event/5"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.created",
+            "response": {
+              "id": "response.synthetic.1",
+              "status": "in_progress",
+              "voice": "Aiden",
+              "modalities": [
+                "text",
+                "audio"
+              ],
+              "output_audio_format": "pcm16"
+            },
+            "event_id": "synthetic.event/6"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "conversation.item.created",
+            "previous_item_id": "source.synthetic.1",
+            "item": {
+              "id": "translation.synthetic.1",
+              "type": "message",
+              "object": "realtime.item",
+              "status": "in_progress",
+              "role": "assistant",
+              "content": []
+            },
+            "event_id": "synthetic.event/7"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.audio_transcript.delta",
+            "response_id": "response.synthetic.1",
+            "item_id": "translation.synthetic.1",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": "Synthetic ",
+            "event_id": "synthetic.event/8"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.audio.delta",
+            "response_id": "response.synthetic.1",
+            "item_id": "translation.synthetic.1",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": "AQACAAMA",
+            "event_id": "synthetic.event/9"
+          }
+        },
+        {
+          "kind": "finish"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "input_audio_buffer.speech_stopped",
+            "item_id": "source.synthetic.1",
+            "audio_end_ms": 20,
+            "event_id": "synthetic.event/11"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "conversation.item.input_audio_transcription.completed",
+            "item_id": "source.synthetic.1",
+            "content_index": 0,
+            "transcript": "人工样例。",
+            "event_id": "synthetic.event/12"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.audio_transcript.done",
+            "response_id": "response.synthetic.1",
+            "item_id": "translation.synthetic.1",
+            "output_index": 0,
+            "content_index": 0,
+            "transcript": "Synthetic sample.",
+            "event_id": "synthetic.event/13"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.audio.done",
+            "response_id": "response.synthetic.1",
+            "item_id": "translation.synthetic.1",
+            "output_index": 0,
+            "content_index": 0,
+            "event_id": "synthetic.event/14"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.done",
+            "response": {
+              "id": "response.synthetic.1",
+              "status": "completed",
+              "voice": "Aiden",
+              "modalities": [
+                "text",
+                "audio"
+              ],
+              "output_audio_format": "pcm16",
+              "output": {},
+              "usage": {
+                "input_tokens": 2,
+                "output_tokens": 3,
+                "total_tokens": 5,
+                "input_tokens_details": {
+                  "audio_tokens": 2,
+                  "text_tokens": 0
+                },
+                "output_tokens_details": {
+                  "audio_tokens": 1,
+                  "text_tokens": 2
+                }
+              }
+            },
+            "event_id": "synthetic.event/15"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.finished",
+            "event_id": "synthetic.event/16"
+          }
+        }
+      ],
+      "expected": {
+        "fatalCode": "LIVETRANSLATE_EVENT_INVALID",
+        "fatalPath": "response.output",
+        "ready": true,
+        "appendCount": 1,
+        "finishResolved": false,
+        "closeCode": 1006
+      }
+    },
+    {
+      "id": "done-content-type-conflict",
+      "source": "synthetic_official_contract",
+      "evidenceBasis": "manually_constructed_not_captured_provider_payload",
+      "mutation": "contradictory_content_modality",
+      "actions": [
+        {
+          "kind": "open"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.created",
+            "session": {
+              "id": "synthetic.session/3.8",
+              "object": "realtime.session",
+              "model": "qwen3.8-livetranslate-flash-realtime",
+              "input_modalities": [
+                "audio"
+              ],
+              "output_modalities": [
+                "text",
+                "audio"
+              ],
+              "enable_voice_clone": false,
+              "audio": {
+                "input": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 16000
+                  },
+                  "turn_detection": {
+                    "type": "speaker_detection",
+                    "threshold": 0.5,
+                    "silence_duration_ms": 1000
+                  }
+                },
+                "output": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 24000
+                  },
+                  "voice": "Tina"
+                }
+              },
+              "translation": {
+                "language": "en"
+              }
+            },
+            "event_id": "synthetic.event/1"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.updated",
+            "session": {
+              "id": "synthetic.session/3.8",
+              "object": "realtime.session",
+              "model": "qwen3.8-livetranslate-flash-realtime",
+              "input_modalities": [
+                "audio"
+              ],
+              "output_modalities": [
+                "text",
+                "audio"
+              ],
+              "enable_voice_clone": false,
+              "audio": {
+                "input": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 16000
+                  },
+                  "turn_detection": {
+                    "type": "speaker_detection",
+                    "threshold": 0.5,
+                    "silence_duration_ms": 1000
+                  }
+                },
+                "output": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 24000
+                  },
+                  "voice": "Aiden"
+                }
+              },
+              "translation": {
+                "language": "en"
+              }
+            },
+            "event_id": "synthetic.event/2"
+          }
+        },
+        {
+          "kind": "append"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "input_audio_buffer.speech_started",
+            "item_id": "source.synthetic.1",
+            "audio_start_ms": 0,
+            "speaker_id": 1,
+            "event_id": "synthetic.event/4"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "conversation.item.input_audio_transcription.delta",
+            "item_id": "source.synthetic.1",
+            "content_index": 0,
+            "delta": "人工",
+            "event_id": "synthetic.event/5"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.created",
+            "response": {
+              "id": "response.synthetic.1",
+              "status": "in_progress",
+              "voice": "Aiden",
+              "modalities": [
+                "text",
+                "audio"
+              ],
+              "output_audio_format": "pcm16"
+            },
+            "event_id": "synthetic.event/6"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "conversation.item.created",
+            "previous_item_id": "source.synthetic.1",
+            "item": {
+              "id": "translation.synthetic.1",
+              "type": "message",
+              "object": "realtime.item",
+              "status": "in_progress",
+              "role": "assistant",
+              "content": []
+            },
+            "event_id": "synthetic.event/7"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.audio_transcript.delta",
+            "response_id": "response.synthetic.1",
+            "item_id": "translation.synthetic.1",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": "Synthetic ",
+            "event_id": "synthetic.event/8"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.audio.delta",
+            "response_id": "response.synthetic.1",
+            "item_id": "translation.synthetic.1",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": "AQACAAMA",
+            "event_id": "synthetic.event/9"
+          }
+        },
+        {
+          "kind": "finish"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "input_audio_buffer.speech_stopped",
+            "item_id": "source.synthetic.1",
+            "audio_end_ms": 20,
+            "event_id": "synthetic.event/11"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "conversation.item.input_audio_transcription.completed",
+            "item_id": "source.synthetic.1",
+            "content_index": 0,
+            "transcript": "人工样例。",
+            "event_id": "synthetic.event/12"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.audio_transcript.done",
+            "response_id": "response.synthetic.1",
+            "item_id": "translation.synthetic.1",
+            "output_index": 0,
+            "content_index": 0,
+            "transcript": "Synthetic sample.",
+            "event_id": "synthetic.event/13"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.audio.done",
+            "response_id": "response.synthetic.1",
+            "item_id": "translation.synthetic.1",
+            "output_index": 0,
+            "content_index": 0,
+            "event_id": "synthetic.event/14"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.done",
+            "response": {
+              "id": "response.synthetic.1",
+              "status": "completed",
+              "voice": "Aiden",
+              "modalities": [
+                "text",
+                "audio"
+              ],
+              "output_audio_format": "pcm16",
+              "output": [
+                {
+                  "id": "translation.synthetic.1",
+                  "type": "message",
+                  "object": "realtime.item",
+                  "status": "completed",
+                  "role": "assistant",
+                  "content": [
+                    {
+                      "type": "text",
+                      "transcript": "Synthetic sample."
+                    }
+                  ]
+                }
+              ],
+              "usage": {
+                "input_tokens": 2,
+                "output_tokens": 3,
+                "total_tokens": 5,
+                "input_tokens_details": {
+                  "audio_tokens": 2,
+                  "text_tokens": 0
+                },
+                "output_tokens_details": {
+                  "audio_tokens": 1,
+                  "text_tokens": 2
+                }
+              }
+            },
+            "event_id": "synthetic.event/15"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.finished",
+            "event_id": "synthetic.event/16"
+          }
+        }
+      ],
+      "expected": {
+        "fatalCode": "LIVETRANSLATE_EVENT_INVALID",
+        "fatalPath": "response.output.0.content.0.type",
+        "ready": true,
+        "appendCount": 1,
+        "finishResolved": false,
+        "closeCode": 1006
+      }
+    },
+    {
+      "id": "done-final-transcript-conflict",
+      "source": "synthetic_official_contract",
+      "evidenceBasis": "manually_constructed_not_captured_provider_payload",
+      "mutation": "contradictory_completed_transcript",
+      "actions": [
+        {
+          "kind": "open"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.created",
+            "session": {
+              "id": "synthetic.session/3.8",
+              "object": "realtime.session",
+              "model": "qwen3.8-livetranslate-flash-realtime",
+              "input_modalities": [
+                "audio"
+              ],
+              "output_modalities": [
+                "text",
+                "audio"
+              ],
+              "enable_voice_clone": false,
+              "audio": {
+                "input": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 16000
+                  },
+                  "turn_detection": {
+                    "type": "speaker_detection",
+                    "threshold": 0.5,
+                    "silence_duration_ms": 1000
+                  }
+                },
+                "output": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 24000
+                  },
+                  "voice": "Tina"
+                }
+              },
+              "translation": {
+                "language": "en"
+              }
+            },
+            "event_id": "synthetic.event/1"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.updated",
+            "session": {
+              "id": "synthetic.session/3.8",
+              "object": "realtime.session",
+              "model": "qwen3.8-livetranslate-flash-realtime",
+              "input_modalities": [
+                "audio"
+              ],
+              "output_modalities": [
+                "text",
+                "audio"
+              ],
+              "enable_voice_clone": false,
+              "audio": {
+                "input": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 16000
+                  },
+                  "turn_detection": {
+                    "type": "speaker_detection",
+                    "threshold": 0.5,
+                    "silence_duration_ms": 1000
+                  }
+                },
+                "output": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 24000
+                  },
+                  "voice": "Aiden"
+                }
+              },
+              "translation": {
+                "language": "en"
+              }
+            },
+            "event_id": "synthetic.event/2"
+          }
+        },
+        {
+          "kind": "append"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "input_audio_buffer.speech_started",
+            "item_id": "source.synthetic.1",
+            "audio_start_ms": 0,
+            "speaker_id": 1,
+            "event_id": "synthetic.event/4"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "conversation.item.input_audio_transcription.delta",
+            "item_id": "source.synthetic.1",
+            "content_index": 0,
+            "delta": "人工",
+            "event_id": "synthetic.event/5"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.created",
+            "response": {
+              "id": "response.synthetic.1",
+              "status": "in_progress",
+              "voice": "Aiden",
+              "modalities": [
+                "text",
+                "audio"
+              ],
+              "output_audio_format": "pcm16"
+            },
+            "event_id": "synthetic.event/6"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "conversation.item.created",
+            "previous_item_id": "source.synthetic.1",
+            "item": {
+              "id": "translation.synthetic.1",
+              "type": "message",
+              "object": "realtime.item",
+              "status": "in_progress",
+              "role": "assistant",
+              "content": []
+            },
+            "event_id": "synthetic.event/7"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.audio_transcript.delta",
+            "response_id": "response.synthetic.1",
+            "item_id": "translation.synthetic.1",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": "Synthetic ",
+            "event_id": "synthetic.event/8"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.audio.delta",
+            "response_id": "response.synthetic.1",
+            "item_id": "translation.synthetic.1",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": "AQACAAMA",
+            "event_id": "synthetic.event/9"
+          }
+        },
+        {
+          "kind": "finish"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "input_audio_buffer.speech_stopped",
+            "item_id": "source.synthetic.1",
+            "audio_end_ms": 20,
+            "event_id": "synthetic.event/11"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "conversation.item.input_audio_transcription.completed",
+            "item_id": "source.synthetic.1",
+            "content_index": 0,
+            "transcript": "人工样例。",
+            "event_id": "synthetic.event/12"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.audio_transcript.done",
+            "response_id": "response.synthetic.1",
+            "item_id": "translation.synthetic.1",
+            "output_index": 0,
+            "content_index": 0,
+            "transcript": "Synthetic sample.",
+            "event_id": "synthetic.event/13"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.audio.done",
+            "response_id": "response.synthetic.1",
+            "item_id": "translation.synthetic.1",
+            "output_index": 0,
+            "content_index": 0,
+            "event_id": "synthetic.event/14"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.done",
+            "response": {
+              "id": "response.synthetic.1",
+              "status": "completed",
+              "voice": "Aiden",
+              "modalities": [
+                "text",
+                "audio"
+              ],
+              "output_audio_format": "pcm16",
+              "output": [
+                {
+                  "id": "translation.synthetic.1",
+                  "type": "message",
+                  "object": "realtime.item",
+                  "status": "completed",
+                  "role": "assistant",
+                  "content": [
+                    {
+                      "type": "audio",
+                      "transcript": "Contradictory final text."
+                    }
+                  ]
+                }
+              ],
+              "usage": {
+                "input_tokens": 2,
+                "output_tokens": 3,
+                "total_tokens": 5,
+                "input_tokens_details": {
+                  "audio_tokens": 2,
+                  "text_tokens": 0
+                },
+                "output_tokens_details": {
+                  "audio_tokens": 1,
+                  "text_tokens": 2
+                }
+              }
+            },
+            "event_id": "synthetic.event/15"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.finished",
+            "event_id": "synthetic.event/16"
+          }
+        }
+      ],
+      "expected": {
+        "fatalCode": "LIVETRANSLATE_TRANSCRIPT_INVALID",
+        "fatalPath": "response.output.0.content.0.transcript",
+        "ready": true,
+        "appendCount": 1,
+        "finishResolved": false,
+        "closeCode": 1006
+      }
+    },
+    {
+      "id": "abrupt-close-during-tail",
+      "source": "synthetic_official_contract",
+      "evidenceBasis": "manually_constructed_not_captured_provider_payload",
+      "mutation": "actual_fake_transport_close",
+      "actions": [
+        {
+          "kind": "open"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.created",
+            "session": {
+              "id": "synthetic.session/3.8",
+              "object": "realtime.session",
+              "model": "qwen3.8-livetranslate-flash-realtime",
+              "input_modalities": [
+                "audio"
+              ],
+              "output_modalities": [
+                "text",
+                "audio"
+              ],
+              "enable_voice_clone": false,
+              "audio": {
+                "input": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 16000
+                  },
+                  "turn_detection": {
+                    "type": "speaker_detection",
+                    "threshold": 0.5,
+                    "silence_duration_ms": 1000
+                  }
+                },
+                "output": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 24000
+                  },
+                  "voice": "Tina"
+                }
+              },
+              "translation": {
+                "language": "en"
+              }
+            },
+            "event_id": "synthetic.event/1"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.updated",
+            "session": {
+              "id": "synthetic.session/3.8",
+              "object": "realtime.session",
+              "model": "qwen3.8-livetranslate-flash-realtime",
+              "input_modalities": [
+                "audio"
+              ],
+              "output_modalities": [
+                "text",
+                "audio"
+              ],
+              "enable_voice_clone": false,
+              "audio": {
+                "input": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 16000
+                  },
+                  "turn_detection": {
+                    "type": "speaker_detection",
+                    "threshold": 0.5,
+                    "silence_duration_ms": 1000
+                  }
+                },
+                "output": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 24000
+                  },
+                  "voice": "Aiden"
+                }
+              },
+              "translation": {
+                "language": "en"
+              }
+            },
+            "event_id": "synthetic.event/2"
+          }
+        },
+        {
+          "kind": "append"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "input_audio_buffer.speech_started",
+            "item_id": "source.synthetic.1",
+            "audio_start_ms": 0,
+            "speaker_id": 1,
+            "event_id": "synthetic.event/4"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "conversation.item.input_audio_transcription.delta",
+            "item_id": "source.synthetic.1",
+            "content_index": 0,
+            "delta": "人工",
+            "event_id": "synthetic.event/5"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.created",
+            "response": {
+              "id": "response.synthetic.1",
+              "status": "in_progress",
+              "voice": "Aiden",
+              "modalities": [
+                "text",
+                "audio"
+              ],
+              "output_audio_format": "pcm16"
+            },
+            "event_id": "synthetic.event/6"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "conversation.item.created",
+            "previous_item_id": "source.synthetic.1",
+            "item": {
+              "id": "translation.synthetic.1",
+              "type": "message",
+              "object": "realtime.item",
+              "status": "in_progress",
+              "role": "assistant",
+              "content": []
+            },
+            "event_id": "synthetic.event/7"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.audio_transcript.delta",
+            "response_id": "response.synthetic.1",
+            "item_id": "translation.synthetic.1",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": "Synthetic ",
+            "event_id": "synthetic.event/8"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.audio.delta",
+            "response_id": "response.synthetic.1",
+            "item_id": "translation.synthetic.1",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": "AQACAAMA",
+            "event_id": "synthetic.event/9"
+          }
+        },
+        {
+          "kind": "finish"
+        },
+        {
+          "kind": "close",
+          "code": 1006
+        }
+      ],
+      "expected": {
+        "fatalCode": "LIVETRANSLATE_CONNECTION_CLOSED",
+        "fatalPath": "frame",
+        "ready": true,
+        "appendCount": 1,
+        "finishResolved": false,
+        "closeCode": 1006
+      }
+    },
+    {
+      "id": "close-request-is-not-close-observation",
+      "source": "synthetic_official_contract",
+      "evidenceBasis": "manually_constructed_not_captured_provider_payload",
+      "mutation": "fake_transport_does_not_emit_close",
+      "actions": [
+        {
+          "kind": "open"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.created",
+            "session": {
+              "id": "synthetic.session/3.8",
+              "object": "realtime.session",
+              "model": "qwen3.8-livetranslate-flash-realtime",
+              "input_modalities": [
+                "audio"
+              ],
+              "output_modalities": [
+                "text",
+                "audio"
+              ],
+              "enable_voice_clone": false,
+              "audio": {
+                "input": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 16000
+                  },
+                  "turn_detection": {
+                    "type": "speaker_detection",
+                    "threshold": 0.5,
+                    "silence_duration_ms": 1000
+                  }
+                },
+                "output": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 24000
+                  },
+                  "voice": "Tina"
+                }
+              },
+              "translation": {
+                "language": "en"
+              }
+            },
+            "event_id": "synthetic.event/1"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.updated",
+            "session": {
+              "id": "synthetic.session/3.8",
+              "object": "realtime.session",
+              "model": "qwen3.8-livetranslate-flash-realtime",
+              "input_modalities": [
+                "audio"
+              ],
+              "output_modalities": [
+                "text",
+                "audio"
+              ],
+              "enable_voice_clone": false,
+              "audio": {
+                "input": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 16000
+                  },
+                  "turn_detection": {
+                    "type": "speaker_detection",
+                    "threshold": 0.5,
+                    "silence_duration_ms": 1000
+                  }
+                },
+                "output": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 24000
+                  },
+                  "voice": "Aiden"
+                }
+              },
+              "translation": {
+                "language": "en"
+              }
+            },
+            "event_id": "synthetic.event/2"
+          }
+        },
+        {
+          "kind": "append"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "input_audio_buffer.speech_started",
+            "item_id": "source.synthetic.1",
+            "audio_start_ms": 0,
+            "speaker_id": 1,
+            "event_id": "synthetic.event/4"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "conversation.item.input_audio_transcription.delta",
+            "item_id": "source.synthetic.1",
+            "content_index": 0,
+            "delta": "人工",
+            "event_id": "synthetic.event/5"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.created",
+            "response": {
+              "id": "response.synthetic.1",
+              "status": "in_progress",
+              "voice": "Aiden",
+              "modalities": [
+                "text",
+                "audio"
+              ],
+              "output_audio_format": "pcm16"
+            },
+            "event_id": "synthetic.event/6"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "conversation.item.created",
+            "previous_item_id": "source.synthetic.1",
+            "item": {
+              "id": "translation.synthetic.1",
+              "type": "message",
+              "object": "realtime.item",
+              "status": "in_progress",
+              "role": "assistant",
+              "content": []
+            },
+            "event_id": "synthetic.event/7"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.audio_transcript.delta",
+            "response_id": "response.synthetic.1",
+            "item_id": "translation.synthetic.1",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": "Synthetic ",
+            "event_id": "synthetic.event/8"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.audio.delta",
+            "response_id": "response.synthetic.1",
+            "item_id": "translation.synthetic.1",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": "AQACAAMA",
+            "event_id": "synthetic.event/9"
+          }
+        },
+        {
+          "kind": "finish"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "input_audio_buffer.speech_stopped",
+            "item_id": "source.synthetic.1",
+            "audio_end_ms": 20,
+            "event_id": "synthetic.event/11"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "conversation.item.input_audio_transcription.completed",
+            "item_id": "source.synthetic.1",
+            "content_index": 0,
+            "transcript": "人工样例。",
+            "event_id": "synthetic.event/12"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.audio_transcript.done",
+            "response_id": "response.synthetic.1",
+            "item_id": "translation.synthetic.1",
+            "output_index": 0,
+            "content_index": 0,
+            "transcript": "Synthetic sample.",
+            "event_id": "synthetic.event/13"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.audio.done",
+            "response_id": "response.synthetic.1",
+            "item_id": "translation.synthetic.1",
+            "output_index": 0,
+            "content_index": 0,
+            "event_id": "synthetic.event/14"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.done",
+            "response": {
+              "id": "response.synthetic.1",
+              "status": "completed",
+              "voice": "Aiden",
+              "modalities": [
+                "text",
+                "audio"
+              ],
+              "output_audio_format": "pcm16",
+              "output": [
+                {
+                  "id": "translation.synthetic.1",
+                  "type": "message",
+                  "object": "realtime.item",
+                  "status": "completed",
+                  "role": "assistant",
+                  "content": [
+                    {
+                      "type": "audio",
+                      "transcript": "Synthetic sample."
+                    }
+                  ]
+                }
+              ],
+              "usage": {
+                "input_tokens": 2,
+                "output_tokens": 3,
+                "total_tokens": 5,
+                "input_tokens_details": {
+                  "audio_tokens": 2,
+                  "text_tokens": 0
+                },
+                "output_tokens_details": {
+                  "audio_tokens": 1,
+                  "text_tokens": 2
+                }
+              }
+            },
+            "event_id": "synthetic.event/15"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.finished",
+            "event_id": "synthetic.event/16"
+          }
+        }
+      ],
+      "expected": {
+        "fatalCode": null,
+        "fatalPath": null,
+        "ready": true,
+        "appendCount": 1,
+        "finishResolved": true,
+        "closeCode": null
+      },
+      "autoEmitClose": false
+    },
+    {
+      "id": "binary-first-frame",
+      "source": "synthetic_official_contract",
+      "evidenceBasis": "manually_constructed_not_captured_provider_payload",
+      "mutation": "artificial_frame_validation_failure_not_observed_root_cause",
+      "actions": [
+        {
+          "kind": "open"
+        },
+        {
+          "kind": "binary"
+        }
+      ],
+      "expected": {
+        "fatalCode": "LIVETRANSLATE_EVENT_INVALID",
+        "fatalPath": "frame.binary",
+        "actualType": "boolean",
+        "ready": false,
+        "appendCount": 0,
+        "finishResolved": false,
+        "closeCode": 1006
+      }
+    },
+    {
+      "id": "oversize-first-frame",
+      "source": "synthetic_official_contract",
+      "evidenceBasis": "manually_constructed_not_captured_provider_payload",
+      "mutation": "artificial_frame_validation_failure_not_observed_root_cause",
+      "actions": [
+        {
+          "kind": "open"
+        },
+        {
+          "kind": "oversize"
+        }
+      ],
+      "expected": {
+        "fatalCode": "LIVETRANSLATE_EVENT_INVALID",
+        "fatalPath": "frame.bytes",
+        "actualType": "number",
+        "ready": false,
+        "appendCount": 0,
+        "finishResolved": false,
+        "closeCode": 1006
+      }
+    },
+    {
+      "id": "invalid-utf8-first-frame",
+      "source": "synthetic_official_contract",
+      "evidenceBasis": "manually_constructed_not_captured_provider_payload",
+      "mutation": "artificial_frame_validation_failure_not_observed_root_cause",
+      "actions": [
+        {
+          "kind": "open"
+        },
+        {
+          "kind": "invalidUtf8"
+        }
+      ],
+      "expected": {
+        "fatalCode": "LIVETRANSLATE_EVENT_INVALID",
+        "fatalPath": "frame.utf8",
+        "actualType": "binary",
+        "ready": false,
+        "appendCount": 0,
+        "finishResolved": false,
+        "closeCode": 1006
+      }
+    },
+    {
+      "id": "input-modalities-contradictory",
+      "source": "synthetic_official_contract",
+      "evidenceBasis": "manually_constructed_not_captured_provider_payload",
+      "mutation": "negative_configuration",
+      "actions": [
+        {
+          "kind": "open"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.created",
+            "session": {
+              "id": "synthetic.session/3.8",
+              "object": "realtime.session",
+              "model": "qwen3.8-livetranslate-flash-realtime",
+              "input_modalities": [
+                "audio"
+              ],
+              "output_modalities": [
+                "text",
+                "audio"
+              ],
+              "enable_voice_clone": false,
+              "audio": {
+                "input": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 16000
+                  },
+                  "turn_detection": {
+                    "type": "speaker_detection",
+                    "threshold": 0.5,
+                    "silence_duration_ms": 1000
+                  }
+                },
+                "output": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 24000
+                  },
+                  "voice": "Tina"
+                }
+              },
+              "translation": {
+                "language": "en"
+              }
+            },
+            "event_id": "synthetic.event/1"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.updated",
+            "session": {
+              "id": "synthetic.session/3.8",
+              "object": "realtime.session",
+              "model": "qwen3.8-livetranslate-flash-realtime",
+              "input_modalities": [
+                "text"
+              ],
+              "output_modalities": [
+                "text",
+                "audio"
+              ],
+              "enable_voice_clone": false,
+              "audio": {
+                "input": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 16000
+                  },
+                  "turn_detection": {
+                    "type": "speaker_detection",
+                    "threshold": 0.5,
+                    "silence_duration_ms": 1000
+                  }
+                },
+                "output": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 24000
+                  },
+                  "voice": "Aiden"
+                }
+              },
+              "translation": {
+                "language": "en"
+              }
+            },
+            "event_id": "synthetic.event/2"
+          }
+        }
+      ],
+      "expected": {
+        "fatalCode": "LIVETRANSLATE_CONFIGURATION_REJECTED",
+        "fatalPath": "session.input_modalities",
+        "ready": false,
+        "appendCount": 0,
+        "finishResolved": false,
+        "closeCode": 1006
+      }
+    },
+    {
+      "id": "premature-finished-with-open-response",
+      "source": "synthetic_official_contract",
+      "evidenceBasis": "manually_constructed_not_captured_provider_payload",
+      "mutation": "artificial_premature_finished_not_observed_root_cause",
+      "actions": [
+        {
+          "kind": "open"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.created",
+            "session": {
+              "id": "synthetic.session/3.8",
+              "object": "realtime.session",
+              "model": "qwen3.8-livetranslate-flash-realtime",
+              "input_modalities": [
+                "audio"
+              ],
+              "output_modalities": [
+                "text",
+                "audio"
+              ],
+              "enable_voice_clone": false,
+              "audio": {
+                "input": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 16000
+                  },
+                  "turn_detection": {
+                    "type": "speaker_detection",
+                    "threshold": 0.5,
+                    "silence_duration_ms": 1000
+                  }
+                },
+                "output": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 24000
+                  },
+                  "voice": "Tina"
+                }
+              },
+              "translation": {
+                "language": "en"
+              }
+            },
+            "event_id": "synthetic.event/1"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.updated",
+            "session": {
+              "id": "synthetic.session/3.8",
+              "object": "realtime.session",
+              "model": "qwen3.8-livetranslate-flash-realtime",
+              "input_modalities": [
+                "audio"
+              ],
+              "output_modalities": [
+                "text",
+                "audio"
+              ],
+              "enable_voice_clone": false,
+              "audio": {
+                "input": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 16000
+                  },
+                  "turn_detection": {
+                    "type": "speaker_detection",
+                    "threshold": 0.5,
+                    "silence_duration_ms": 1000
+                  }
+                },
+                "output": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 24000
+                  },
+                  "voice": "Aiden"
+                }
+              },
+              "translation": {
+                "language": "en"
+              }
+            },
+            "event_id": "synthetic.event/2"
+          }
+        },
+        {
+          "kind": "append"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "input_audio_buffer.speech_started",
+            "item_id": "source.synthetic.1",
+            "audio_start_ms": 0,
+            "speaker_id": 1,
+            "event_id": "synthetic.event/4"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "conversation.item.input_audio_transcription.delta",
+            "item_id": "source.synthetic.1",
+            "content_index": 0,
+            "delta": "人工",
+            "event_id": "synthetic.event/5"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.created",
+            "response": {
+              "id": "response.synthetic.1",
+              "status": "in_progress",
+              "voice": "Aiden",
+              "modalities": [
+                "text",
+                "audio"
+              ],
+              "output_audio_format": "pcm16"
+            },
+            "event_id": "synthetic.event/6"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "conversation.item.created",
+            "previous_item_id": "source.synthetic.1",
+            "item": {
+              "id": "translation.synthetic.1",
+              "type": "message",
+              "object": "realtime.item",
+              "status": "in_progress",
+              "role": "assistant",
+              "content": []
+            },
+            "event_id": "synthetic.event/7"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.audio_transcript.delta",
+            "response_id": "response.synthetic.1",
+            "item_id": "translation.synthetic.1",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": "Synthetic ",
+            "event_id": "synthetic.event/8"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "response.audio.delta",
+            "response_id": "response.synthetic.1",
+            "item_id": "translation.synthetic.1",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": "AQACAAMA",
+            "event_id": "synthetic.event/9"
+          }
+        },
+        {
+          "kind": "finish"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.finished",
+            "event_id": "synthetic.event/16"
+          }
+        }
+      ],
+      "expected": {
+        "fatalCode": "LIVETRANSLATE_FINISH_INCOMPLETE",
+        "fatalPath": "response.status",
+        "ready": true,
+        "appendCount": 1,
+        "finishResolved": false,
+        "closeCode": 1006
+      }
+    },
+    {
+      "id": "premature-finished-with-unfinished-asr",
+      "source": "synthetic_official_contract",
+      "evidenceBasis": "manually_constructed_not_captured_provider_payload",
+      "mutation": "artificial_premature_finished_not_observed_root_cause",
+      "actions": [
+        {
+          "kind": "open"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.created",
+            "session": {
+              "id": "synthetic.session/3.8",
+              "object": "realtime.session",
+              "model": "qwen3.8-livetranslate-flash-realtime",
+              "input_modalities": [
+                "audio"
+              ],
+              "output_modalities": [
+                "text",
+                "audio"
+              ],
+              "enable_voice_clone": false,
+              "audio": {
+                "input": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 16000
+                  },
+                  "turn_detection": {
+                    "type": "speaker_detection",
+                    "threshold": 0.5,
+                    "silence_duration_ms": 1000
+                  }
+                },
+                "output": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 24000
+                  },
+                  "voice": "Tina"
+                }
+              },
+              "translation": {
+                "language": "en"
+              }
+            },
+            "event_id": "synthetic.event/1"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.updated",
+            "session": {
+              "id": "synthetic.session/3.8",
+              "object": "realtime.session",
+              "model": "qwen3.8-livetranslate-flash-realtime",
+              "input_modalities": [
+                "audio"
+              ],
+              "output_modalities": [
+                "text",
+                "audio"
+              ],
+              "enable_voice_clone": false,
+              "audio": {
+                "input": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 16000
+                  },
+                  "turn_detection": {
+                    "type": "speaker_detection",
+                    "threshold": 0.5,
+                    "silence_duration_ms": 1000
+                  }
+                },
+                "output": {
+                  "format": {
+                    "type": "pcm",
+                    "sample_rate": 24000
+                  },
+                  "voice": "Aiden"
+                }
+              },
+              "translation": {
+                "language": "en"
+              }
+            },
+            "event_id": "synthetic.event/2"
+          }
+        },
+        {
+          "kind": "append"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "input_audio_buffer.speech_started",
+            "item_id": "source.synthetic.1",
+            "audio_start_ms": 0,
+            "speaker_id": 1,
+            "event_id": "synthetic.event/4"
+          }
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "conversation.item.input_audio_transcription.delta",
+            "item_id": "source.synthetic.1",
+            "content_index": 0,
+            "delta": "人工",
+            "event_id": "synthetic.event/5"
+          }
+        },
+        {
+          "kind": "finish"
+        },
+        {
+          "kind": "receive",
+          "event": {
+            "type": "session.finished",
+            "event_id": "synthetic.event/16"
+          }
+        }
+      ],
+      "expected": {
+        "fatalCode": "LIVETRANSLATE_FINISH_INCOMPLETE",
+        "fatalPath": "transcript",
+        "ready": true,
+        "appendCount": 1,
+        "finishResolved": false,
+        "closeCode": 1006
+      }
+    }
+  ]
+}
