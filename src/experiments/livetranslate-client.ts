@@ -17,7 +17,7 @@ import type {
 
 export * from './livetranslate-types';
 export const LIVE_TRANSLATE_MODEL = 'qwen3.8-livetranslate-flash-realtime';
-export const LIVE_TRANSLATE_VOICE = 'Tina';
+export const LIVE_TRANSLATE_VOICE = 'Aiden';
 const MAX_ITEMS = 256;
 const MAX_EVENTS = 4096;
 const MAX_TEXT = 32768;
@@ -27,6 +27,15 @@ const identifier = (value: unknown): value is string =>
   typeof value === 'string' && /^[A-Za-z0-9_:-]{1,200}$/u.test(value);
 const integer = (value: unknown): value is number =>
   typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+function sessionValue<T extends string>(
+  value: unknown,
+  allowed: readonly T[],
+): T | 'other' | null {
+  if (value === undefined) return null;
+  if (typeof value === 'string' && allowed.includes(value as T))
+    return value as T;
+  return 'other';
+}
 
 /** Pure endpoint construction; this does not discover credentials or connect. */
 export function buildLiveTranslateEndpoint(workspaceId: string): string {
@@ -152,7 +161,11 @@ export function createLiveTranslateClient(
     responseOrder.length = 0;
     queuedAudioBytes = 0;
   };
-  const fail = (code: string, closeCode?: unknown) => {
+  const fail = (
+    code: string,
+    closeCode?: unknown,
+    httpStatusCode?: unknown,
+  ) => {
     if (closed()) return;
     state = 'closed';
     failure = code;
@@ -160,12 +173,16 @@ export function createLiveTranslateClient(
     readyReject(new Error(code));
     finishReject(new Error(code));
     try {
-      options.onError?.(
-        code,
-        integer(closeCode) && closeCode >= 1000 && closeCode <= 4999
+      options.onError?.(code, {
+        ...(integer(closeCode) && closeCode >= 1000 && closeCode <= 4999
           ? { closeCode }
-          : {},
-      );
+          : {}),
+        ...(integer(httpStatusCode) &&
+          httpStatusCode >= 100 &&
+          httpStatusCode <= 599
+          ? { httpStatusCode }
+          : {}),
+      });
     } catch {
       /* The original failure and cleanup cannot be overridden. */
     }
@@ -488,7 +505,7 @@ export function createLiveTranslateClient(
     }
     if (event.type === 'session.updated') {
       const s = event.session;
-      if (
+      const rejected =
         state !== 'configuring' ||
         s?.id !== sessionId ||
         s?.model !== LIVE_TRANSLATE_MODEL ||
@@ -501,11 +518,29 @@ export function createLiveTranslateClient(
         s.audio?.output?.format?.type !== 'pcm' ||
         s.audio.output.format.sample_rate !== 24000 ||
         s.audio.output.voice !== LIVE_TRANSLATE_VOICE ||
+        (s.voice !== undefined && s.voice !== LIVE_TRANSLATE_VOICE) ||
         s.enable_voice_clone !== false ||
         s.audio.input.turn_detection?.type !== 'speaker_detection' ||
         s.audio.input.turn_detection.threshold !== 0.5 ||
-        s.translation?.language !== target
-      ) {
+        s.translation?.language !== target;
+      const receivedAt = now();
+      emit(options.onSessionConfiguration, {
+        role,
+        sessionId: identifier(s?.id) ? s.id : null,
+        eventId: event.event_id,
+        receivedAt,
+        basis: 'provider_session_updated',
+        model: sessionValue(s?.model, [LIVE_TRANSLATE_MODEL]),
+        voice: sessionValue(s?.audio?.output?.voice, ['Aiden', 'Tina']),
+        voiceCloneEnabled:
+          typeof s?.enable_voice_clone === 'boolean'
+            ? s.enable_voice_clone
+            : null,
+        targetLanguage: sessionValue(s?.translation?.language, ['en', 'zh']),
+        accepted: !rejected,
+      });
+      if (closed()) return;
+      if (rejected) {
         fail('LIVETRANSLATE_CONFIGURATION_REJECTED');
         return;
       }
@@ -515,11 +550,18 @@ export function createLiveTranslateClient(
       readyResolve({
         sessionId,
         role,
-        model: LIVE_TRANSLATE_MODEL,
-        voice: LIVE_TRANSLATE_VOICE,
-        inputSampleRate: 16000,
-        outputSampleRate: 24000,
-        outputModalities: Object.freeze([...modalities]) as (
+        model: s.model,
+        voice: s.audio.output.voice,
+        voiceCloneEnabled: s.enable_voice_clone,
+        targetLanguage: s.translation.language,
+        configurationAcknowledgement: {
+          eventId: event.event_id,
+          receivedAt,
+          basis: 'provider_session_updated',
+        },
+        inputSampleRate: s.audio.input.format.sample_rate,
+        outputSampleRate: s.audio.output.format.sample_rate,
+        outputModalities: Object.freeze([...s.output_modalities]) as (
           | 'text'
           | 'audio'
         )[],
@@ -877,6 +919,10 @@ export function createLiveTranslateClient(
     }
   });
   socket.on('error', () => fail('LIVETRANSLATE_CONNECTION_FAILED'));
+  socket.on('unexpected-response', (_request, response) => {
+    fail('LIVETRANSLATE_CONNECTION_FAILED', undefined, response.statusCode);
+    response.destroy();
+  });
   socket.on('close', (code) => fail('LIVETRANSLATE_CONNECTION_CLOSED', code));
   arm('LIVETRANSLATE_READY_TIMEOUT');
   return {

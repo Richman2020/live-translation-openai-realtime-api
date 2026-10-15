@@ -14,6 +14,8 @@ import type {
   LiveTranslateTranslation,
   LiveTranslateUsage,
   LiveTranslateTiming,
+  LiveTranslateSession,
+  LiveTranslateSessionConfiguration,
 } from './livetranslate-types';
 import {
   LIVETRANSLATE_AUDITION_LIMITS,
@@ -28,6 +30,7 @@ export type LiveTranslateAuditionResult = {
   status: 'completed' | 'failed' | 'cancelled';
   errorCode?: string;
   closeCode?: number;
+  httpStatusCode?: number;
   startedAt: number;
   endedAt: number;
   configuration: {
@@ -66,6 +69,10 @@ export type LiveTranslateAuditionResult = {
   })[];
   timing: (LiveTranslateTiming & { clipId: string })[];
   usage: (LiveTranslateUsage & { clipId: string })[];
+  confirmedSessions: (LiveTranslateSession & { clipId: string })[];
+  observedSessionConfigurations: (LiveTranslateSessionConfiguration & {
+    clipId: string;
+  })[];
   audio: {
     clipId: string;
     metadata: LiveTranslateAudioMetadata;
@@ -187,6 +194,8 @@ export async function runLiveTranslateAudition(
     translations: [],
     timing: [],
     usage: [],
+    confirmedSessions: [],
+    observedSessionConfigurations: [],
     audio: [],
     clips: input.clips.map((clip) => ({
       id: clip.id,
@@ -286,6 +295,13 @@ export async function runLiveTranslateAudition(
         proxyUrl: options.proxyUrl,
         now,
         timeoutMs: Math.min(timeoutMs, 15000),
+        onSessionConfiguration: (event) => {
+          if (!active()) return;
+          result.observedSessionConfigurations.push({
+            ...event,
+            clipId: clip.id,
+          });
+        },
         onSource: (event) => {
           if (!active()) return;
           if (!accepts(event) || event.text.length > 8192) {
@@ -446,6 +462,13 @@ export async function runLiveTranslateAudition(
         onError: (code, diagnostic) => {
           if (stopped || !live) return;
           const closeCode = diagnostic?.closeCode;
+          const httpStatusCode = diagnostic?.httpStatusCode;
+          if (
+            Number.isInteger(httpStatusCode) &&
+            httpStatusCode >= 100 &&
+            httpStatusCode <= 599
+          )
+            result.httpStatusCode = httpStatusCode;
           if (
             Number.isInteger(closeCode) &&
             closeCode >= 1000 &&
@@ -470,7 +493,14 @@ export async function runLiveTranslateAudition(
         (observedSessionId !== undefined &&
           observedSessionId !== session.sessionId) ||
         session.model !== LIVETRANSLATE_AUDITION_MODEL ||
-        session.voice !== 'Tina' ||
+        session.voice !== LIVETRANSLATE_AUDITION_VOICE ||
+        session.voiceCloneEnabled !== false ||
+        session.targetLanguage !== (clip.role === 'local' ? 'en' : 'zh') ||
+        session.configurationAcknowledgement?.basis !==
+          'provider_session_updated' ||
+        typeof session.configurationAcknowledgement.eventId !== 'string' ||
+        !session.configurationAcknowledgement.eventId ||
+        !Number.isFinite(session.configurationAcknowledgement.receivedAt) ||
         session.role !== clip.role ||
         session.inputSampleRate !== 16000 ||
         session.outputSampleRate !== 24000 ||
@@ -480,6 +510,7 @@ export async function runLiveTranslateAudition(
         stop('LIVETRANSLATE_AUDITION_SESSION_CONFIG_REJECTED');
         break;
       }
+      result.confirmedSessions.push({ ...session, clipId: clip.id });
       clipState.sendStartedAt = now();
       for (
         let offset = 0;

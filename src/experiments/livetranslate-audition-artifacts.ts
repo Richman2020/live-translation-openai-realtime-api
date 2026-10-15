@@ -148,14 +148,21 @@ export function calculateLiveTranslateAuditionCost(
     currency: 'CNY',
     rates: LIVETRANSLATE_PUBLIC_RATES,
     entries,
-    knownSubtotalCny: entries.reduce(
-      (sum, item) =>
-        sum +
-        (item.audioInputCny ?? 0) +
-        (item.audioOutputCny ?? 0) +
-        (item.textOutputCny ?? 0),
-      0,
-    ),
+    knownSubtotalCny: entries.some(
+      (item) =>
+        item.audioInputCny !== null ||
+        item.audioOutputCny !== null ||
+        item.textOutputCny !== null,
+    )
+      ? entries.reduce(
+          (sum, item) =>
+            sum +
+            (item.audioInputCny ?? 0) +
+            (item.audioOutputCny ?? 0) +
+            (item.textOutputCny ?? 0),
+          0,
+        )
+      : null,
     allReportedUsagePriced:
       entries.length > 0 &&
       entries.every((item) => item.allReportedUsagePriced),

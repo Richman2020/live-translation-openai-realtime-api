@@ -51,6 +51,7 @@ function fixture(
   const errors: any[] = [];
   const timings: any[] = [];
   const usages: any[] = [];
+  const sessionConfigurations: any[] = [];
   const addresses: string[] = [];
   const settings: any[] = [];
   let eventNumber = 0;
@@ -72,6 +73,7 @@ function fixture(
     onError: (code, details) => errors.push({ code, ...details }),
     onTiming: (event) => timings.push(event),
     onUsage: (event) => usages.push(event),
+    onSessionConfiguration: (event) => sessionConfigurations.push(event),
     ...extras,
   });
   const receive = (event: any) => {
@@ -94,7 +96,7 @@ function fixture(
         format: { type: 'pcm', sample_rate: 16000 },
         turn_detection: { type: 'speaker_detection', threshold: 0.5 },
       },
-      output: { format: { type: 'pcm', sample_rate: 24000 }, voice: 'Tina' },
+      output: { format: { type: 'pcm', sample_rate: 24000 }, voice: 'Aiden' },
     },
     translation: { language: role === 'local' ? 'en' : 'zh' },
   });
@@ -168,6 +170,7 @@ function fixture(
     errors,
     timings,
     usages,
+    sessionConfigurations,
     addresses,
     settings,
   };
@@ -207,7 +210,7 @@ test('disabled construction reads no key and makes no socket; endpoint is one Be
     );
 });
 
-test('two roles configure exact 3.8 schema, Tina without clone, strict ACK and no fictitious parameters', async () => {
+test('two roles configure exact 3.8 schema, Aiden without clone, strict ACK and no fictitious parameters', async () => {
   for (const role of ['local', 'remote'] as const) {
     const f = fixture(role);
     assert.throws(() => f.client.append(Buffer.alloc(320)), /NOT_READY/);
@@ -220,8 +223,16 @@ test('two roles configure exact 3.8 schema, Tina without clone, strict ACK and n
       update.session.output_modalities,
       role === 'local' ? ['text', 'audio'] : ['text'],
     );
-    assert.equal(update.session.voice, 'Tina');
+    assert.equal(update.session.voice, 'Aiden');
     assert.equal(update.session.enable_voice_clone, false);
+    // eslint-disable-next-line no-await-in-loop -- Each fake ACK belongs to its own role.
+    const confirmed = await f.client.ready;
+    assert.equal(confirmed.voice, 'Aiden');
+    assert.equal(confirmed.voiceCloneEnabled, false);
+    assert.equal(confirmed.targetLanguage, role === 'local' ? 'en' : 'zh');
+    assert.equal(confirmed.configurationAcknowledgement.basis, 'provider_session_updated');
+    assert.equal(confirmed.configurationAcknowledgement.eventId, 'e_2');
+    assert.equal(f.sessionConfigurations[0].accepted, true);
     for (const unsupported of [
       'modalities',
       'input_audio_transcription',
@@ -236,6 +247,63 @@ test('two roles configure exact 3.8 schema, Tina without clone, strict ACK and n
     assert.equal(f.settings[0].rejectUnauthorized, undefined);
     f.client.abort();
   }
+});
+
+test('Aiden input remains fenced until a complete server configuration acknowledgement', async () => {
+  const f = fixture('local', { now: () => 1234 });
+  let ready = false;
+  f.client.ready.then(() => { ready = true; });
+  f.receive({ type: 'session.created', session: f.session() });
+  await Promise.resolve();
+  assert.equal(ready, false);
+  assert.equal(f.sessionConfigurations.length, 0);
+  assert.throws(() => f.client.append(Buffer.alloc(320)), /NOT_READY/);
+  assert.deepEqual(f.socket.sent.map((event) => event.type), ['session.update']);
+  f.receive({ type: 'session.updated', session: f.session() });
+  const confirmed = await f.client.ready;
+  assert.equal(confirmed.voice, 'Aiden');
+  assert.equal(confirmed.voiceCloneEnabled, false);
+  assert.equal(confirmed.targetLanguage, 'en');
+  assert.deepEqual(confirmed.configurationAcknowledgement, {
+    eventId: 'e_2', receivedAt: 1234, basis: 'provider_session_updated',
+  });
+  f.client.append(Buffer.alloc(320));
+  assert.deepEqual(f.socket.sent.map((event) => event.type), ['session.update', 'input_audio_buffer.append']);
+  f.client.abort();
+});
+
+test('Tina, absent voice, clone uncertainty and wrong language are rejected with safe evidence and zero input', async () => {
+  const patches = [
+    (session: any) => ({ audio: { ...session.audio, output: { ...session.audio.output, voice: 'Tina' } } }),
+    (session: any) => ({ audio: { ...session.audio, output: { ...session.audio.output, voice: undefined } } }),
+    () => ({ enable_voice_clone: undefined }),
+    () => ({ enable_voice_clone: true }),
+    () => ({ translation: { language: 'zh' } }),
+  ];
+  for (const patch of patches) {
+    const f = fixture();
+    // eslint-disable-next-line no-await-in-loop -- Each rejected configuration gets one isolated fake socket.
+    await assert.rejects(f.start(patch(f.session())), /CONFIGURATION_REJECTED/);
+    assert.throws(() => f.client.append(Buffer.alloc(320)), /CONFIGURATION_REJECTED/);
+    assert.equal(f.socket.sent.filter((event) => event.type === 'input_audio_buffer.append').length, 0);
+    assert.equal(f.addresses.length, 1);
+    assert.equal(f.sessionConfigurations.length, 1);
+    assert.equal(f.sessionConfigurations[0].accepted, false);
+  }
+});
+
+test('a rejected WSS upgrade records only the bounded HTTP status and never sends input', async () => {
+  const f = fixture();
+  let destroyed = 0;
+  f.socket.emit('unexpected-response', {}, {
+    statusCode: 403,
+    destroy() { destroyed += 1; },
+  });
+  await assert.rejects(f.client.ready, /CONNECTION_FAILED/);
+  assert.deepEqual(f.errors, [{ code: 'LIVETRANSLATE_CONNECTION_FAILED', httpStatusCode: 403 }]);
+  assert.equal(destroyed, 1);
+  assert.equal(f.socket.sent.length, 0);
+  assert.equal(f.addresses.length, 1);
 });
 
 test('changed model, voice, clone, format or target is rejected before audio input', async () => {

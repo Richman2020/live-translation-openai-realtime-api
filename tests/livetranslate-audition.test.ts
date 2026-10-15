@@ -97,7 +97,7 @@ function approval(input: PreparedLiveTranslateAuditionInput) {
     parentCandidate: LIVETRANSLATE_AUDITION_PARENT,
     candidateSha: candidate,
     model: LIVETRANSLATE_AUDITION_MODEL,
-    voice: 'Tina',
+    voice: 'Aiden',
     spaceHost: input.spaceHost,
     manifestSha256: input.manifestSha256,
     sampleHashes: input.clips.map(({ id, sha256 }) => ({ id, sha256 })),
@@ -111,7 +111,7 @@ function approval(input: PreparedLiveTranslateAuditionInput) {
       'Synthetic offline approval fixture only, never user authorization',
     approvedAt: new Date(fixedNow).toISOString(),
     preflight: {
-      accountModelAccessVerified: true,
+      modelAndVoiceAccess: 'verify_in_authorized_session',
       exactHostNetworkPolicyVerified: true,
       currentPriceVerified: true,
       checkedAt: new Date(fixedNow).toISOString(),
@@ -158,7 +158,14 @@ function mock(
         ready: Promise.resolve({
           ...base,
           model: LIVETRANSLATE_AUDITION_MODEL,
-          voice: 'Tina',
+          voice: 'Aiden',
+          voiceCloneEnabled: false,
+          targetLanguage: client.role === 'local' ? 'en' : 'zh',
+          configurationAcknowledgement: {
+            eventId: 'offline_ack',
+            receivedAt: clock,
+            basis: 'provider_session_updated',
+          },
           inputSampleRate: 16000,
           outputSampleRate: 24000,
           outputModalities:
@@ -629,6 +636,7 @@ test('pricing separates observation reserve from actual classified usage and nev
   assert.equal(plan.isBillingHardCap, false);
   const empty = calculateLiveTranslateAuditionCost([]);
   assert.equal(empty.allReportedUsagePriced, false);
+  assert.equal(empty.knownSubtotalCny, null);
   assert.equal(empty.actualPlatformBilledCny, null);
   const unknown = calculateLiveTranslateAuditionCost([
     {
@@ -1469,7 +1477,7 @@ class SingleAuditionWire extends EventEmitter {
           format: { type: 'pcm', sample_rate: 16000 },
           turn_detection: { type: 'speaker_detection', threshold: 0.5 },
         },
-        output: { format: { type: 'pcm', sample_rate: 24000 }, voice: 'Tina' },
+        output: { format: { type: 'pcm', sample_rate: 24000 }, voice: 'Aiden' },
       },
       translation: { language: 'en' },
     };
@@ -1608,4 +1616,32 @@ test('single-local real client plus fake wire preserves default 20ms pacing and 
   assert.equal(result.audio[0].actualPlaybackStartedAt, null);
   assert.ok(!JSON.stringify(wire.sent).includes('Not fifteen'));
   assert.ok(!JSON.stringify(wire.sent).includes('不是十五'));
+});
+
+test('Aiden one-shot approval records pending in-session validation and rejects Tina or a fabricated prior access claim', (t) => {
+  const f = singleFixture(t);
+  const value = singleApproval(f.input());
+  const path = join(f.directory, 'approval.json');
+  writeFileSync(path, JSON.stringify(value));
+  const accepted = readLiveTranslateAuditionApproval(
+    path, f.input(), candidate, fixedNow,
+  );
+  assert.equal(accepted.voice, 'Aiden');
+  assert.equal(
+    accepted.preflight.modelAndVoiceAccess, 'verify_in_authorized_session',
+  );
+  writeFileSync(path, JSON.stringify({ ...value, voice: 'Tina' }));
+  assert.throws(
+    () => readLiveTranslateAuditionApproval(path, f.input(), candidate, fixedNow),
+    /APPROVAL_BINDING_INVALID$/u,
+  );
+  const priorClaim: Record<string, unknown> = {
+    ...value.preflight, accountModelAccessVerified: true,
+  };
+  delete priorClaim.modelAndVoiceAccess;
+  writeFileSync(path, JSON.stringify({ ...value, preflight: priorClaim }));
+  assert.throws(
+    () => readLiveTranslateAuditionApproval(path, f.input(), candidate, fixedNow),
+    /PREFLIGHT_EVIDENCE_REQUIRED$/u,
+  );
 });

@@ -5,10 +5,30 @@ export type LiveTranslateSession = {
   sessionId: string;
   role: LiveTranslateRole;
   model: 'qwen3.8-livetranslate-flash-realtime';
-  voice: 'Tina';
+  voice: 'Aiden';
+  voiceCloneEnabled: false;
+  targetLanguage: 'en' | 'zh';
+  configurationAcknowledgement: {
+    eventId: string;
+    receivedAt: number;
+    basis: 'provider_session_updated';
+  };
   inputSampleRate: 16000;
   outputSampleRate: 24000;
   outputModalities: readonly ('text' | 'audio')[];
+};
+/** Safe allow-listed configuration evidence; arbitrary supplier strings are excluded. */
+export type LiveTranslateSessionConfiguration = {
+  role: LiveTranslateRole;
+  sessionId: string | null;
+  eventId: string;
+  receivedAt: number;
+  basis: 'provider_session_updated';
+  model: LiveTranslateSession['model'] | 'other' | null;
+  voice: 'Aiden' | 'Tina' | 'other' | null;
+  voiceCloneEnabled: boolean | null;
+  targetLanguage: 'en' | 'zh' | 'other' | null;
+  accepted: boolean;
 };
 export type LiveTranslateSource = {
   role: LiveTranslateRole;
@@ -100,7 +120,11 @@ export type LiveTranslateClientOptions = {
   onAudio?: (pcm24k: Buffer, metadata: LiveTranslateAudioMetadata) => void;
   onTiming?: (event: LiveTranslateTiming) => void;
   onUsage?: (event: LiveTranslateUsage) => void;
-  onError?: (code: string, diagnostic: { closeCode?: number }) => void;
+  onSessionConfiguration?: (event: LiveTranslateSessionConfiguration) => void;
+  onError?: (
+    code: string,
+    diagnostic: { closeCode?: number; httpStatusCode?: number },
+  ) => void;
 };
 export type LiveTranslateClient = {
   ready: Promise<LiveTranslateSession>;

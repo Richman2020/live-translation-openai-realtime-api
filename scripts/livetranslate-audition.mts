@@ -87,7 +87,7 @@ export type LiveTranslateAuditionApproval = {
     | typeof LIVETRANSLATE_SINGLE_LOCAL_PARENT;
   candidateSha: string;
   model: typeof LIVETRANSLATE_AUDITION_MODEL;
-  voice: 'Tina';
+  voice: typeof LIVETRANSLATE_AUDITION_VOICE;
   spaceHost: string;
   manifestSha256: string;
   sampleHashes: { id: string; sha256: string }[];
@@ -100,7 +100,7 @@ export type LiveTranslateAuditionApproval = {
   approvalReference: string;
   approvedAt: string;
   preflight: {
-    accountModelAccessVerified: true;
+    modelAndVoiceAccess: 'verify_in_authorized_session';
     exactHostNetworkPolicyVerified: true;
     currentPriceVerified: true;
     checkedAt: string;
@@ -198,13 +198,13 @@ export function readLiveTranslateAuditionApproval(
   if (
     !liveTranslateRecord(evidence) ||
     !liveTranslateExactKeys(evidence, [
-      'accountModelAccessVerified',
+      'modelAndVoiceAccess',
       'exactHostNetworkPolicyVerified',
       'currentPriceVerified',
       'checkedAt',
       'evidenceReference',
     ]) ||
-    evidence.accountModelAccessVerified !== true ||
+    evidence.modelAndVoiceAccess !== 'verify_in_authorized_session' ||
     evidence.exactHostNetworkPolicyVerified !== true ||
     evidence.currentPriceVerified !== true ||
     !date(evidence.checkedAt) ||
@@ -387,7 +387,7 @@ export async function liveTranslateAuditionMain(
     const args = parseLiveTranslateAuditionArgs(argv);
     if (args.help) {
       write(
-        'Offline only by default: node --import tsx scripts/livetranslate-audition.mts --manifest PATH. Future --run also requires --approval PATH --out NEW_PRIVATE_DIRECTORY and a new model/Tina/space-host/data/CNY authorization. No microphone, phone, automatic playback, retry or reconnect.',
+        'Offline only by default: node --import tsx scripts/livetranslate-audition.mts --manifest PATH. Future --run also requires --approval PATH --out NEW_PRIVATE_DIRECTORY and a new model/Aiden/space-host/data/CNY authorization. No microphone, phone, automatic playback, retry or reconnect.',
       );
       return 0;
     }

@@ -53,7 +53,7 @@ class Wire extends EventEmitter {
         },
         output: {
           format: { type: 'pcm', sample_rate: 24000 },
-          voice: 'Tina',
+          voice: 'Aiden',
         },
       },
       translation: { language: this.role === 'local' ? 'en' : 'zh' },
@@ -292,6 +292,13 @@ test('real audition runner and protocol client consume two synthetic PCM clips, 
   });
   assert.equal(result.status, 'completed');
   assert.equal(result.counters.sessions, 2);
+  assert.equal(result.confirmedSessions.length, 2);
+  assert.equal(result.observedSessionConfigurations.length, 2);
+  assert(result.confirmedSessions.every((session) =>
+    session.voice === 'Aiden' &&
+    session.voiceCloneEnabled === false &&
+    session.configurationAcknowledgement.basis === 'provider_session_updated',
+  ));
   assert.equal(result.counters.observedResponses, 2);
   assert.equal(result.counters.acceptedResponses, 2);
   assert.equal(result.counters.inputBytesSent, 12800);
@@ -340,7 +347,7 @@ test('real audition runner and protocol client consume two synthetic PCM clips, 
     [['text', 'audio'], ['text']],
   );
   wires.forEach((wire, index) => {
-    assert.equal(wire.sent[0].session.voice, 'Tina');
+    assert.equal(wire.sent[0].session.voice, 'Aiden');
     assert.equal(wire.sent[0].session.enable_voice_clone, false);
     assert(
       wire.sent.every((event) =>
@@ -365,6 +372,55 @@ test('real audition runner and protocol client consume two synthetic PCM clips, 
   assert(wires.every((wire) => wire.closed === 1));
   assert.equal(result.configuration.providerOutputTokenLimit, null);
   assert.equal(result.configuration.providerCancelSupported, false);
+});
+
+test('single-local real protocol runner never sends recording on an unconfirmed or incompatible Aiden configuration', async () => {
+  const sample = Buffer.alloc(3200, 1);
+  const input: PreparedLiveTranslateAuditionInput = {
+    mode: 'single-local',
+    manifestPath: 'synthetic-offline-only.json',
+    manifestSha256: 'a'.repeat(64),
+    workspaceId: 'offline-workspace',
+    spaceHost: HOST,
+    clips: [{
+      id: 'local', role: 'local', pcm: sample, durationMs: 100,
+      sha256: createHash('sha256').update(sample).digest('hex'),
+      wavPath: 'synthetic-local.wav',
+    }],
+    totalSeconds: 0.1,
+  };
+  const cases = [
+    { voice: 'Tina', patch: (session: any) => ({ ...session, audio: { ...session.audio, output: { ...session.audio.output, voice: 'Tina' } } }) },
+    { voice: null, patch: (session: any) => ({ ...session, audio: { ...session.audio, output: { ...session.audio.output, voice: undefined } } }) },
+    { voice: 'Aiden', patch: (session: any) => ({ ...session, enable_voice_clone: undefined }) },
+    { voice: 'Aiden', patch: (session: any) => ({ ...session, enable_voice_clone: true }) },
+    { voice: 'Aiden', patch: (session: any) => ({ ...session, translation: { language: 'zh' } }) },
+  ];
+  for (const item of cases) {
+    const wires: Wire[] = [];
+    // eslint-disable-next-line no-await-in-loop -- Every rejection has exactly one isolated fake protocol session.
+    const result = await runLiveTranslateAudition({
+      input,
+      apiKey: 'offline-fake-not-a-credential',
+      delay: async () => { assert.fail('No recording frame may be sent'); },
+      clientFactory: realFactory(wires, (wire) => {
+        const session = wire.session.bind(wire);
+        wire.session = () => item.patch(session());
+      }),
+    });
+    assert.equal(result.status, 'failed');
+    assert.equal(result.errorCode, 'LIVETRANSLATE_CONFIGURATION_REJECTED');
+    assert.equal(result.counters.sessions, 1);
+    assert.equal(result.counters.inputBytesSent, 0);
+    assert.equal(result.confirmedSessions.length, 0);
+    assert.equal(result.observedSessionConfigurations.length, 1);
+    assert.equal(result.observedSessionConfigurations[0].accepted, false);
+    assert.equal(result.observedSessionConfigurations[0].voice, item.voice);
+    assert.equal(wires.length, 1);
+    assert.equal(wires[0].sent.length, 1);
+    assert.equal(wires[0].sent[0].session.voice, 'Aiden');
+    assert.equal(wires[0].closed, 1);
+  }
 });
 
 test('real client response FIFO cannot turn delayed artifact delivery into model first-PCM or lose an earlier completed response', async (t) => {
