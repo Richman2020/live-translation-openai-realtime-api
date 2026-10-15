@@ -1,0 +1,112 @@
+{
+  "schemaVersion": 1,
+  "provenance": "synthetic_mutation_of_actual_redacted_structure",
+  "capturedProviderPayload": false,
+  "sourceFixture": "actual-aiden-top-level-nested-tina.redacted.json",
+  "originalOutboundCaptured": false,
+  "replayOutboundEvidence": "current_fake_transport_application_effect_not_historical_outbound",
+  "timingUse": "synthetic_replay_order_only_not_model_latency",
+  "mutations": [
+    "top_level_session_voice_Andre_is_synthetic",
+    "event_and_session_identifiers_are_synthetic"
+  ],
+  "providerFrames": [
+    {
+      "kind": "provider_frame",
+      "sequence": 1,
+      "binary": false,
+      "event": {
+        "event_id": "synthetic_andre_event_1",
+        "type": "session.created",
+        "session": {
+          "model": "qwen3.8-livetranslate-flash-realtime",
+          "output_modalities": [
+            "text",
+            "audio"
+          ],
+          "object": "realtime.session",
+          "audio": {
+            "output": {
+              "voice": "Tina",
+              "format": {
+                "sample_rate": 24000,
+                "type": "pcm"
+              }
+            },
+            "input": {
+              "format": {
+                "type": "pcm",
+                "sample_rate": 16000
+              },
+              "turn_detection": {
+                "silence_duration_ms": 2500,
+                "threshold": 0.5,
+                "type": "speaker_detection"
+              }
+            }
+          },
+          "id": "synthetic_andre_session",
+          "translation": {
+            "language": "en"
+          },
+          "input_modalities": [
+            "audio"
+          ]
+        }
+      }
+    },
+    {
+      "kind": "provider_frame",
+      "sequence": 2,
+      "binary": false,
+      "event": {
+        "event_id": "synthetic_andre_event_2",
+        "type": "session.updated",
+        "session": {
+          "id": "synthetic_andre_session",
+          "object": "realtime.session",
+          "model": "qwen3.8-livetranslate-flash-realtime",
+          "output_modalities": [
+            "text",
+            "audio"
+          ],
+          "input_modalities": [
+            "audio"
+          ],
+          "voice": "Andre",
+          "audio": {
+            "input": {
+              "format": {
+                "type": "pcm",
+                "sample_rate": 16000
+              },
+              "turn_detection": {
+                "type": "speaker_detection",
+                "threshold": 0.5,
+                "create_response": true,
+                "interrupt_response": true
+              }
+            },
+            "output": {
+              "format": {
+                "type": "pcm",
+                "sample_rate": 24000
+              },
+              "voice": "Tina"
+            }
+          },
+          "turn_detection": {
+            "type": "speaker_detection",
+            "threshold": 0.5,
+            "create_response": true,
+            "interrupt_response": true
+          },
+          "translation": {
+            "language": "en"
+          },
+          "enable_voice_clone": false
+        }
+      }
+    }
+  ]
+}

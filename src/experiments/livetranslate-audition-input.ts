@@ -13,14 +13,19 @@ export const LIVETRANSLATE_AUDITION_PARENT =
   'ffb3f7a2178c678177cb08641970c3215a310e6f';
 export const LIVETRANSLATE_AUDITION_MODEL =
   'qwen3.8-livetranslate-flash-realtime';
-export const LIVETRANSLATE_AUDITION_VOICE = 'Tina';
+export const LIVETRANSLATE_AUDITION_VOICE = 'Aiden';
+export const LIVETRANSLATE_SINGLE_LOCAL_VOICE = 'Andre';
 export const LIVETRANSLATE_AUDITION_SCOPE =
   'livetranslate-comparison-audition-v1';
 export const LIVETRANSLATE_SINGLE_LOCAL_SCOPE =
-  'livetranslate-single-local-audition-v1';
+  'livetranslate-single-local-andre-voice-state-v1';
 export const LIVETRANSLATE_SINGLE_LOCAL_PARENT =
-  'f2e0acd4ec1d42450feb29e290fd0455244bc466';
+  '4c1ad02234481ee14c1e3a4093f3c09e51e4ebfb';
 export type LiveTranslateAuditionMode = 'dual' | 'single-local';
+export const liveTranslateAuditionVoice = (
+  mode: LiveTranslateAuditionMode = 'dual',
+) => mode === 'single-local'
+  ? LIVETRANSLATE_SINGLE_LOCAL_VOICE : LIVETRANSLATE_AUDITION_VOICE;
 export const LIVETRANSLATE_AUDITION_LIMITS = Object.freeze({
   sessions: 2,
   sessionsPerRole: 1,

@@ -1,0 +1,63 @@
+{
+  "recordKind": "actual_execution_summary_not_event_payload",
+  "realCapturePayloadAvailable": false,
+  "rawWebSocketPayload": "unavailable_not_retained",
+  "replayableActualEventCapture": false,
+  "sourceCommit": "79d22d2df0977f28cc02b896f133b6b2494f6dc0",
+  "status": "failed",
+  "errorCode": "LIVETRANSLATE_EVENT_INVALID",
+  "requestIntent": {
+    "model": "qwen3.8-livetranslate-flash-realtime",
+    "voice": "Aiden",
+    "voiceCloneEnabled": false,
+    "targetLanguage": "en",
+    "host": "ws-y26guohg2gsusct1.cn-beijing.maas.aliyuncs.com",
+    "audioSeconds": 21.097375,
+    "provenance": "requested local configuration and authorization, not confirmed provider values"
+  },
+  "providerConfirmedConfiguration": null,
+  "providerModelAccessVerified": false,
+  "providerModelAccessStatus": "unknown",
+  "providerVoiceSupportStatus": "unknown",
+  "providerRejectionReason": "unknown",
+  "invocations": 1,
+  "maximumConnectionAttempts": 1,
+  "retryAllowed": false,
+  "counters": {
+    "sessions": 1,
+    "observedResponses": 0,
+    "acceptedResponses": 0,
+    "inputBytesSent": 0,
+    "audioBytesReceived": 0,
+    "audioBytesSaved": 0
+  },
+  "confirmedSessions": [],
+  "observedSessionConfigurations": [],
+  "sendsCount": 0,
+  "sourcesCount": 0,
+  "translationsCount": 0,
+  "timingCount": 0,
+  "usageCount": 0,
+  "audioCount": 0,
+  "costs": {
+    "knownSubtotalCny": null,
+    "allReportedUsagePriced": false,
+    "actualPlatformBilledCny": null,
+    "actualPlatformBilledStatus": "not_verified"
+  },
+  "firstAudioLatencyMs": null,
+  "completeTranslationLatencyMs": null,
+  "completeAudioLatencyMs": null,
+  "metricsStatus": "unavailable_no_audio_sent_or_received",
+  "authorization": {
+    "status": "consumed_no_rerun",
+    "spentLockStatus": "spent_before_first_supplier_request",
+    "spentAtUtc": "2026-10-15T06:37:35.047Z"
+  },
+  "networkActivityDuringThisForensicTask": 0,
+  "notes": [
+    "This file is derived from authentic retained result/receipt artifacts. It is not a real WebSocket event payload sample.",
+    "Empty configuration evidence cannot establish Aiden rejection, authentication success, or an effective server model/voice.",
+    "No raw payload, first-message timestamp, send-configuration timestamp, parser stage, exception detail or close-event timestamp was retained."
+  ]
+}

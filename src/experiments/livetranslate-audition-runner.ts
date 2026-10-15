@@ -14,12 +14,17 @@ import type {
   LiveTranslateTranslation,
   LiveTranslateUsage,
   LiveTranslateTiming,
+  LiveTranslateSession,
+  LiveTranslateSessionConfiguration,
+  LiveTranslateProtocolEvent,
+  LiveTranslateProtocolDiagnostic,
+  LiveTranslateVoiceEvidence,
 } from './livetranslate-types';
 import {
   LIVETRANSLATE_AUDITION_LIMITS,
   liveTranslateAuditionLimits,
   LIVETRANSLATE_AUDITION_MODEL,
-  LIVETRANSLATE_AUDITION_VOICE,
+  liveTranslateAuditionVoice,
   liveTranslateSpaceHost,
   type PreparedLiveTranslateAuditionInput,
 } from './livetranslate-audition-input';
@@ -28,12 +33,13 @@ export type LiveTranslateAuditionResult = {
   status: 'completed' | 'failed' | 'cancelled';
   errorCode?: string;
   closeCode?: number;
+  httpStatusCode?: number;
   startedAt: number;
   endedAt: number;
   configuration: {
     mode: 'dual' | 'single-local';
     model: typeof LIVETRANSLATE_AUDITION_MODEL;
-    voice: typeof LIVETRANSLATE_AUDITION_VOICE;
+    voice: ReturnType<typeof liveTranslateAuditionVoice>;
     spaceHost: string;
     inputSampleRate: 16000;
     outputSampleRate: 24000;
@@ -66,6 +72,15 @@ export type LiveTranslateAuditionResult = {
   })[];
   timing: (LiveTranslateTiming & { clipId: string })[];
   usage: (LiveTranslateUsage & { clipId: string })[];
+  protocolEvents: (LiveTranslateProtocolEvent & { clipId: string })[];
+  protocolDiagnostics: (LiveTranslateProtocolDiagnostic & { clipId: string })[];
+  protocolTraceTruncated: boolean;
+  confirmedSessions: (LiveTranslateSession & { clipId: string })[];
+  observedSessionConfigurations: (LiveTranslateSessionConfiguration & {
+    clipId: string;
+  })[];
+  /** Separate declarations at each protocol location; never acoustic voice acceptance. */
+  voiceEvidence: (LiveTranslateVoiceEvidence & { clipId: string })[];
   audio: {
     clipId: string;
     metadata: LiveTranslateAudioMetadata;
@@ -124,6 +139,7 @@ export async function runLiveTranslateAudition(
 ): Promise<LiveTranslateAuditionResult> {
   const { input } = options;
   const mode = input?.mode ?? 'dual';
+  const voice = liveTranslateAuditionVoice(mode);
   const limits = liveTranslateAuditionLimits(mode);
   const timeoutMs =
     options.timeoutMs ?? LIVETRANSLATE_AUDITION_LIMITS.totalTimeoutMs;
@@ -165,7 +181,7 @@ export async function runLiveTranslateAudition(
     configuration: {
       mode,
       model: LIVETRANSLATE_AUDITION_MODEL,
-      voice: LIVETRANSLATE_AUDITION_VOICE,
+      voice,
       spaceHost: input.spaceHost,
       inputSampleRate: 16000,
       outputSampleRate: 24000,
@@ -187,6 +203,12 @@ export async function runLiveTranslateAudition(
     translations: [],
     timing: [],
     usage: [],
+    protocolEvents: [],
+    protocolDiagnostics: [],
+    protocolTraceTruncated: false,
+    confirmedSessions: [],
+    observedSessionConfigurations: [],
+    voiceEvidence: [],
     audio: [],
     clips: input.clips.map((clip) => ({
       id: clip.id,
@@ -199,10 +221,12 @@ export async function runLiveTranslateAudition(
     })),
   };
   const clients = new Set<LiveTranslateClient>();
+  const transportClosures: Promise<unknown>[] = [];
   const responses = new Set<string>();
   const audioEvents = new Set<string>();
   let stopped = false;
   let eventCount = 0;
+  let journalOpen = true;
   let rejectStopped: (reason: Error) => void;
   const stoppedTask = new Promise<never>((_resolve, reject) => {
     rejectStopped = reject;
@@ -281,11 +305,48 @@ export async function runLiveTranslateAudition(
       const client = (options.clientFactory ?? createLiveTranslateClient)({
         enabled: true,
         role: clip.role,
+        voice,
         workspaceId: input.workspaceId,
         apiKey: options.apiKey,
         proxyUrl: options.proxyUrl,
         now,
         timeoutMs: Math.min(timeoutMs, 15000),
+        allowMissingVoiceCloneEcho: input.mode === 'single-local' && clip.role === 'local',
+        allowAndreTopLevelWithTinaOutput: input.mode === 'single-local' && clip.role === 'local',
+        onProtocolEvent: (event) => {
+          if (!journalOpen) return;
+          if (result.protocolEvents.length >= 8192) {
+            result.protocolTraceTruncated = true;
+            stop('LIVETRANSLATE_AUDITION_EVENT_LIMIT');
+            return;
+          }
+          result.protocolEvents.push({ ...event, clipId: clip.id });
+        },
+        onProtocolDiagnostic: (event) => {
+          if (!journalOpen) return;
+          if (result.protocolDiagnostics.length >= 4096) {
+            result.protocolTraceTruncated = true;
+            stop('LIVETRANSLATE_AUDITION_EVENT_LIMIT');
+            return;
+          }
+          result.protocolDiagnostics.push({ ...event, clipId: clip.id });
+        },
+        onSessionConfiguration: (event) => {
+          if (!active()) return;
+          result.observedSessionConfigurations.push({
+            ...event,
+            clipId: clip.id,
+          });
+        },
+        onVoiceEvidence: (event) => {
+          if (!journalOpen || stopped) return;
+          if (result.voiceEvidence.length >= 8192) {
+            result.protocolTraceTruncated = true;
+            stop('LIVETRANSLATE_AUDITION_EVENT_LIMIT');
+            return;
+          }
+          result.voiceEvidence.push({ ...event, clipId: clip.id });
+        },
         onSource: (event) => {
           if (!active()) return;
           if (!accepts(event) || event.text.length > 8192) {
@@ -446,6 +507,13 @@ export async function runLiveTranslateAudition(
         onError: (code, diagnostic) => {
           if (stopped || !live) return;
           const closeCode = diagnostic?.closeCode;
+          const httpStatusCode = diagnostic?.httpStatusCode;
+          if (
+            Number.isInteger(httpStatusCode) &&
+            httpStatusCode >= 100 &&
+            httpStatusCode <= 599
+          )
+            result.httpStatusCode = httpStatusCode;
           if (
             Number.isInteger(closeCode) &&
             closeCode >= 1000 &&
@@ -460,17 +528,85 @@ export async function runLiveTranslateAudition(
         },
       });
       clients.add(client);
+      if (client.transportClosed) transportClosures.push(client.transportClosed);
       result.counters.sessions += 1;
       if (stopped) {
         client.abort();
         break;
       }
       const session = await fenced(client.ready);
+      const policy = session.voicePolicy;
+      const policyAck = policy?.acknowledgement;
+      const matchingPolicy = policy?.requestedVoice === voice &&
+        policy.acousticVoice === 'unknown_not_measured' &&
+        session.requestedVoice === voice &&
+        policyAck?.sessionId === session.sessionId &&
+        policyAck.eventId === session.configurationAcknowledgement?.eventId &&
+        policyAck.receiveSequence === session.configurationAcknowledgement?.receiveSequence &&
+        policyAck.receivedAt === session.configurationAcknowledgement?.receivedAt;
+      const reportedEcho = (echo: { status: string; value: unknown; actualType: string } | undefined,
+        expected: string) => echo?.status === 'reported' && echo.value === expected && echo.actualType === 'string';
+      const conflictPolicy = matchingPolicy && policy?.mode === 'approved_andre_tina_metadata_conflict' &&
+        policy.responseVoiceAllowlist.length === 2 &&
+        policy.responseVoiceAllowlist[0] === 'Andre' && policy.responseVoiceAllowlist[1] === 'Tina' &&
+        reportedEcho(policyAck?.sessionTopLevelEcho, 'Andre') &&
+        reportedEcho(policyAck?.sessionNestedEcho, 'Tina') &&
+        reportedEcho(session.sessionOutputVoiceEcho, 'Tina');
+      const acceptedVoiceConflict = input.mode === 'single-local' && clip.role === 'local' &&
+        voice === 'Andre' && session.voice === 'Tina' && session.requestedVoice === 'Andre' &&
+        session.topLevelVoice === 'Andre' && session.voiceConfirmation === 'approved_top_level_andre_nested_tina' &&
+        conflictPolicy &&
+        result.observedSessionConfigurations.some((ack) => ack.clipId === clip.id && ack.accepted &&
+          ack.sessionId === session.sessionId && ack.role === clip.role && ack.model === session.model &&
+          ack.voice === 'Tina' && ack.requestedVoice === 'Andre' && ack.topLevelVoice === 'Andre' &&
+          ack.voiceConfirmation === 'approved_top_level_andre_nested_tina' &&
+          ack.eventId === session.configurationAcknowledgement?.eventId &&
+          ack.receiveSequence === session.configurationAcknowledgement?.receiveSequence &&
+          ack.receivedAt === session.configurationAcknowledgement?.receivedAt) &&
+        result.protocolDiagnostics.some((warning) => warning.clipId === clip.id && warning.role === clip.role &&
+          warning.at === session.configurationAcknowledgement?.receivedAt &&
+          warning.eventType === 'session.updated' && warning.stage === 'configuring' && !warning.fatal &&
+          warning.code === 'LIVETRANSLATE_APPROVED_ANDRE_TINA_CONFLICT' &&
+          warning.validationPath === 'session.audio.output.voice' && warning.expected === 'Andre' &&
+          warning.actualType === 'string' && warning.acknowledgement?.sessionId === session.sessionId &&
+          warning.acknowledgement.eventId === session.configurationAcknowledgement?.eventId &&
+          warning.acknowledgement.receiveSequence === session.configurationAcknowledgement?.receiveSequence);
+      const strictPolicy = matchingPolicy && policy?.mode === 'strict_requested_voice' &&
+        policy.responseVoiceAllowlist.length === 1 && policy.responseVoiceAllowlist[0] === voice &&
+        reportedEcho(policyAck?.sessionNestedEcho, voice) &&
+        (policyAck?.sessionTopLevelEcho.status === 'missing' ||
+          reportedEcho(policyAck?.sessionTopLevelEcho, voice)) &&
+        reportedEcho(session.sessionOutputVoiceEcho, voice);
+      const acceptedMissingCloneEcho = input.mode === 'single-local' && clip.role === 'local' &&
+        session.voiceCloneEnabled === null && session.voiceCloneConfirmation === 'missing_echo_warning' &&
+        result.observedSessionConfigurations.some((ack) => ack.clipId === clip.id && ack.accepted &&
+          ack.sessionId === session.sessionId && ack.role === clip.role && ack.voiceCloneEnabled === null &&
+          ack.eventId === session.configurationAcknowledgement?.eventId &&
+          ack.receiveSequence === session.configurationAcknowledgement?.receiveSequence &&
+          ack.receivedAt === session.configurationAcknowledgement?.receivedAt) &&
+        result.protocolDiagnostics.some((warning) => warning.clipId === clip.id && warning.role === clip.role &&
+          warning.at === session.configurationAcknowledgement?.receivedAt &&
+          warning.eventType === 'session.updated' && warning.stage === 'configuring' && !warning.fatal &&
+          warning.code === 'LIVETRANSLATE_CLONE_CONFIRMATION_MISSING' &&
+          warning.validationPath === 'session.enable_voice_clone' && warning.actualType === 'missing');
       if (
         (observedSessionId !== undefined &&
           observedSessionId !== session.sessionId) ||
         session.model !== LIVETRANSLATE_AUDITION_MODEL ||
-        session.voice !== 'Tina' ||
+        (policy !== undefined && !strictPolicy && !acceptedVoiceConflict) ||
+        (session.voiceConfirmation === 'approved_top_level_andre_nested_tina' && !acceptedVoiceConflict) ||
+        (session.voice !== voice && !acceptedVoiceConflict) ||
+        (session.voiceCloneEnabled !== false && !acceptedMissingCloneEcho) ||
+        session.targetLanguage !== (clip.role === 'local' ? 'en' : 'zh') ||
+        session.configurationAcknowledgement?.basis !==
+          'provider_session_updated' ||
+        (session.configurationAcknowledgement.eventId !== null &&
+          (typeof session.configurationAcknowledgement.eventId !== 'string' ||
+            !session.configurationAcknowledgement.eventId)) ||
+        typeof session.configurationAcknowledgement.receiveSequence !== 'number' ||
+        !Number.isSafeInteger(session.configurationAcknowledgement.receiveSequence) ||
+        session.configurationAcknowledgement.receiveSequence < 1 ||
+        !Number.isFinite(session.configurationAcknowledgement.receivedAt) ||
         session.role !== clip.role ||
         session.inputSampleRate !== 16000 ||
         session.outputSampleRate !== 24000 ||
@@ -480,6 +616,7 @@ export async function runLiveTranslateAudition(
         stop('LIVETRANSLATE_AUDITION_SESSION_CONFIG_REJECTED');
         break;
       }
+      result.confirmedSessions.push({ ...session, clipId: clip.id });
       clipState.sendStartedAt = now();
       for (
         let offset = 0;
@@ -571,7 +708,22 @@ export async function runLiveTranslateAudition(
         /* Local fence is already active. */
       }
     }
+    const closeWaitMs = Math.min(250, Math.max(0, timeoutMs - (now() - startedAt)));
+    if (transportClosures.length && closeWaitMs > 0) {
+      let closeTimer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          Promise.allSettled(transportClosures),
+          new Promise<void>((resolve) => {
+            closeTimer = setTimeout(resolve, closeWaitMs);
+          }),
+        ]);
+      } finally {
+        clearTimeout(closeTimer);
+      }
+    }
     stopped = true;
+    journalOpen = false;
     result.endedAt = now();
   }
   return result;

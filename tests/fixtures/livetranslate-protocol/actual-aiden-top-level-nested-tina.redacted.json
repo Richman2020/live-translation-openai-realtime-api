@@ -1,0 +1,117 @@
+{
+  "schemaVersion": 1,
+  "provenance": "actual_provider_redacted_inbound",
+  "capturedProviderPayload": true,
+  "sourceFile": "/workspace/ai-phone-livetranslate-a66-permission-updated-once-20261015/provider-events.redacted.jsonl",
+  "sourceFileSha256": "710eea86eec2065f2ea418c45ab043f4bc0950716481c6fc436d6ee02e7bf84d",
+  "sourceCandidate": "a66fd3f5881f0258ee704988592ea5640a3d0559",
+  "sanitization": "existing_redacted_capture_identifiers_are_consistent_sha256_pseudonyms_audio_and_credentials_removed",
+  "originalOutboundCaptured": false,
+  "replayOutboundEvidence": "current_fake_transport_application_effect_not_historical_outbound",
+  "timingUse": "historical_capture_metadata_only_replay_order_is_not_new_model_latency",
+  "providerFrames": [
+    {
+      "utc": "2026-10-15T08:52:46.650Z",
+      "monotonicMs": 1238.269098,
+      "kind": "provider_frame",
+      "sequence": 1,
+      "binary": false,
+      "frameBytes": 522,
+      "event": {
+        "event_id": "id_2d4c35c27b595098",
+        "type": "session.created",
+        "session": {
+          "model": "qwen3.8-livetranslate-flash-realtime",
+          "output_modalities": [
+            "text",
+            "audio"
+          ],
+          "object": "realtime.session",
+          "audio": {
+            "output": {
+              "voice": "Tina",
+              "format": {
+                "sample_rate": 24000,
+                "type": "pcm"
+              }
+            },
+            "input": {
+              "format": {
+                "type": "pcm",
+                "sample_rate": 16000
+              },
+              "turn_detection": {
+                "silence_duration_ms": 2500,
+                "threshold": 0.5,
+                "type": "speaker_detection"
+              }
+            }
+          },
+          "id": "id_a150c673338c8e18",
+          "translation": {
+            "language": "en"
+          },
+          "input_modalities": [
+            "audio"
+          ]
+        }
+      }
+    },
+    {
+      "utc": "2026-10-15T08:52:46.902Z",
+      "monotonicMs": 1490.9648,
+      "kind": "provider_frame",
+      "sequence": 2,
+      "binary": false,
+      "frameBytes": 685,
+      "event": {
+        "event_id": "id_c9aae6d2e11fe5f0",
+        "type": "session.updated",
+        "session": {
+          "id": "id_a150c673338c8e18",
+          "object": "realtime.session",
+          "model": "qwen3.8-livetranslate-flash-realtime",
+          "output_modalities": [
+            "text",
+            "audio"
+          ],
+          "input_modalities": [
+            "audio"
+          ],
+          "voice": "Aiden",
+          "audio": {
+            "input": {
+              "format": {
+                "type": "pcm",
+                "sample_rate": 16000
+              },
+              "turn_detection": {
+                "type": "speaker_detection",
+                "threshold": 0.5,
+                "create_response": true,
+                "interrupt_response": true
+              }
+            },
+            "output": {
+              "format": {
+                "type": "pcm",
+                "sample_rate": 24000
+              },
+              "voice": "Tina"
+            }
+          },
+          "turn_detection": {
+            "type": "speaker_detection",
+            "threshold": 0.5,
+            "create_response": true,
+            "interrupt_response": true
+          },
+          "translation": {
+            "language": "en"
+          },
+          "enable_voice_clone": false
+        }
+      }
+    }
+  ]
+}

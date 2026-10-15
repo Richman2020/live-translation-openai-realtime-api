@@ -19,6 +19,7 @@ import {
 } from './livetranslate-audition-input';
 import type { LiveTranslateAuditionResult } from './livetranslate-audition-runner';
 import type { LiveTranslateUsage } from './livetranslate-types';
+import { describeLiveTranslateProtocolEvidence } from './livetranslate-protocol-evidence';
 
 export const LIVETRANSLATE_PUBLIC_RATES = Object.freeze({
   currency: 'CNY',
@@ -148,14 +149,21 @@ export function calculateLiveTranslateAuditionCost(
     currency: 'CNY',
     rates: LIVETRANSLATE_PUBLIC_RATES,
     entries,
-    knownSubtotalCny: entries.reduce(
-      (sum, item) =>
-        sum +
-        (item.audioInputCny ?? 0) +
-        (item.audioOutputCny ?? 0) +
-        (item.textOutputCny ?? 0),
-      0,
-    ),
+    knownSubtotalCny: entries.some(
+      (item) =>
+        item.audioInputCny !== null ||
+        item.audioOutputCny !== null ||
+        item.textOutputCny !== null,
+    )
+      ? entries.reduce(
+          (sum, item) =>
+            sum +
+            (item.audioInputCny ?? 0) +
+            (item.audioOutputCny ?? 0) +
+            (item.textOutputCny ?? 0),
+          0,
+        )
+      : null,
     allReportedUsagePriced:
       entries.length > 0 &&
       entries.every((item) => item.allReportedUsagePriced),
@@ -336,7 +344,7 @@ export function writeLiveTranslateAuditionArtifacts(
     write('english-combined.wav', liveTranslateAuditionWave(combined));
   write(
     'report.json',
-    `${JSON.stringify({ version: 1, parentCandidate: input.mode === 'single-local' ? LIVETRANSLATE_SINGLE_LOCAL_PARENT : LIVETRANSLATE_AUDITION_PARENT, provider: 'aliyun-livetranslate-independent-prototype', input: { mode: input.mode ?? 'dual', manifestSha256: input.manifestSha256, workspaceId: input.workspaceId, spaceHost: input.spaceHost, totalSeconds: input.totalSeconds, clips: input.clips.map(({ id, role, durationMs, sha256, speechEndMs }) => ({ id, role, durationMs, sha256, speechEndMs: speechEndMs ?? null })), referenceAnswers: 'not_read_or_uploaded' }, ...result, audio, audioCollectionCompletedAt: result.endedAt, audioCollectionTimeBasis: 'runner_monotonic_fence_closed', audioFilesSavedCompletedAtEpochMs: Date.now(), audioFileWriteBasis: 'synchronous_write_returned_not_fsync_or_playback', costs: calculateLiveTranslateAuditionCost(result.usage), planning: estimateLiveTranslateAuditionCost(input), actualPlaybackStart: 'unknown_no_automatic_playback', comparison: 'pending matching baseline receipt; no latency improvement claim without identical sample hashes and speech-end basis' }, null, 2)}\n`,
+    `${JSON.stringify({ version: 2, parentCandidate: input.mode === 'single-local' ? LIVETRANSLATE_SINGLE_LOCAL_PARENT : LIVETRANSLATE_AUDITION_PARENT, provider: 'aliyun-livetranslate-independent-prototype', input: { mode: input.mode ?? 'dual', manifestSha256: input.manifestSha256, workspaceId: input.workspaceId, spaceHost: input.spaceHost, totalSeconds: input.totalSeconds, clips: input.clips.map(({ id, role, durationMs, sha256, speechEndMs }) => ({ id, role, durationMs, sha256, speechEndMs: speechEndMs ?? null })), referenceAnswers: 'not_read_or_uploaded' }, ...result, configurationBasis: 'requested_not_provider_ack', requestedConfiguration: result.configuration, confirmedConfigurationMetadata: result.confirmedSessions, voiceEvidenceBasis: 'separate_protocol_declarations_not_acoustic_confirmation', protocolEvidence: describeLiveTranslateProtocolEvidence(result), audio, audioCollectionCompletedAt: result.endedAt, audioCollectionTimeBasis: 'runner_monotonic_fence_closed', audioFilesSavedCompletedAtEpochMs: Date.now(), audioFileWriteBasis: 'synchronous_write_returned_not_fsync_or_playback', costs: calculateLiveTranslateAuditionCost(result.usage), planning: estimateLiveTranslateAuditionCost(input), actualPlaybackStart: 'unknown_no_automatic_playback', comparison: 'pending matching baseline receipt; no latency improvement claim without identical sample hashes and speech-end basis' }, null, 2)}\n`,
   );
   write('files.sha256.json', `${JSON.stringify(files, null, 2)}\n`);
   return { output, files: files.map((item) => item.file) };

@@ -486,7 +486,11 @@ export function createLiveTranslateDuplex(options: LiveTranslateDuplexOptions) {
             session.role !== role ||
             !session.sessionId ||
             session.model !== 'qwen3.8-livetranslate-flash-realtime' ||
-            session.voice !== 'Tina' ||
+            session.voice !== 'Aiden' ||
+            session.voiceCloneEnabled !== false ||
+            session.targetLanguage !== (role === 'local' ? 'en' : 'zh') ||
+            session.configurationAcknowledgement?.basis !==
+              'provider_session_updated' ||
             session.inputSampleRate !== 16000 ||
             session.outputSampleRate !== 24000 ||
             session.outputModalities.length !== expected.length ||
