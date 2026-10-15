@@ -711,6 +711,10 @@ export function createLiveTranslateClient(
     }
     if (event.type === 'session.updated') {
       const s = event.session;
+      const missingCloneEcho = !!s && typeof s === 'object' &&
+        !Object.hasOwn(s, 'enable_voice_clone');
+      const allowMissingCloneEcho = options.allowMissingVoiceCloneEcho === true &&
+        role === 'local' && missingCloneEcho;
       const checks: [boolean, LiveTranslateProtocolDiagnostic['validationPath'], LiveTranslateProtocolDiagnostic['expected'], unknown][] = [
         [state === 'configuring', 'state', 'valid_protocol_transition', state],
         [s?.id === sessionId, 'session.id', 'matching_session_id', s?.id],
@@ -728,7 +732,8 @@ export function createLiveTranslateClient(
         [s?.audio?.output?.format?.sample_rate === 24000, 'session.audio.output.format.sample_rate', '24000', s?.audio?.output?.format?.sample_rate],
         [s?.audio?.output?.voice === LIVE_TRANSLATE_VOICE, 'session.audio.output.voice', 'Aiden', s?.audio?.output?.voice],
         [s?.voice === undefined || s.voice === LIVE_TRANSLATE_VOICE, 'session.voice', 'Aiden', s?.voice],
-        [s?.enable_voice_clone === false, 'session.enable_voice_clone', 'false', s?.enable_voice_clone],
+        [s?.enable_voice_clone === false || allowMissingCloneEcho,
+          'session.enable_voice_clone', 'false', s?.enable_voice_clone],
         [s?.audio?.input?.turn_detection?.type === 'speaker_detection', 'session.audio.input.turn_detection.type', 'speaker_detection', s?.audio?.input?.turn_detection?.type],
         [s?.audio?.input?.turn_detection?.threshold === 0.5, 'session.audio.input.turn_detection.threshold', '0.5', s?.audio?.input?.turn_detection?.threshold],
         [s?.translation?.language === target, 'session.translation.language', 'target_language', s?.translation?.language],
@@ -763,6 +768,15 @@ export function createLiveTranslateClient(
         fail(code, undefined, undefined, { validationPath, expected, actual });
         return;
       }
+      if (allowMissingCloneEcho) {
+        emit(options.onProtocolDiagnostic, {
+          role, at: receivedAt, stage: 'configuring', eventType: 'session.updated',
+          validationPath: 'session.enable_voice_clone', expected: 'false',
+          actualType: 'missing', fatal: false,
+          code: 'LIVETRANSLATE_CLONE_CONFIRMATION_MISSING',
+        });
+        if (closed()) return;
+      }
       clearTimeout(timer);
       timer = undefined;
       state = 'ready';
@@ -772,7 +786,8 @@ export function createLiveTranslateClient(
         role,
         model: s.model,
         voice: s.audio.output.voice,
-        voiceCloneEnabled: s.enable_voice_clone,
+        voiceCloneEnabled: missingCloneEcho ? null : s.enable_voice_clone,
+        voiceCloneConfirmation: missingCloneEcho ? 'missing_echo_warning' : 'explicit_false',
         targetLanguage: s.translation.language,
         configurationAcknowledgement: {
           eventId: event.event_id ?? null,

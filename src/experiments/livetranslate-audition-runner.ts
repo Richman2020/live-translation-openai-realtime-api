@@ -305,6 +305,7 @@ export async function runLiveTranslateAudition(
         proxyUrl: options.proxyUrl,
         now,
         timeoutMs: Math.min(timeoutMs, 15000),
+        allowMissingVoiceCloneEcho: input.mode === 'single-local' && clip.role === 'local',
         onProtocolEvent: (event) => {
           if (!journalOpen) return;
           if (result.protocolEvents.length >= 8192) {
@@ -518,12 +519,24 @@ export async function runLiveTranslateAudition(
         break;
       }
       const session = await fenced(client.ready);
+      const acceptedMissingCloneEcho = input.mode === 'single-local' && clip.role === 'local' &&
+        session.voiceCloneEnabled === null && session.voiceCloneConfirmation === 'missing_echo_warning' &&
+        result.observedSessionConfigurations.some((ack) => ack.clipId === clip.id && ack.accepted &&
+          ack.sessionId === session.sessionId && ack.role === clip.role && ack.voiceCloneEnabled === null &&
+          ack.eventId === session.configurationAcknowledgement?.eventId &&
+          ack.receiveSequence === session.configurationAcknowledgement?.receiveSequence &&
+          ack.receivedAt === session.configurationAcknowledgement?.receivedAt) &&
+        result.protocolDiagnostics.some((warning) => warning.clipId === clip.id && warning.role === clip.role &&
+          warning.at === session.configurationAcknowledgement?.receivedAt &&
+          warning.eventType === 'session.updated' && warning.stage === 'configuring' && !warning.fatal &&
+          warning.code === 'LIVETRANSLATE_CLONE_CONFIRMATION_MISSING' &&
+          warning.validationPath === 'session.enable_voice_clone' && warning.actualType === 'missing');
       if (
         (observedSessionId !== undefined &&
           observedSessionId !== session.sessionId) ||
         session.model !== LIVETRANSLATE_AUDITION_MODEL ||
         session.voice !== LIVETRANSLATE_AUDITION_VOICE ||
-        session.voiceCloneEnabled !== false ||
+        (session.voiceCloneEnabled !== false && !acceptedMissingCloneEcho) ||
         session.targetLanguage !== (clip.role === 'local' ? 'en' : 'zh') ||
         session.configurationAcknowledgement?.basis !==
           'provider_session_updated' ||

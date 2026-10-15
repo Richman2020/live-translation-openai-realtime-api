@@ -27,6 +27,9 @@ export function describeLiveTranslateProtocolEvidence(input: ProtocolEvidence) {
       event && input.startedAt !== undefined ? event.at - input.startedAt : null,
   });
   const fatal = diagnostics.find((item) => item.fatal);
+  const cloneWarning = diagnostics.find((item) => !item.fatal &&
+    item.code === 'LIVETRANSLATE_CLONE_CONFIRMATION_MISSING' &&
+    item.validationPath === 'session.enable_voice_clone' && item.actualType === 'missing');
   const observedConfiguration = first('configuration_accepted');
   const providerError = first('provider_error');
   const transportClose = first('transport_close');
@@ -56,7 +59,8 @@ export function describeLiveTranslateProtocolEvidence(input: ProtocolEvidence) {
     classification,
     configurationStopReason: classification === 'voice_clone_disabled_confirmation_missing'
       ? '缺少复刻关闭确认' : null,
-    voiceCloneDisabledConfirmation: classification === 'voice_clone_disabled_confirmation_missing'
+    configurationWarning: cloneWarning ? '缺少复刻关闭确认；按用户批准策略允许就绪' : null,
+    voiceCloneDisabledConfirmation: cloneWarning || classification === 'voice_clone_disabled_confirmation_missing'
       ? 'unknown_missing_echo' : 'see_observed_configuration_if_any',
     underlyingRemoteCauseEstablished: false,
     rawPayloadRetention: events.length || diagnostics.length ? 'redacted_schema_only' : 'not_captured',

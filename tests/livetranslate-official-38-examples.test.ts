@@ -41,7 +41,7 @@ class OfflineSocket extends EventEmitter {
   terminate() { this.readyState = WebSocket.CLOSED; this.emit('close', 1006); }
   close() { this.readyState = WebSocket.CLOSED; this.emit('close', 1000); }
 }
-function peer() {
+function peer(allowMissingVoiceCloneEcho = false) {
   const socket = new OfflineSocket();
   const events: LiveTranslateProtocolEvent[] = [];
   const diagnostics: LiveTranslateProtocolDiagnostic[] = [];
@@ -51,6 +51,7 @@ function peer() {
   const client = createLiveTranslateClient({
     enabled: true, role: 'local', workspaceId: 'offline-workspace',
     apiKey: 'SYNTHETIC_UNUSED_CREDENTIAL',
+    allowMissingVoiceCloneEcho,
     createWebSocket: () => socket as unknown as WebSocket,
     onProtocolEvent: (event) => events.push(event),
     onProtocolDiagnostic: (item) => diagnostics.push(item),
@@ -123,6 +124,58 @@ test('derived Aiden ACK without clone echo stops as missing confirmation, never 
   assert.equal(evidence.remoteAuthentication, 'not_established');
 });
 
+test('approved single-local policy warns and accepts only absent clone echo without inventing false', async () => {
+  const p = peer(true);
+  p.receive(derivedAck());
+  const session = await p.client.ready;
+  assert.equal(session.voiceCloneEnabled, null);
+  assert.equal(session.voiceCloneConfirmation, 'missing_echo_warning');
+  assert.equal(p.diagnostics.length, 1);
+  assert.equal(p.diagnostics[0].fatal, false);
+  assert.equal(p.diagnostics[0].validationPath, 'session.enable_voice_clone');
+  assert.equal(p.diagnostics[0].actualType, 'missing');
+  assert.equal(p.configurations[0].accepted, true);
+  assert.equal(p.configurations[0].voiceCloneEnabled, null);
+  assert.equal(p.configurations[0].receivedAt, session.configurationAcknowledgement.receivedAt);
+  assert.equal(p.events.some((event) => event.stage === 'provider_error'), false);
+  assert.deepEqual(p.faults, []);
+  const evidence = describeLiveTranslateProtocolEvidence({
+    protocolEvents: p.events, protocolDiagnostics: p.diagnostics,
+    confirmedSessions: [session], counters: { inputBytesSent: 0 },
+  });
+  assert.equal(evidence.configurationStopReason, null);
+  assert.equal(evidence.voiceCloneDisabledConfirmation, 'unknown_missing_echo');
+  assert.equal(evidence.configurationWarning, '缺少复刻关闭确认；按用户批准策略允许就绪');
+  assert.equal(evidence.exactValidation, null);
+  p.client.append(Buffer.alloc(640));
+  assert.equal(p.socket.sent.filter((event) => event.type === 'input_audio_buffer.append').length, 1);
+  p.client.abort();
+});
+
+for (const value of [true, null, 'false', 0, {}, []]) {
+  test(`approved missing-echo policy still rejects present clone field ${JSON.stringify(value)}`, async () => {
+    const p = peer(true);
+    const ack = derivedAck();
+    ack.session.enable_voice_clone = value;
+    p.receive(ack);
+    await assert.rejects(p.client.ready, /CONFIGURATION_REJECTED/);
+    assert.equal(p.diagnostics[0].validationPath, 'session.enable_voice_clone');
+    assert.equal(p.diagnostics[0].fatal, true);
+    assert.equal(p.configurations[0].accepted, false);
+    assert.equal(p.socket.sent.some((event) => event.type === 'input_audio_buffer.append'), false);
+  });
+}
+
+test('approved missing-echo policy does not accept an ACK from another session', async () => {
+  const p = peer(true);
+  const ack = derivedAck();
+  ack.session.id = 'unrelated_synthetic_session';
+  p.receive(ack);
+  await assert.rejects(p.client.ready, /CONFIGURATION_REJECTED/);
+  assert.equal(p.diagnostics[0].validationPath, 'session.id');
+  assert.equal(p.socket.sent.some((event) => event.type === 'input_audio_buffer.append'), false);
+});
+
 test('derived Aiden plus explicit clone=false confirms nested paths; no legacy ACK voice is required', async () => {
   const p = peer();
   p.receive(derivedAck(true));
@@ -148,8 +201,8 @@ const negativePaths: [string, (event: any) => void][] = [
 ];
 for (const [path, mutate] of negativePaths) {
   test(`derived official ACK negative case stops at actual path ${path}`, async () => {
-    const p = peer();
-    const ack = derivedAck(true);
+    const p = peer(true);
+    const ack = derivedAck();
     mutate(ack);
     p.receive(ack);
     await assert.rejects(p.client.ready, /CONFIGURATION_REJECTED/);

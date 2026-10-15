@@ -6,7 +6,9 @@ export type LiveTranslateSession = {
   role: LiveTranslateRole;
   model: 'qwen3.8-livetranslate-flash-realtime';
   voice: 'Aiden';
-  voiceCloneEnabled: false;
+  /** null means the provider omitted this field; never infer false from the request. */
+  voiceCloneEnabled: false | null;
+  voiceCloneConfirmation?: 'explicit_false' | 'missing_echo_warning';
   targetLanguage: 'en' | 'zh';
   configurationAcknowledgement: {
     eventId: string | null;
@@ -219,6 +221,8 @@ export type LiveTranslateClientOptions = {
   apiKey: string;
   proxyUrl?: string;
   timeoutMs?: number;
+  /** User-approved single-local audition policy; defaults to strict echo confirmation. */
+  allowMissingVoiceCloneEcho?: boolean;
   now?: () => number;
   createWebSocket?: (
     url: string,

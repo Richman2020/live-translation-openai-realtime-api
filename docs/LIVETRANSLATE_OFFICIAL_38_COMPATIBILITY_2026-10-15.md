@@ -21,11 +21,11 @@
 
 原样官方示例包含 Tina，因此本任务会先在 session.audio.output.voice 的 Aiden 门槛停止。这是本地用户要求与示例默认音色不一致，不能称为供应商拒绝Aiden。
 
-人工派生用例仅把原样音色改为Aiden，继续保留缺失的复刻字段：当前候选在 configuring 状态、session.enable_voice_clone 校验处停止，期望false，actualType=missing，voiceCloneEnabled=null，录音发送0字节。不进入ready、不发出configuration_accepted、不构造provider_error。
+最新用户已批准仅在单中文试听中放宽字段缺失的处理。客户端仍显式发送enable_voice_clone=false；同会话对应session.updated且精确模型、Aiden、英文、输入输出PCM及所有其他已有检查通过时，仅缺此字段可记录非致命警告后ready。voiceCloneEnabled保留null，voiceCloneConfirmation=missing_echo_warning，不能标为实际确认关闭复刻。
 
-该分支改为专用本地码 LIVETRANSLATE_CLONE_CONFIRMATION_MISSING，汇总分类 voice_clone_disabled_confirmation_missing，中文“缺少复刻关闭确认”。不得称为已启用复刻、供应商拒绝或已确认关闭。明确true仍属于配置矛盾；未将缺失/null/类型错误补为false。
+该策略通过单中文runner显式传入allowMissingVoiceCloneEcho启用；client默认及duplex门槛不变。runner接受null还须核对相同session.id、event_id、receiveSequence和receivedAt的ACK，以及同clip、同receivedAt的非致命缺字段警告。没有匹配证据不能放行。
 
-只有人工另加明确false的派生ACK才能通过此项；这只证明本地门控，不证明真实3.8服务会回显false或接受Aiden。官方字段表列boolean，但完整3.8示例没有此键，回显可用性仍是兼容性未决项；关闭复刻要求继续保留。
+字段存在且为true、null、字符串/数值/对象/数组仍停止；其他配置不匹配仍停止，不能先发警告再忽略错误。未启用新策略的旧入口仍使用缺确认停止诊断。这项放宽来自本次用户明确授权，不是官方新增了“缺省即false”的保证。真实Aiden支持及复刻实际状态仍未验证。
 
 ## response.created 与本地支持范围
 
@@ -37,6 +37,6 @@
 
 ## 离线验证与类型检查缺项
 
-新增14项官方原样/人工派生用例及关联回归共158项通过，覆盖字段路径负例、缺复刻回显与明确true、空创建输出及pending response清尾。最终8个受保护进程记录真实网络尝试0。日志与网络保护回执保存于独立交付根的evidence；本地模拟结果不证明真实模型或音色可用。
+前阶段官方示例及关联回归158项通过的证据保留。本次另补仅缺字段警告放行、同会话证据、存在但类型异常及其他配置仍拒绝的回归；本次相关167项离线检查通过，8个受保护进程记录真实网络尝试0；最新日志与回执保存在独立交付根evidence/CLONE_POLICY_*。本地模拟结果不证明真实模型或音色可用。
 
 PATH、常见全局目录及已有44个node_modules目录均未找到可用TypeScript编译器；package.json声明typescript但离线依赖未附。故完整tsc --noEmit -p tsconfig.json未执行，不报告类型检查通过，也未安装补齐。
