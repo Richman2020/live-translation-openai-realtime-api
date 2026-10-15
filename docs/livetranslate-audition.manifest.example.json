@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "workspaceId": "REQUIRED_REAL_BEIJING_WORKSPACE_ID",
+  "clips": [
+    {
+      "id": "local-zh",
+      "role": "local",
+      "wav": "samples/local-zh-pcm16-mono-16k.wav",
+      "sha256": "REQUIRED_SHA256_OF_NEW_AUTHORIZED_WAV"
+    },
+    {
+      "id": "remote-en",
+      "role": "remote",
+      "wav": "samples/remote-en-pcm16-mono-16k.wav",
+      "sha256": "REQUIRED_SHA256_OF_NEW_AUTHORIZED_WAV"
+    }
+  ]
+}

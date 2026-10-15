@@ -4,7 +4,20 @@
 
 需求见 [PROJECT_BRIEF.md](PROJECT_BRIEF.md)，工作规则见 [AGENTS.md](AGENTS.md)，运行步骤见 [LOCAL_SETUP.md](LOCAL_SETUP.md)，后续执行入口见 [LOCAL_CODEX_HANDOFF.md](LOCAL_CODEX_HANDOFF.md)。
 
-## 最新：两次真实通话异常诊断及修复候选（2026-10-15，未推送/部署）
+## 最新：LiveTranslate独立离线原型完成（2026-10-15，未推送/部署/试听）
+
+- 用户调整为先验证北京精确 `qwen3.8-livetranslate-flash-realtime`；停止旧三段大规模提速。以完整 `ffb3f7a2178c678177cb08641970c3215a310e6f` 为父，另建 `codex/ai-phone-livetranslate-prototype-20261015` / `/workspace/ai-phone-livetranslate-prototype-20261015`。旧候选211提交bundle独立clone/fsck恢复、428/428源码哈希一致，原6d未提交PROGRESS及48份incident/display证据单独封存；8f96/320f/e106/6d/ffb均为基线祖先。原工作树、OpenAI、三段方案和回退路径不改。
+- 仅新增experiments/专属脚本/测试/文档，不注册生产provider，不改现有选择器或默认；缺显式enabled拒绝建会话。local中文音频直接LiveTranslate→英文分片及原/译文；remote原音先直通，再独立text-only中文字幕，0中文配音，无Fun-ASR/Qwen-MT/CosyVoice串行调用，0中途供应商回退。
+- 官方3.8协议与独立协议审查确认北京专属 `{WorkspaceId}.cn-beijing.maas.aliyuncs.com`，输入PCM16 mono16k/输出24k，明确Tina、clone=false并校验ACK。不复用loongandy_v3，不自创response.cancel/max_output参数；ACK若缺clone false会保守拒绝，实际服务端回执待核，Tina不代表男性听感已通过。
+- 原文/译文只按本会话已知source及assistant直接previous_item_id边绑定，独立版本，未知保持unpaired。复用现有可靠同方块，显示不等全文/不阻塞音频；真实重复保留。多译文item同源不猜追加或重译，保留项目/真实边、明确显示适配限制、不复制原文。没有官方ASR→译音版本对齐，不伪造sourceRevision。
+- client按response.created官方顺序串行流出音频，当前首片立即发、后响应有界缓冲；无created固定拒绝，前audio.done/response.done后移交。单响应内部只保证WS接收顺序，不声称重建无数字序号的供应商乱序。duplex有限异步sink FIFO、插话/继续说话不默认cancel；remote原音不等译音队列；翻译错误明确firstFault/固定码/实际数值closeCode、停止积压与模型，不直接挂电话。真实end/owner断线清理全部资源，既有认证/单通/多标签/真实断线保护不改。
+- 独审实际复现并修复：源/译文item ID冲突、跨response音频混排、空VAD尾段漏检、明确非空原文却空输出误报完成；相同外部红测保留并最终GREEN。另修CLI运行配置guard漏查tsconfig/.gitignore。根审修首PCM到达与FIFO交付时间混计、提前response.done丢失；真实client→runner→artifact交错E2E证明接收220/全文225/完成230/交付250/排队30ms，实际播放null。这些是合成离线事件，不是本次真实模型延迟或旧两通根因。
+- 试听命令默认纯离线manifest/WAV/hash预检，0key-read/0网；新scope样本+模型Tina+host+实际SHA+新金额/发送同意、runtime源码/脚本/public/package/tsconfig/.gitignore guard、私有产物与共用Git目录一次锁。后续≤24s输入/2初始会话、6响应观察、36s保存观察、90s等待、0重试重连均不构成供应商账单封顶；实际第7响应可先被生成，检测7/接纳6后关。源语ASR免费，未知计费不按0；旧OpenAI/阿里授权不复用。
+- **本轮最终统一检查**：`npm test` **1973 total /1968 pass /5 Windows条件skip /0 fail/cancel**；`npm run typecheck`、`npm run build`、全部新增TS/脚本/测试ESLint及diff-check通过。现有锁定依赖，仅prepare:desktop复制本地SDK，未安装。新原型单测26 client/24 duplex/40 audition、2真实client假WS的runner E2E均包含在全量内，不能再相加。独立client+duplex50、audition40+2 E2E+2探针通过，未发现未闭合重要问题；未改UI，不将旧浏览器成绩冒充本轮。
+- 当前任务环境状态没有ready阿里密钥绑定/专属host放行；真实账号/模型API可用性未知，未请求模型探测。用户中文21.097s/24k录音未为本次授权、未转换/发送；仍缺合适16k中英素材。官方北京费率音频入40/文字出100/音频出160元/M token；正常规划例约0.28352元，新建议5元观察预算尚未批准且非硬封顶。
+- 13:02:43（北京时间）只读回核指定AI服务仍6d/f260、SUCCESS、无staged，线上来源不变；本轮无平台写、密钥/网络变更、安装/模型/录音上传/拨号/推送/PR/部署，不操作portal-test。旧两通挂断和farmer来源仍未确认。当前只是可恢复离线原型；真实准确性/上下文/声音/延迟/费用/长通话待新的明确试听批准，先不集成上线。完整运行、官方依据、素材/预算与限制见 [LiveTranslate原型](docs/LIVETRANSLATE_PROTOTYPE_2026-10-15.md)。
+
+## 历史：两次真实通话异常诊断及修复候选（2026-10-15，未推送/部署）
 
 - 实际线上基线6d061820d8cbb062ec3e3a168f05dd3bbd9b63ec / 部署f2609bcc-7ec3-456b-80e9-50ba03a8b431。用户两次实测失败，不能将此前构建、健康或短试听视为电话验收通过。以该精确基线另建 `codex/ai-phone-aliyun-call-fix-20261015` / `/workspace/ai-phone-aliyun-call-fix-20261015`，原集成目录及未提交PROGRESS/427 tracked内容已单独保护和核验；既有OpenAI、上下文、A原型/试听及附件不动。
 - 已按应用UUID与HTTP voice/hangup、pipelineId关联两通：9312038a-ec2f-4b89-bb9c-f47872b11d86、fa54eaff-313a-4323-84eb-ffff371220c1。服务端12:06:38.133/12:07:35.953（北京时间）先记录provider local/remote终止，浏览器hangup分别约359/383ms后。终止行旧版无callId，elapsed及单活动通话强关联；Twilio两腿SID、浏览器SDK错误、首个阿里具体故障未取得，不能把用户点击、completed或最后清理当根因。续约均200；后来的revoke403不是首异常。
