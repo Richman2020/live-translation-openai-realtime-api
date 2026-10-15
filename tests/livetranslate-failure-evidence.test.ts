@@ -44,6 +44,35 @@ const diagnostic: LiveTranslateProtocolDiagnostic = {
   actualType: 'string', fatal: true, code: 'LIVETRANSLATE_CONFIGURATION_REJECTED',
 };
 
+test('synthetic evidence separates protocol progress, complete output, acoustic acceptance and missing usage', () => {
+  const base = {
+    status: 'completed' as const,
+    protocolEvents: [event('configuration_accepted'), {
+      ...event('server_frame'), eventType: 'session.finished' as const,
+    }],
+    clips: [{ sendCompletedAt: 10 }],
+    audio: [{ responseDoneAt: 20 }],
+    counters: { inputBytesSent: 3200, audioBytesSaved: 4800 },
+    usage: [],
+  };
+  const complete = describeLiveTranslateProtocolEvidence(base);
+  assert.equal(complete.outcomes.protocol, 'finished_observed');
+  assert.equal(complete.outcomes.englishAudio, 'complete_output_observed');
+  assert.equal(complete.outcomes.maleVoiceAcceptance, 'not_evaluated');
+  assert.equal(complete.outcomes.acousticVoice, 'unknown_not_measured');
+  assert.equal(complete.outcomes.usage, 'unknown_not_returned');
+  assert.equal(describeLiveTranslateProtocolEvidence({ ...base,
+    usage: [{ basis: 'unknown' }],
+  }).outcomes.usage, 'unknown_not_returned');
+  const partial = describeLiveTranslateProtocolEvidence({ ...base, status: 'cancelled',
+    errorCode: 'LIVETRANSLATE_AUDITION_CANCELLED' });
+  assert.equal(partial.outcomes.protocol, 'stopped_with_error');
+  assert.equal(partial.outcomes.englishAudio, 'partial_output_preserved');
+  assert.equal(describeLiveTranslateProtocolEvidence({ ...base,
+    counters: { inputBytesSent: 3200, audioBytesSaved: 0 }, audio: [],
+  }).outcomes.englishAudio, 'no_audio_observed');
+});
+
 test('synthetic transport open is not authentication and a typed configuration rejection preserves the exact path', () => {
   const evidence = describeLiveTranslateProtocolEvidence({
     startedAt: 2, endedAt: 21, errorCode: diagnostic.code,

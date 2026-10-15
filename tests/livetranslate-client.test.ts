@@ -55,6 +55,7 @@ function fixture(
   const usages: any[] = [];
   const sessionConfigurations: any[] = [];
   const protocolDiagnostics: any[] = [];
+  const voiceEvidence: any[] = [];
   const addresses: string[] = [];
   const settings: any[] = [];
   let eventNumber = 0;
@@ -78,6 +79,7 @@ function fixture(
     onUsage: (event) => usages.push(event),
     onSessionConfiguration: (event) => sessionConfigurations.push(event),
     onProtocolDiagnostic: (event) => protocolDiagnostics.push(event),
+    onVoiceEvidence: (event) => voiceEvidence.push(event),
     ...extras,
   });
   const receive = (event: any) => {
@@ -185,6 +187,7 @@ function fixture(
     usages,
     sessionConfigurations,
     protocolDiagnostics,
+    voiceEvidence,
     addresses,
     settings,
   };
@@ -323,7 +326,7 @@ test('trusted Tina selection pins request, nested ACK and optional top-level voi
   assert.throws(() => fixture('local', { voice: 'unlisted' as any }), /CONFIG_INVALID/);
 });
 
-test('the explicit Andre/Tina exception retains actual Tina and requires the exact local pair and same-ACK warning', async () => {
+test('the explicit Andre/Tina exception retains nested metadata and requires the exact local pair and same-ACK warning', async () => {
   const selected = fixture('local', { voice: 'Andre', allowAndreTopLevelWithTinaOutput: true });
   const actual = selected.session();
   await selected.start({ voice: 'Andre', audio: {
@@ -336,6 +339,11 @@ test('the explicit Andre/Tina exception retains actual Tina and requires the exa
   assert.equal(confirmed.requestedVoice, 'Andre');
   assert.equal(confirmed.topLevelVoice, 'Andre');
   assert.equal(confirmed.voiceConfirmation, 'approved_top_level_andre_nested_tina');
+  assert.deepEqual(confirmed.sessionOutputVoiceEcho, { status: 'reported', value: 'Tina', actualType: 'string' });
+  assert.equal(confirmed.voicePolicy?.requestedVoice, 'Andre');
+  assert.equal(confirmed.voicePolicy?.mode, 'approved_andre_tina_metadata_conflict');
+  assert.deepEqual(confirmed.voicePolicy?.responseVoiceAllowlist, ['Andre', 'Tina']);
+  assert.equal(confirmed.voicePolicy?.acousticVoice, 'unknown_not_measured');
   assert.equal(selected.sessionConfigurations[0].voice, 'Tina');
   assert.equal(selected.sessionConfigurations[0].requestedVoice, 'Andre');
   assert.equal(selected.sessionConfigurations[0].topLevelVoice, 'Andre');
@@ -350,7 +358,7 @@ test('the explicit Andre/Tina exception retains actual Tina and requires the exa
   });
   assert.equal(warning.at, confirmed.configurationAcknowledgement.receivedAt);
   selected.receive({ type: 'response.created', response: {
-    id: 'actual_tina_response', status: 'in_progress', voice: 'Tina',
+    id: 'reported_tina_response', status: 'in_progress', voice: 'Tina',
   } });
   assert.equal(selected.errors.length, 0);
   selected.client.append(Buffer.alloc(320));
@@ -364,9 +372,77 @@ test('the explicit Andre/Tina exception retains actual Tina and requires the exa
   } }), /CONFIGURATION_REJECTED/);
   assert.equal(strict.socket.sent.length, 1);
   assert.equal(strict.protocolDiagnostics[0].fatal, true);
+  const exact = fixture('local', { voice: 'Andre', allowAndreTopLevelWithTinaOutput: true });
+  await exact.start({ voice: 'Andre' });
+  const exactSession = await exact.client.ready;
+  assert.equal(exactSession.voicePolicy?.mode, 'strict_requested_voice');
+  assert.deepEqual(exactSession.voicePolicy?.responseVoiceAllowlist, ['Andre']);
+  exact.receive({ type: 'response.created', response: { id: 'r1', status: 'in_progress', voice: 'Tina' } });
+  assert.equal(exact.errors[0].code, 'LIVETRANSLATE_CONFIGURATION_REJECTED');
+  assert.equal(exact.protocolDiagnostics.at(-1).expected, 'Andre');
   assert.throws(() => fixture('remote', { voice: 'Andre', allowAndreTopLevelWithTinaOutput: true }), /CONFIG_INVALID/);
   assert.throws(() => fixture('local', { voice: 'Aiden', allowAndreTopLevelWithTinaOutput: true }), /CONFIG_INVALID/);
   assert.throws(() => fixture('local', { voice: 'Tina', allowAndreTopLevelWithTinaOutput: true }), /CONFIG_INVALID/);
+});
+
+test('voice evidence keeps every layer independent and validates repeated response-done declarations without repeating usage', async () => {
+  const f = fixture('local', { voice: 'Andre', allowAndreTopLevelWithTinaOutput: true });
+  const session = f.session();
+  const nested = { ...session.audio, output: { ...session.audio.output, voice: 'Tina' } };
+  f.receive({ type: 'session.created', session: { ...session, audio: nested } });
+  f.receive({ type: 'session.updated', session: { ...session, voice: 'Andre', audio: nested } });
+  const confirmed = await f.client.ready;
+  assert.equal(f.voiceEvidence[0].policyMode, 'awaiting_configuration');
+  assert.equal(f.voiceEvidence[0].sessionTopLevelEcho.status, 'missing');
+  assert.equal(f.voiceEvidence[0].sessionNestedEcho.value, 'Tina');
+  assert.equal(f.voiceEvidence[1].sessionTopLevelEcho.value, 'Andre');
+  assert.equal(f.voiceEvidence[1].sessionNestedEcho.value, 'Tina');
+  assert(Object.isFrozen(confirmed.voicePolicy));
+  assert(Object.isFrozen(confirmed.voicePolicy!.responseVoiceAllowlist));
+  f.receive({ type: 'response.created', response: {
+    id: 'r1', conversation_id: '', status: 'in_progress', voice: 'Andre',
+  } });
+  f.done('r1', { voice: 'Tina', output: [], usage: { input_tokens: 2, output_tokens: 3 } });
+  f.done('r1', { voice: 'Andre', output: [], usage: { input_tokens: 200, output_tokens: 300 } });
+  assert.equal(f.errors.length, 0);
+  assert.equal(f.usages.length, 1);
+  assert.equal(f.usages[0].inputTokens, 2);
+  assert.equal(f.timings.filter((event) => event.stage === 'response_completed').length, 1);
+  assert.deepEqual(f.voiceEvidence.slice(2).map((event) => event.responseEcho.value), ['Andre', 'Tina', 'Andre']);
+  assert(f.voiceEvidence.every((event) => event.requestedVoice === 'Andre' && event.acousticVoice === 'unknown_not_measured'));
+  assert.equal(f.socket.sent[0].session.voice, 'Andre');
+  assert.equal(confirmed.sessionOutputVoiceEcho?.value, 'Tina');
+  f.done('r1', { voice: 'Aiden', output: [] });
+  assert.equal(f.errors[0].code, 'LIVETRANSLATE_CONFIGURATION_REJECTED');
+  assert.equal(f.protocolDiagnostics.at(-1).validationPath, 'response.voice');
+  assert.equal(f.protocolDiagnostics.at(-1).expected, 'Andre_or_Tina_declaration');
+  assert.equal(f.voiceEvidence.at(-1).acceptedByVoicePolicy, false);
+  assert.equal(f.voiceEvidence.at(-1).responseEcho.value, 'Aiden');
+  assert.equal(f.usages.length, 1);
+});
+
+test('a missing response declaration stays unknown while unsupported values and invalid types still stop the approved pair', async () => {
+  for (const declaration of [undefined, null, 7, true, {}, [], 'SYNTHETIC_PRIVATE_UNLISTED_VOICE']) {
+    const f = fixture('local', { voice: 'Andre', allowAndreTopLevelWithTinaOutput: true });
+    const session = f.session();
+    // eslint-disable-next-line no-await-in-loop -- Each declaration uses a separate fake protocol session.
+    await f.start({ voice: 'Andre', audio: { ...session.audio, output: { ...session.audio.output, voice: 'Tina' } } });
+    f.receive({ type: 'response.created', response: { id: 'r1', status: 'in_progress', voice: declaration } });
+    const echo = f.voiceEvidence.at(-1).responseEcho;
+    if (declaration === undefined) {
+      assert.equal(f.errors.length, 0);
+      assert.deepEqual(echo, { status: 'missing', value: null, actualType: 'missing' });
+      assert.equal(f.voiceEvidence.at(-1).acceptedByVoicePolicy, true);
+      f.client.abort();
+    } else {
+      assert.equal(f.errors[0].code, 'LIVETRANSLATE_CONFIGURATION_REJECTED');
+      assert.equal(echo.value, null);
+      assert.equal(echo.status, typeof declaration === 'string' ? 'unsupported_value' : 'invalid_type');
+      assert.equal(f.voiceEvidence.at(-1).acceptedByVoicePolicy, false);
+    }
+    assert.equal(JSON.stringify(f.voiceEvidence).includes('SYNTHETIC_PRIVATE_UNLISTED_VOICE'), false);
+    assert.equal(f.socket.sent.length, 1);
+  }
 });
 
 test('Tina, absent voice, clone uncertainty and wrong language stop with safe evidence and zero input', async () => {

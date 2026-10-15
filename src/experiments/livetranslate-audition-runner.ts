@@ -18,6 +18,7 @@ import type {
   LiveTranslateSessionConfiguration,
   LiveTranslateProtocolEvent,
   LiveTranslateProtocolDiagnostic,
+  LiveTranslateVoiceEvidence,
 } from './livetranslate-types';
 import {
   LIVETRANSLATE_AUDITION_LIMITS,
@@ -78,6 +79,8 @@ export type LiveTranslateAuditionResult = {
   observedSessionConfigurations: (LiveTranslateSessionConfiguration & {
     clipId: string;
   })[];
+  /** Separate declarations at each protocol location; never acoustic voice acceptance. */
+  voiceEvidence: (LiveTranslateVoiceEvidence & { clipId: string })[];
   audio: {
     clipId: string;
     metadata: LiveTranslateAudioMetadata;
@@ -205,6 +208,7 @@ export async function runLiveTranslateAudition(
     protocolTraceTruncated: false,
     confirmedSessions: [],
     observedSessionConfigurations: [],
+    voiceEvidence: [],
     audio: [],
     clips: input.clips.map((clip) => ({
       id: clip.id,
@@ -333,6 +337,15 @@ export async function runLiveTranslateAudition(
             ...event,
             clipId: clip.id,
           });
+        },
+        onVoiceEvidence: (event) => {
+          if (!journalOpen || stopped) return;
+          if (result.voiceEvidence.length >= 8192) {
+            result.protocolTraceTruncated = true;
+            stop('LIVETRANSLATE_AUDITION_EVENT_LIMIT');
+            return;
+          }
+          result.voiceEvidence.push({ ...event, clipId: clip.id });
         },
         onSource: (event) => {
           if (!active()) return;
@@ -522,9 +535,27 @@ export async function runLiveTranslateAudition(
         break;
       }
       const session = await fenced(client.ready);
+      const policy = session.voicePolicy;
+      const policyAck = policy?.acknowledgement;
+      const matchingPolicy = policy?.requestedVoice === voice &&
+        policy.acousticVoice === 'unknown_not_measured' &&
+        session.requestedVoice === voice &&
+        policyAck?.sessionId === session.sessionId &&
+        policyAck.eventId === session.configurationAcknowledgement?.eventId &&
+        policyAck.receiveSequence === session.configurationAcknowledgement?.receiveSequence &&
+        policyAck.receivedAt === session.configurationAcknowledgement?.receivedAt;
+      const reportedEcho = (echo: { status: string; value: unknown; actualType: string } | undefined,
+        expected: string) => echo?.status === 'reported' && echo.value === expected && echo.actualType === 'string';
+      const conflictPolicy = matchingPolicy && policy?.mode === 'approved_andre_tina_metadata_conflict' &&
+        policy.responseVoiceAllowlist.length === 2 &&
+        policy.responseVoiceAllowlist[0] === 'Andre' && policy.responseVoiceAllowlist[1] === 'Tina' &&
+        reportedEcho(policyAck?.sessionTopLevelEcho, 'Andre') &&
+        reportedEcho(policyAck?.sessionNestedEcho, 'Tina') &&
+        reportedEcho(session.sessionOutputVoiceEcho, 'Tina');
       const acceptedVoiceConflict = input.mode === 'single-local' && clip.role === 'local' &&
         voice === 'Andre' && session.voice === 'Tina' && session.requestedVoice === 'Andre' &&
         session.topLevelVoice === 'Andre' && session.voiceConfirmation === 'approved_top_level_andre_nested_tina' &&
+        conflictPolicy &&
         result.observedSessionConfigurations.some((ack) => ack.clipId === clip.id && ack.accepted &&
           ack.sessionId === session.sessionId && ack.role === clip.role && ack.model === session.model &&
           ack.voice === 'Tina' && ack.requestedVoice === 'Andre' && ack.topLevelVoice === 'Andre' &&
@@ -540,6 +571,12 @@ export async function runLiveTranslateAudition(
           warning.actualType === 'string' && warning.acknowledgement?.sessionId === session.sessionId &&
           warning.acknowledgement.eventId === session.configurationAcknowledgement?.eventId &&
           warning.acknowledgement.receiveSequence === session.configurationAcknowledgement?.receiveSequence);
+      const strictPolicy = matchingPolicy && policy?.mode === 'strict_requested_voice' &&
+        policy.responseVoiceAllowlist.length === 1 && policy.responseVoiceAllowlist[0] === voice &&
+        reportedEcho(policyAck?.sessionNestedEcho, voice) &&
+        (policyAck?.sessionTopLevelEcho.status === 'missing' ||
+          reportedEcho(policyAck?.sessionTopLevelEcho, voice)) &&
+        reportedEcho(session.sessionOutputVoiceEcho, voice);
       const acceptedMissingCloneEcho = input.mode === 'single-local' && clip.role === 'local' &&
         session.voiceCloneEnabled === null && session.voiceCloneConfirmation === 'missing_echo_warning' &&
         result.observedSessionConfigurations.some((ack) => ack.clipId === clip.id && ack.accepted &&
@@ -556,6 +593,8 @@ export async function runLiveTranslateAudition(
         (observedSessionId !== undefined &&
           observedSessionId !== session.sessionId) ||
         session.model !== LIVETRANSLATE_AUDITION_MODEL ||
+        (policy !== undefined && !strictPolicy && !acceptedVoiceConflict) ||
+        (session.voiceConfirmation === 'approved_top_level_andre_nested_tina' && !acceptedVoiceConflict) ||
         (session.voice !== voice && !acceptedVoiceConflict) ||
         (session.voiceCloneEnabled !== false && !acceptedMissingCloneEcho) ||
         session.targetLanguage !== (clip.role === 'local' ? 'en' : 'zh') ||

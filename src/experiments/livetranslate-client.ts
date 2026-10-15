@@ -22,6 +22,9 @@ import type {
   LiveTranslateProtocolDiagnostic,
   LiveTranslateProtocolValueType,
   LiveTranslateProtocolEventType,
+  LiveTranslateVoiceEcho,
+  LiveTranslateVoiceEvidence,
+  LiveTranslateVoicePolicy,
 } from './livetranslate-types';
 
 export * from './livetranslate-types';
@@ -77,6 +80,16 @@ function valueType(value: unknown): LiveTranslateProtocolValueType {
   if (typeof value === 'number') return 'number';
   if (typeof value === 'string') return 'string';
   return 'object';
+}
+function voiceEcho(value: unknown): LiveTranslateVoiceEcho {
+  const actualType = valueType(value);
+  if (value === undefined)
+    return Object.freeze({ status: 'missing', value: null, actualType });
+  if (typeof value !== 'string')
+    return Object.freeze({ status: 'invalid_type', value: null, actualType });
+  if (value === 'Aiden' || value === 'Tina' || value === 'Andre')
+    return Object.freeze({ status: 'reported', value, actualType });
+  return Object.freeze({ status: 'unsupported_value', value: null, actualType });
 }
 function protocolPath(event: any, path: string): unknown {
   let current = event;
@@ -140,7 +153,7 @@ export function createLiveTranslateClient(
   const endpoint = buildLiveTranslateEndpoint(options.workspaceId);
   const { role } = options;
   const voice = options.voice === undefined ? LIVE_TRANSLATE_VOICE : options.voice;
-  let effectiveVoice = voice;
+  let voicePolicy: LiveTranslateVoicePolicy | undefined;
   if (
     !['local', 'remote'].includes(role) ||
     !['Aiden', 'Tina', 'Andre'].includes(voice) ||
@@ -362,9 +375,14 @@ export function createLiveTranslateClient(
     if (!accepted) fail(code, undefined, undefined, { validationPath, expected, actual });
     return accepted && !closed();
   };
+  const responseVoiceAllowed = (raw: any) => raw?.voice === undefined ||
+    (typeof raw.voice === 'string' &&
+      (voicePolicy?.responseVoiceAllowlist ?? [voice]).includes(raw.voice));
   const responseConfiguration = (raw: any) =>
-    requireValue(raw?.voice === undefined || raw.voice === effectiveVoice,
-      'response.voice', effectiveVoice, raw?.voice, 'LIVETRANSLATE_CONFIGURATION_REJECTED') &&
+    requireValue(responseVoiceAllowed(raw),
+      'response.voice', voicePolicy?.mode === 'approved_andre_tina_metadata_conflict'
+        ? 'Andre_or_Tina_declaration' : voice,
+      raw?.voice, 'LIVETRANSLATE_CONFIGURATION_REJECTED') &&
     requireValue(raw?.modalities === undefined || (Array.isArray(raw.modalities) &&
       raw.modalities.length === modalities.length &&
       modalities.every((value) => raw.modalities.includes(value)) &&
@@ -380,6 +398,26 @@ export function createLiveTranslateClient(
       fail('LIVETRANSLATE_CALLBACK_FAILED');
     }
   };
+  const observeVoice = (
+    event: any,
+    acceptedByVoicePolicy: boolean | null,
+    receivedAt = now(),
+  ) => emit<LiveTranslateVoiceEvidence>(options.onVoiceEvidence, {
+    role,
+    sessionId: identifier(event.session?.id) ? event.session.id : sessionId || null,
+    responseId: identifier(event.response?.id) ? event.response.id : null,
+    eventId: event.event_id ?? null,
+    receiveSequence,
+    receivedAt,
+    eventType: event.type,
+    requestedVoice: voice,
+    sessionTopLevelEcho: voiceEcho(event.session?.voice),
+    sessionNestedEcho: voiceEcho(event.session?.audio?.output?.voice),
+    responseEcho: voiceEcho(event.response?.voice),
+    policyMode: voicePolicy?.mode ?? 'awaiting_configuration',
+    acceptedByVoicePolicy,
+    acousticVoice: 'unknown_not_measured',
+  });
   const timing = (
     stage: LiveTranslateTiming['stage'],
     metadata: Omit<
@@ -524,6 +562,11 @@ export function createLiveTranslateClient(
             eventId: chunk.eventId,
             eventIdBasis: chunk.eventIdBasis,
             sequence: audioSequence,
+            ...(voicePolicy ? { voiceContext: {
+              requestedVoice: voice,
+              policyMode: voicePolicy.mode,
+              acousticVoice: 'unknown_not_measured' as const,
+            } } : {}),
           };
           try {
             options.onAudio?.(chunk.pcm, metadata);
@@ -692,6 +735,8 @@ export function createLiveTranslateClient(
       'input_audio_buffer.committed', 'input_audio_buffer.cleared',
     ].includes(event.type)) return;
     if (event.type === 'session.created') {
+      observeVoice(event, null);
+      if (closed()) return;
       if (!requireValue(state === 'connecting', 'state', 'valid_protocol_transition', state,
         'LIVETRANSLATE_SESSION_MISMATCH') ||
         !requireValue(identifier(event.session?.id), 'session.id', 'nonempty_identifier_string', event.session?.id,
@@ -750,6 +795,19 @@ export function createLiveTranslateClient(
       ];
       const rejected = checks.find(([accepted]) => !accepted);
       const receivedAt = now();
+      const sessionOutputVoiceEcho = voiceEcho(s?.audio?.output?.voice);
+      if (!rejected) voicePolicy = Object.freeze({
+        mode: approvedVoiceConflict ? 'approved_andre_tina_metadata_conflict' : 'strict_requested_voice',
+        requestedVoice: voice,
+        responseVoiceAllowlist: Object.freeze(approvedVoiceConflict ? ['Andre', 'Tina'] as const : [voice]),
+        acknowledgement: Object.freeze({
+          sessionId, eventId: event.event_id ?? null, receiveSequence, receivedAt,
+          sessionTopLevelEcho: voiceEcho(s?.voice),
+          sessionNestedEcho: sessionOutputVoiceEcho,
+        }),
+        acousticVoice: 'unknown_not_measured',
+      });
+      observeVoice(event, !rejected, receivedAt);
       emit(options.onSessionConfiguration, {
         role,
         sessionId: identifier(s?.id) ? s.id : null,
@@ -759,6 +817,8 @@ export function createLiveTranslateClient(
         basis: 'provider_session_updated',
         model: sessionValue(s?.model, [LIVE_TRANSLATE_MODEL]),
         voice: sessionValue(s?.audio?.output?.voice, ['Aiden', 'Tina', 'Andre']),
+        sessionOutputVoiceEcho,
+        ...(!rejected ? { voicePolicy } : {}),
         requestedVoice: voice,
         topLevelVoice: sessionValue(s?.voice, ['Aiden', 'Tina', 'Andre']),
         ...(!rejected ? {
@@ -806,13 +866,14 @@ export function createLiveTranslateClient(
       clearTimeout(timer);
       timer = undefined;
       state = 'ready';
-      effectiveVoice = s.audio.output.voice;
       protocolEvent('configuration_accepted', event);
       readyResolve({
         sessionId,
         role,
         model: s.model,
         voice: s.audio.output.voice,
+        sessionOutputVoiceEcho,
+        voicePolicy,
         requestedVoice: voice,
         topLevelVoice: s.voice ?? null,
         voiceConfirmation: approvedVoiceConflict ? 'approved_top_level_andre_nested_tina' : 'exact_match',
@@ -967,6 +1028,8 @@ export function createLiveTranslateClient(
       return;
     }
     if (event.type === 'response.created') {
+      observeVoice(event, responseVoiceAllowed(event.response));
+      if (closed()) return;
       if (!requireValue(identifier(event.response?.id), 'response.id', 'nonempty_identifier_string', event.response?.id)) return;
       if (!responseConfiguration(event.response)) return;
       if (event.response.status !== 'in_progress') {
@@ -1097,11 +1160,15 @@ export function createLiveTranslateClient(
       return;
     }
     if (event.type === 'response.done') {
+      observeVoice(event, responseVoiceAllowed(event.response));
+      if (closed()) return;
       if (!requireValue(identifier(event.response?.id), 'response.id', 'nonempty_identifier_string', event.response?.id)) return;
       const parent = response(event.response.id);
-      if (!parent || parent.done) return;
-      reportUsage(event.response.id, event.response.usage);
+      if (!parent) return;
+      if (!parent.done) reportUsage(event.response.id, event.response.usage);
       if (closed()) return;
+      if (!responseConfiguration(event.response)) return;
+      if (parent.done) return;
       if (!parent.createdSeen) {
         fail('LIVETRANSLATE_RESPONSE_ORDER_UNKNOWN');
         return;
@@ -1112,7 +1179,6 @@ export function createLiveTranslateClient(
         });
         return;
       }
-      if (!responseConfiguration(event.response)) return;
       if (!requireValue(Array.isArray(event.response.output), 'response.output', 'array', event.response.output) ||
         !requireValue(event.response.output.length <= 1, 'response.output', 'single_output_item', event.response.output, 'LIVETRANSLATE_UNSUPPORTED_SCHEMA')) return;
       if (event.response.output.length === 0 && parent.outputs.size > 0) {

@@ -1,0 +1,187 @@
+{
+  "schemaVersion": 1,
+  "provenance": "actual_provider_redacted_inbound_and_captured_outbound_configuration",
+  "sourceCandidate": "4c1ad02234481ee14c1e3a4093f3c09e51e4ebfb",
+  "sourceJournal": "/workspace/ai-phone-livetranslate-andre-conflict-once-20261015/provider-events.redacted.jsonl",
+  "sourceJournalSha256": "e51d929f9a9aa6f56fd2b6526fdd8f5095646f69a9be3d19c104fbd53ead3219",
+  "captureLimit": "Exactly five real inbound frames through response.created. No audio delta, response.done, usage or session.finished captured. No later events are inferred.",
+  "sanitization": "Existing capture preserves JSON fields/types and consistently hashes identifiers; identifier values are not original wire values. No credential or audio content is included.",
+  "originalOutboundCaptured": true,
+  "outboundEvidenceBasis": "actual_application_JSON_passed_to_ws_send_not_TLS_packet_capture",
+  "outboundSerializedFile": "/workspace/ai-phone-livetranslate-andre-conflict-once-20261015/session.update.serialized.json",
+  "outboundSerializedSha256": "dafde856392e5975d39202f1b1376914660a7d1a78ca2147ffa7725f30a12211",
+  "outboundSerializedUtf8": "{\"type\":\"session.update\",\"session\":{\"output_modalities\":[\"text\",\"audio\"],\"voice\":\"Andre\",\"enable_voice_clone\":false,\"audio\":{\"input\":{\"turn_detection\":{\"type\":\"speaker_detection\",\"threshold\":0.5}}},\"translation\":{\"language\":\"en\"}}}",
+  "providerFrames": [
+    {
+      "utc": "2026-10-15T09:48:53.957Z",
+      "monotonicMs": 1289.132519,
+      "kind": "provider_frame",
+      "sequence": 1,
+      "binary": false,
+      "frameBytes": 522,
+      "event": {
+        "event_id": "id_0ad36abee267561e",
+        "type": "session.created",
+        "session": {
+          "id": "id_180cc479cc6ae609",
+          "model": "qwen3.8-livetranslate-flash-realtime",
+          "audio": {
+            "input": {
+              "format": {
+                "sample_rate": 16000,
+                "type": "pcm"
+              },
+              "turn_detection": {
+                "threshold": 0.5,
+                "silence_duration_ms": 2500,
+                "type": "speaker_detection"
+              }
+            },
+            "output": {
+              "voice": "Tina",
+              "format": {
+                "sample_rate": 24000,
+                "type": "pcm"
+              }
+            }
+          },
+          "object": "realtime.session",
+          "input_modalities": [
+            "audio"
+          ],
+          "output_modalities": [
+            "text",
+            "audio"
+          ],
+          "translation": {
+            "language": "en"
+          }
+        }
+      }
+    },
+    {
+      "utc": "2026-10-15T09:48:54.211Z",
+      "monotonicMs": 1543.132812,
+      "kind": "provider_frame",
+      "sequence": 2,
+      "binary": false,
+      "frameBytes": 685,
+      "event": {
+        "event_id": "id_e581d3d396a7e79c",
+        "type": "session.updated",
+        "session": {
+          "id": "id_180cc479cc6ae609",
+          "object": "realtime.session",
+          "model": "qwen3.8-livetranslate-flash-realtime",
+          "output_modalities": [
+            "text",
+            "audio"
+          ],
+          "input_modalities": [
+            "audio"
+          ],
+          "voice": "Andre",
+          "audio": {
+            "input": {
+              "format": {
+                "type": "pcm",
+                "sample_rate": 16000
+              },
+              "turn_detection": {
+                "type": "speaker_detection",
+                "threshold": 0.5,
+                "create_response": true,
+                "interrupt_response": true
+              }
+            },
+            "output": {
+              "format": {
+                "type": "pcm",
+                "sample_rate": 24000
+              },
+              "voice": "Tina"
+            }
+          },
+          "turn_detection": {
+            "type": "speaker_detection",
+            "threshold": 0.5,
+            "create_response": true,
+            "interrupt_response": true
+          },
+          "translation": {
+            "language": "en"
+          },
+          "enable_voice_clone": false
+        }
+      }
+    },
+    {
+      "utc": "2026-10-15T09:48:57.097Z",
+      "monotonicMs": 4429.668061,
+      "kind": "provider_frame",
+      "sequence": 3,
+      "binary": false,
+      "frameBytes": 161,
+      "event": {
+        "event_id": "id_398073ad5a66492b",
+        "type": "input_audio_buffer.speech_started",
+        "audio_start_ms": 1400,
+        "item_id": "id_ec2a2d6802ce50f9",
+        "speaker_id": 1
+      }
+    },
+    {
+      "utc": "2026-10-15T09:48:57.190Z",
+      "monotonicMs": 4522.785053,
+      "kind": "provider_frame",
+      "sequence": 4,
+      "binary": false,
+      "frameBytes": 239,
+      "event": {
+        "event_id": "id_7c5166f399975abc",
+        "type": "conversation.item.created",
+        "item": {
+          "id": "id_ec2a2d6802ce50f9",
+          "object": "realtime.item",
+          "type": "message",
+          "status": "in_progress",
+          "role": "assistant",
+          "content": [
+            {
+              "type": "input_audio"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "utc": "2026-10-15T09:48:57.191Z",
+      "monotonicMs": 4523.008152,
+      "kind": "provider_frame",
+      "sequence": 5,
+      "binary": false,
+      "frameBytes": 274,
+      "event": {
+        "event_id": "id_3c28fa2626c65ea2",
+        "type": "response.created",
+        "response": {
+          "id": "id_a9ffef4be8a305ca",
+          "object": "realtime.response",
+          "conversation_id": "id_e3b0c44298fc1c14",
+          "status": "in_progress",
+          "modalities": [
+            "text",
+            "audio"
+          ],
+          "voice": "Andre",
+          "output_audio_format": "pcm",
+          "output": []
+        }
+      }
+    }
+  ],
+  "historicalApplicationAudioAppends": 145,
+  "historicalApplicationPcmBytesSent": 92800,
+  "historicalEnglishAudioBytesReceived": 0,
+  "replayTimingBasis": "frame_order_only_not_new_model_latency"
+}

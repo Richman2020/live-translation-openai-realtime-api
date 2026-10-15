@@ -4,11 +4,52 @@ export type LiveTranslateRole = 'local' | 'remote';
 export type LiveTranslateVoice = 'Aiden' | 'Tina' | 'Andre';
 export type LiveTranslateVoiceConfirmation =
   'exact_match' | 'approved_top_level_andre_nested_tina';
+/** A declaration at one protocol location, never an acoustic measurement. */
+export type LiveTranslateVoiceEcho = {
+  status: 'missing' | 'reported' | 'unsupported_value' | 'invalid_type';
+  value: LiveTranslateVoice | null;
+  actualType: LiveTranslateProtocolValueType;
+};
+export type LiveTranslateVoicePolicy = {
+  mode: 'strict_requested_voice' | 'approved_andre_tina_metadata_conflict';
+  requestedVoice: LiveTranslateVoice;
+  /** Allowed response declarations. This does not select or identify a generated voice. */
+  responseVoiceAllowlist: readonly LiveTranslateVoice[];
+  acknowledgement: {
+    sessionId: string;
+    eventId: string | null;
+    receiveSequence: number;
+    receivedAt: number;
+    sessionTopLevelEcho: LiveTranslateVoiceEcho;
+    sessionNestedEcho: LiveTranslateVoiceEcho;
+  };
+  acousticVoice: 'unknown_not_measured';
+};
+export type LiveTranslateVoiceEvidence = {
+  role: LiveTranslateRole;
+  sessionId: string | null;
+  responseId: string | null;
+  eventId: string | null;
+  receiveSequence: number;
+  receivedAt: number;
+  eventType: 'session.created' | 'session.updated' | 'response.created' | 'response.done';
+  requestedVoice: LiveTranslateVoice;
+  sessionTopLevelEcho: LiveTranslateVoiceEcho;
+  sessionNestedEcho: LiveTranslateVoiceEcho;
+  responseEcho: LiveTranslateVoiceEcho;
+  policyMode: 'awaiting_configuration' | LiveTranslateVoicePolicy['mode'];
+  /** Voice-policy acceptance only; the event's other protocol checks still apply. */
+  acceptedByVoicePolicy: boolean | null;
+  acousticVoice: 'unknown_not_measured';
+};
 export type LiveTranslateSession = {
   sessionId: string;
   role: LiveTranslateRole;
   model: 'qwen3.8-livetranslate-flash-realtime';
+  /** Deprecated compatibility alias of sessionOutputVoiceEcho.value, not an effective voice. */
   voice: LiveTranslateVoice;
+  sessionOutputVoiceEcho?: LiveTranslateVoiceEcho;
+  voicePolicy?: LiveTranslateVoicePolicy;
   requestedVoice?: LiveTranslateVoice;
   topLevelVoice?: LiveTranslateVoice | null;
   voiceConfirmation?: LiveTranslateVoiceConfirmation;
@@ -35,7 +76,10 @@ export type LiveTranslateSessionConfiguration = {
   receivedAt: number;
   basis: 'provider_session_updated';
   model: LiveTranslateSession['model'] | 'other' | null;
+  /** Deprecated compatibility alias of the nested session echo; not an effective voice. */
   voice: LiveTranslateVoice | 'other' | null;
+  sessionOutputVoiceEcho?: LiveTranslateVoiceEcho;
+  voicePolicy?: LiveTranslateVoicePolicy;
   requestedVoice?: LiveTranslateVoice;
   topLevelVoice?: LiveTranslateVoice | 'other' | null;
   voiceConfirmation?: LiveTranslateVoiceConfirmation;
@@ -143,7 +187,7 @@ export type LiveTranslateProtocolDiagnostic = {
     'text_json_frame' | 'valid_json' | 'known_3_8_event' | 'single_output_item' |
     'single_content_part' | 'consistent_source_binding' | 'consistent_item_binding' |
     'response_created_before_output' | 'output_modality' | 'error_free_transport' |
-    'send_available' | 'handler_completed' | 'array' | 'object' | 'valid_utf8' |
+    'send_available' | 'handler_completed' | 'array' | 'object' | 'valid_utf8' | 'Andre_or_Tina_declaration' |
     'exact_input_modalities' | 'audio_input_enabled' | 'nondecreasing_offset' | 'pcm16_bytes';
   actualType: LiveTranslateProtocolValueType;
   fatal: boolean;
@@ -196,6 +240,11 @@ export type LiveTranslateAudioMetadata = {
   eventIdBasis?: 'provider_event_id' | 'local_receive_sequence';
   /** Local contiguous playback-submission order after response FIFO; not a supplier chunk sequence. */
   sequence: number;
+  voiceContext?: {
+    requestedVoice: LiveTranslateVoice;
+    policyMode: LiveTranslateVoicePolicy['mode'];
+    acousticVoice: 'unknown_not_measured';
+  };
 };
 export type LiveTranslateTiming = {
   role: LiveTranslateRole;
@@ -253,6 +302,7 @@ export type LiveTranslateClientOptions = {
   onTiming?: (event: LiveTranslateTiming) => void;
   onUsage?: (event: LiveTranslateUsage) => void;
   onSessionConfiguration?: (event: LiveTranslateSessionConfiguration) => void;
+  onVoiceEvidence?: (event: LiveTranslateVoiceEvidence) => void;
   onProtocolEvent?: (event: LiveTranslateProtocolEvent) => void;
   onProtocolDiagnostic?: (event: LiveTranslateProtocolDiagnostic) => void;
   onError?: (

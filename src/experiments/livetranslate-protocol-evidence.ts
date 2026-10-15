@@ -1,6 +1,7 @@
 import type {
   LiveTranslateProtocolDiagnostic,
   LiveTranslateProtocolEvent,
+  LiveTranslateVoiceEvidence,
 } from './livetranslate-types';
 
 type ProtocolEvidence = {
@@ -11,7 +12,13 @@ type ProtocolEvidence = {
   protocolEvents?: LiveTranslateProtocolEvent[];
   protocolDiagnostics?: LiveTranslateProtocolDiagnostic[];
   confirmedSessions?: unknown[];
-  counters: { inputBytesSent: number };
+  voiceEvidence?: LiveTranslateVoiceEvidence[];
+  status?: 'completed' | 'failed' | 'cancelled';
+  clips?: { sendCompletedAt: number | null }[];
+  audio?: { responseDoneAt: number | null }[];
+  timing?: { stage: string }[];
+  usage?: { basis?: string }[];
+  counters: { inputBytesSent: number; audioBytesSaved?: number };
 };
 
 /** Classifies only retained evidence. Absent observations never establish remote success. */
@@ -30,6 +37,9 @@ export function describeLiveTranslateProtocolEvidence(input: ProtocolEvidence) {
   const cloneWarning = diagnostics.find((item) => !item.fatal &&
     item.code === 'LIVETRANSLATE_CLONE_CONFIRMATION_MISSING' &&
     item.validationPath === 'session.enable_voice_clone' && item.actualType === 'missing');
+  const voiceWarning = diagnostics.find((item) => !item.fatal &&
+    item.code === 'LIVETRANSLATE_APPROVED_ANDRE_TINA_CONFLICT' &&
+    item.validationPath === 'session.audio.output.voice');
   const observedConfiguration = first('configuration_accepted');
   const providerError = first('provider_error');
   const transportClose = first('transport_close');
@@ -55,11 +65,36 @@ export function describeLiveTranslateProtocolEvidence(input: ProtocolEvidence) {
   else if (input.errorCode === 'LIVETRANSLATE_EVENT_INVALID') classification = 'unclassified_local_event_failure_missing_payload';
   else if (!input.errorCode && observedConfiguration && first('server_frame', 'session.finished'))
     classification = 'protocol_finished_observed';
+  const finished = !input.errorCode && !!first('server_frame', 'session.finished');
+  const responseAccepted = input.timing?.some((item) => item.stage === 'response_created') === true;
+  const audioBytes = input.counters.audioBytesSaved;
+  const fullInput = !!input.clips?.length &&
+    input.clips.every((clip) => typeof clip.sendCompletedAt === 'number' && Number.isFinite(clip.sendCompletedAt));
+  const fullAudio = input.status === 'completed' && finished && fullInput &&
+    typeof audioBytes === 'number' && audioBytes > 0 && !!input.audio?.length &&
+    input.audio.every((item) => typeof item.responseDoneAt === 'number' && Number.isFinite(item.responseDoneAt));
+  const reportedUsage = input.usage?.some((item) => item.basis === 'provider_reported') === true;
+  const unknownUsage = input.usage?.some((item) => item.basis !== 'provider_reported') === true;
   return {
     classification,
     configurationStopReason: classification === 'voice_clone_disabled_confirmation_missing'
       ? '缺少复刻关闭确认' : null,
     configurationWarning: cloneWarning ? '缺少复刻关闭确认；按用户批准策略允许就绪' : null,
+    voiceMetadataWarning: voiceWarning
+      ? '请求Andre、更新顶层Andre、嵌套Tina；按已批准的窄元数据政策继续，实际听感未知' : null,
+    voiceEvidence: input.voiceEvidence ?? [],
+    outcomes: {
+      protocol: input.errorCode ? 'stopped_with_error' : finished ? 'finished_observed' :
+        responseAccepted ? 'response_created_accepted' : observedConfiguration ? 'configuration_accepted_only' : 'not_ready',
+      fullInputSent: fullInput,
+      englishAudio: fullAudio ? 'complete_output_observed' : typeof audioBytes !== 'number'
+        ? 'unknown_no_collection_evidence' : audioBytes > 0 ? 'partial_output_preserved' : 'no_audio_observed',
+      acousticVoice: 'unknown_not_measured',
+      maleVoiceAcceptance: 'not_evaluated',
+      voiceDriftAcceptance: 'not_evaluated',
+      usage: !reportedUsage ? 'unknown_not_returned' : unknownUsage
+        ? 'partially_reported_bill_not_verified' : 'reported_bill_not_verified',
+    },
     voiceCloneDisabledConfirmation: cloneWarning || classification === 'voice_clone_disabled_confirmation_missing'
       ? 'unknown_missing_echo' : 'see_observed_configuration_if_any',
     underlyingRemoteCauseEstablished: false,
@@ -94,6 +129,7 @@ export function describeLiveTranslateProtocolEvidence(input: ProtocolEvidence) {
       observedConfiguration && (input.confirmedSessions?.length ?? 0) > 0
         ? 'see_confirmed_sessions'
         : 'unknown',
+    actualModelAndVoiceBasis: 'session_configuration_metadata_only_not_acoustic_voice',
     specificValidationCaptured: fatal !== undefined,
     note: 'Transport open is not model authentication. Requested configuration is not effective configuration. A local validation rejection does not prove the supplier rejected a voice.',
   };

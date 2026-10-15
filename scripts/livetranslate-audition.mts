@@ -387,7 +387,7 @@ export async function liveTranslateAuditionMain(
     const args = parseLiveTranslateAuditionArgs(argv);
     if (args.help) {
       write(
-        'Offline only by default: node --import tsx scripts/livetranslate-audition.mts --manifest PATH. Future --run also requires --approval PATH --out NEW_PRIVATE_DIRECTORY and a new model/voice/space-host/data/CNY authorization. Single-local requests Andre and permits only its approved top-level Andre/nested Tina conflict with a warning; the observed voice remains Tina and Andre acoustic acceptance is unverified. Dual uses Aiden. No microphone, phone, automatic playback, retry or reconnect.',
+        'Offline only by default: node --import tsx scripts/livetranslate-audition.mts --manifest PATH. Future --run also requires --approval PATH --out NEW_PRIVATE_DIRECTORY and a new model/voice/space-host/data/CNY authorization. Single-local requests Andre. Only an approved top-level Andre/nested Tina update permits Andre or Tina response declarations; each echo is retained separately and acoustic voice is unverified. Dual uses Aiden. No microphone, phone, automatic playback, retry or reconnect.',
       );
       return 0;
     }

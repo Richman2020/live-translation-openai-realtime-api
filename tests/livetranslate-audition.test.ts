@@ -1392,8 +1392,8 @@ test('single-local approval has a fresh isolated scope and cannot exchange autho
     fixedNow,
   );
   assert.equal(value.scope, LIVETRANSLATE_SINGLE_LOCAL_SCOPE);
-  assert.equal(value.scope, 'livetranslate-single-local-andre-tina-conflict-audition-v1');
-  assert.equal(value.parentCandidate, '29997d6bf545c6d6c28c3563f95b9a84c1ef3ea0');
+  assert.equal(value.scope, 'livetranslate-single-local-andre-voice-state-v1');
+  assert.equal(value.parentCandidate, '4c1ad02234481ee14c1e3a4093f3c09e51e4ebfb');
   assert.equal(value.mode, 'single-local');
   writeFileSync(path, JSON.stringify(approval(input)));
   assert.throws(

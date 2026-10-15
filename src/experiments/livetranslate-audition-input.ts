@@ -18,9 +18,9 @@ export const LIVETRANSLATE_SINGLE_LOCAL_VOICE = 'Andre';
 export const LIVETRANSLATE_AUDITION_SCOPE =
   'livetranslate-comparison-audition-v1';
 export const LIVETRANSLATE_SINGLE_LOCAL_SCOPE =
-  'livetranslate-single-local-andre-tina-conflict-audition-v1';
+  'livetranslate-single-local-andre-voice-state-v1';
 export const LIVETRANSLATE_SINGLE_LOCAL_PARENT =
-  '29997d6bf545c6d6c28c3563f95b9a84c1ef3ea0';
+  '4c1ad02234481ee14c1e3a4093f3c09e51e4ebfb';
 export type LiveTranslateAuditionMode = 'dual' | 'single-local';
 export const liveTranslateAuditionVoice = (
   mode: LiveTranslateAuditionMode = 'dual',
