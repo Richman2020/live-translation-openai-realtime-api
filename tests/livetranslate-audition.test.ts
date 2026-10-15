@@ -1275,7 +1275,8 @@ test('single-local Andre and Tina conflict confirmation without a matching warni
           role: conflict.role,
           sessionId: conflict.sessionId,
           eventId: conflict.configurationAcknowledgement.eventId,
-          receiveSequence: conflict.configurationAcknowledgement.receiveSequence,
+          receiveSequence:
+            conflict.configurationAcknowledgement.receiveSequence,
           receivedAt: conflict.configurationAcknowledgement.receivedAt,
           basis: 'provider_session_updated',
           model: conflict.model,
@@ -1293,7 +1294,10 @@ test('single-local Andre and Tina conflict confirmation without a matching warni
   };
   const result = await runLiveTranslateAudition(h.options);
   assert.equal(result.status, 'failed');
-  assert.equal(result.errorCode, 'LIVETRANSLATE_AUDITION_SESSION_CONFIG_REJECTED');
+  assert.equal(
+    result.errorCode,
+    'LIVETRANSLATE_AUDITION_SESSION_CONFIG_REJECTED',
+  );
   assert.equal(result.counters.sessions, 1);
   assert.equal(result.counters.inputBytesSent, 0);
   assert.equal(h.captured[0].allowAndreTopLevelWithTinaOutput, true);
@@ -1369,7 +1373,12 @@ test('dual clips keep both partial tail frames rather than dropping audio to fit
   assert.equal(result.status, 'completed');
   assert.equal(result.configuration.voice, 'Aiden');
   assert.ok(h.captured.every(({ voice }) => voice === 'Aiden'));
-  assert.ok(h.captured.every(({ allowAndreTopLevelWithTinaOutput }) => allowAndreTopLevelWithTinaOutput !== true));
+  assert.ok(
+    h.captured.every(
+      ({ allowAndreTopLevelWithTinaOutput }) =>
+        allowAndreTopLevelWithTinaOutput !== true,
+    ),
+  );
   assert.ok(result.confirmedSessions.every(({ voice }) => voice === 'Aiden'));
   assert.equal(result.sends.length, 1201);
   assert.deepEqual(
@@ -1393,7 +1402,10 @@ test('single-local approval has a fresh isolated scope and cannot exchange autho
   );
   assert.equal(value.scope, LIVETRANSLATE_SINGLE_LOCAL_SCOPE);
   assert.equal(value.scope, 'livetranslate-single-local-andre-voice-state-v1');
-  assert.equal(value.parentCandidate, '4c1ad02234481ee14c1e3a4093f3c09e51e4ebfb');
+  assert.equal(
+    value.parentCandidate,
+    '4c1ad02234481ee14c1e3a4093f3c09e51e4ebfb',
+  );
   assert.equal(value.mode, 'single-local');
   writeFileSync(path, JSON.stringify(approval(input)));
   assert.throws(
@@ -1685,20 +1697,44 @@ test('single-local real client plus fake wire preserves default 20ms pacing and 
   assert.ok(stages.includes('transport_open'));
   assert.ok(stages.includes('transport_close_requested'));
   assert.ok(stages.includes('transport_close'));
-  const ack = result.protocolEvents.findIndex((event) => event.stage === 'configuration_accepted');
-  const firstAppend = result.protocolEvents.findIndex((event) =>
-    event.stage === 'client_event_sent' && event.eventType === 'input_audio_buffer.append');
+  const ack = result.protocolEvents.findIndex(
+    (event) => event.stage === 'configuration_accepted',
+  );
+  const firstAppend = result.protocolEvents.findIndex(
+    (event) =>
+      event.stage === 'client_event_sent' &&
+      event.eventType === 'input_audio_buffer.append',
+  );
   assert.ok(ack >= 0 && firstAppend > ack);
   assert.equal(result.protocolDiagnostics.length, 0);
   assert.ok(!JSON.stringify(result.protocolEvents).includes('Not fifteen'));
-  const reservation = reserveLiveTranslateAuditionOutput(join(f.directory, 'journal-output'));
+  const reservation = reserveLiveTranslateAuditionOutput(
+    join(f.directory, 'journal-output'),
+  );
   writeLiveTranslateAuditionArtifacts(f.input(), result, reservation);
-  const report = JSON.parse(readFileSync(join(reservation.output, 'report.json'), 'utf8'));
-  assert.equal(report.protocolEvidence.timeline.connectionEstablished.status, 'captured');
-  assert.equal(report.protocolEvidence.timeline.sessionUpdateSubmitted.status, 'captured');
-  assert.equal(report.protocolEvidence.timeline.configurationAccepted.status, 'captured');
-  assert.equal(report.protocolEvidence.timeline.transportClosed.status, 'captured');
-  assert.equal(report.protocolEvidence.actualModelAndVoice, 'see_confirmed_sessions');
+  const report = JSON.parse(
+    readFileSync(join(reservation.output, 'report.json'), 'utf8'),
+  );
+  assert.equal(
+    report.protocolEvidence.timeline.connectionEstablished.status,
+    'captured',
+  );
+  assert.equal(
+    report.protocolEvidence.timeline.sessionUpdateSubmitted.status,
+    'captured',
+  );
+  assert.equal(
+    report.protocolEvidence.timeline.configurationAccepted.status,
+    'captured',
+  );
+  assert.equal(
+    report.protocolEvidence.timeline.transportClosed.status,
+    'captured',
+  );
+  assert.equal(
+    report.protocolEvidence.actualModelAndVoice,
+    'see_confirmed_sessions',
+  );
   assert.equal(report.protocolTraceTruncated, false);
 });
 
@@ -1708,26 +1744,33 @@ test('Andre single-local one-shot approval records pending in-session validation
   const path = join(f.directory, 'approval.json');
   writeFileSync(path, JSON.stringify(value));
   const accepted = readLiveTranslateAuditionApproval(
-    path, f.input(), candidate, fixedNow,
+    path,
+    f.input(),
+    candidate,
+    fixedNow,
   );
   assert.equal(accepted.voice, 'Andre');
   assert.equal(
-    accepted.preflight.modelAndVoiceAccess, 'verify_in_authorized_session',
+    accepted.preflight.modelAndVoiceAccess,
+    'verify_in_authorized_session',
   );
   for (const voice of ['Tina', 'Aiden']) {
     writeFileSync(path, JSON.stringify({ ...value, voice }));
     assert.throws(
-      () => readLiveTranslateAuditionApproval(path, f.input(), candidate, fixedNow),
+      () =>
+        readLiveTranslateAuditionApproval(path, f.input(), candidate, fixedNow),
       /APPROVAL_BINDING_INVALID$/u,
     );
   }
   const priorClaim: Record<string, unknown> = {
-    ...value.preflight, accountModelAccessVerified: true,
+    ...value.preflight,
+    accountModelAccessVerified: true,
   };
   delete priorClaim.modelAndVoiceAccess;
   writeFileSync(path, JSON.stringify({ ...value, preflight: priorClaim }));
   assert.throws(
-    () => readLiveTranslateAuditionApproval(path, f.input(), candidate, fixedNow),
+    () =>
+      readLiveTranslateAuditionApproval(path, f.input(), candidate, fixedNow),
     /PREFLIGHT_EVIDENCE_REQUIRED$/u,
   );
 });

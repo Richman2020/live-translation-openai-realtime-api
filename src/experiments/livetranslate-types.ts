@@ -3,7 +3,8 @@ import type WebSocket from 'ws';
 export type LiveTranslateRole = 'local' | 'remote';
 export type LiveTranslateVoice = 'Aiden' | 'Tina' | 'Andre';
 export type LiveTranslateVoiceConfirmation =
-  'exact_match' | 'approved_top_level_andre_nested_tina';
+  | 'exact_match'
+  | 'approved_top_level_andre_nested_tina';
 /** A declaration at one protocol location, never an acoustic measurement. */
 export type LiveTranslateVoiceEcho = {
   status: 'missing' | 'reported' | 'unsupported_value' | 'invalid_type';
@@ -32,7 +33,11 @@ export type LiveTranslateVoiceEvidence = {
   eventId: string | null;
   receiveSequence: number;
   receivedAt: number;
-  eventType: 'session.created' | 'session.updated' | 'response.created' | 'response.done';
+  eventType:
+    | 'session.created'
+    | 'session.updated'
+    | 'response.created'
+    | 'response.done';
   requestedVoice: LiveTranslateVoice;
   sessionTopLevelEcho: LiveTranslateVoiceEcho;
   sessionNestedEcho: LiveTranslateVoiceEcho;
@@ -88,70 +93,158 @@ export type LiveTranslateSessionConfiguration = {
   accepted: boolean;
 };
 export const LIVE_TRANSLATE_PROTOCOL_EVENT_TYPES = [
-  'error', 'session.created', 'session.updated', 'session.finished',
-  'session.update', 'session.finish', 'input_audio_buffer.append',
-  'input_audio_buffer.speech_started', 'input_audio_buffer.speech_stopped',
-  'input_audio_buffer.committed', 'input_audio_buffer.cleared',
+  'error',
+  'session.created',
+  'session.updated',
+  'session.finished',
+  'session.update',
+  'session.finish',
+  'input_audio_buffer.append',
+  'input_audio_buffer.speech_started',
+  'input_audio_buffer.speech_stopped',
+  'input_audio_buffer.committed',
+  'input_audio_buffer.cleared',
   'conversation.item.created',
   'conversation.item.input_audio_transcription.delta',
   'conversation.item.input_audio_transcription.completed',
   'conversation.item.input_audio_transcription.failed',
   'conversation.item.input_audio_transcription.text',
-  'response.created', 'response.done', 'response.text.delta',
-  'response.text.text', 'response.text.done',
-  'response.audio_transcript.delta', 'response.audio_transcript.text',
-  'response.audio_transcript.done', 'response.audio.delta', 'response.audio.done',
-  'response.output_item.added', 'response.output_item.done',
-  'response.content_part.added', 'response.content_part.done',
+  'response.created',
+  'response.done',
+  'response.text.delta',
+  'response.text.text',
+  'response.text.done',
+  'response.audio_transcript.delta',
+  'response.audio_transcript.text',
+  'response.audio_transcript.done',
+  'response.audio.delta',
+  'response.audio.done',
+  'response.output_item.added',
+  'response.output_item.done',
+  'response.content_part.added',
+  'response.content_part.done',
 ] as const;
 export type LiveTranslateProtocolEventType =
-  (typeof LIVE_TRANSLATE_PROTOCOL_EVENT_TYPES)[number] | 'unknown' | null;
+  | (typeof LIVE_TRANSLATE_PROTOCOL_EVENT_TYPES)[number]
+  | 'unknown'
+  | null;
 export const LIVE_TRANSLATE_PROTOCOL_SCHEMA_PATHS = [
-  'type', 'event_id', 'session_id', 'code', 'message', 'request_id',
-  'error', 'error.type', 'error.code', 'error.message', 'error.param',
-  'session', 'session.id', 'session.object', 'session.model',
-  'session.input_modalities', 'session.output_modalities', 'session.voice',
-  'session.enable_voice_clone', 'session.audio', 'session.audio.input',
-  'session.audio.input.format', 'session.audio.input.format.type',
-  'session.audio.input.format.sample_rate', 'session.audio.input.turn_detection',
+  'type',
+  'event_id',
+  'session_id',
+  'code',
+  'message',
+  'request_id',
+  'error',
+  'error.type',
+  'error.code',
+  'error.message',
+  'error.param',
+  'session',
+  'session.id',
+  'session.object',
+  'session.model',
+  'session.input_modalities',
+  'session.output_modalities',
+  'session.voice',
+  'session.enable_voice_clone',
+  'session.audio',
+  'session.audio.input',
+  'session.audio.input.format',
+  'session.audio.input.format.type',
+  'session.audio.input.format.sample_rate',
+  'session.audio.input.turn_detection',
   'session.audio.input.turn_detection.type',
   'session.audio.input.turn_detection.threshold',
   'session.audio.input.turn_detection.silence_duration_ms',
-  'session.audio.output', 'session.audio.output.format',
-  'session.audio.output.format.type', 'session.audio.output.format.sample_rate',
-  'session.audio.output.voice', 'session.translation', 'session.translation.language',
-  'response', 'response.id', 'response.object', 'response.status',
-  'response.conversation_id', 'response.modalities', 'response.voice',
-  'response.output_audio_format', 'response.output', 'response.usage',
-  'response.output.0', 'response.output.0.id', 'response.output.0.type',
-  'response.output.0.role', 'response.output.0.status', 'response.output.0.content',
-  'response.output.0.content.0', 'response.output.0.content.0.type',
-  'response.output.0.content.0.text', 'response.output.0.content.0.transcript',
-  'response.usage.input_tokens', 'response.usage.output_tokens',
-  'response.usage.total_tokens', 'response.usage.input_tokens_details',
+  'session.audio.output',
+  'session.audio.output.format',
+  'session.audio.output.format.type',
+  'session.audio.output.format.sample_rate',
+  'session.audio.output.voice',
+  'session.translation',
+  'session.translation.language',
+  'response',
+  'response.id',
+  'response.object',
+  'response.status',
+  'response.conversation_id',
+  'response.modalities',
+  'response.voice',
+  'response.output_audio_format',
+  'response.output',
+  'response.usage',
+  'response.output.0',
+  'response.output.0.id',
+  'response.output.0.type',
+  'response.output.0.role',
+  'response.output.0.status',
+  'response.output.0.content',
+  'response.output.0.content.0',
+  'response.output.0.content.0.type',
+  'response.output.0.content.0.text',
+  'response.output.0.content.0.transcript',
+  'response.usage.input_tokens',
+  'response.usage.output_tokens',
+  'response.usage.total_tokens',
+  'response.usage.input_tokens_details',
   'response.usage.input_tokens_details.audio_tokens',
   'response.usage.input_tokens_details.text_tokens',
   'response.usage.output_tokens_details',
   'response.usage.output_tokens_details.audio_tokens',
   'response.usage.output_tokens_details.text_tokens',
-  'response_id', 'item_id', 'previous_item_id', 'output_index', 'content_index',
-  'delta', 'text', 'transcript', 'audio', 'audio_start_ms', 'audio_end_ms',
-  'speaker_id', 'language', 'emotion', 'item', 'item.id', 'item.role',
-  'item.object', 'item.type', 'item.status', 'item.content', 'part', 'part.type',
+  'response_id',
+  'item_id',
+  'previous_item_id',
+  'output_index',
+  'content_index',
+  'delta',
+  'text',
+  'transcript',
+  'audio',
+  'audio_start_ms',
+  'audio_end_ms',
+  'speaker_id',
+  'language',
+  'emotion',
+  'item',
+  'item.id',
+  'item.role',
+  'item.object',
+  'item.type',
+  'item.status',
+  'item.content',
+  'part',
+  'part.type',
 ] as const;
 export type LiveTranslateProtocolSchemaPath =
   (typeof LIVE_TRANSLATE_PROTOCOL_SCHEMA_PATHS)[number];
 export type LiveTranslateProtocolValueType =
-  'missing' | 'null' | 'boolean' | 'number' | 'string' | 'array' | 'object' | 'binary';
+  | 'missing'
+  | 'null'
+  | 'boolean'
+  | 'number'
+  | 'string'
+  | 'array'
+  | 'object'
+  | 'binary';
 export type LiveTranslateProtocolEvent = {
   role: LiveTranslateRole;
   at: number;
-  stage: 'transport_open' | 'server_frame' | 'client_event_sent' |
-    'configuration_accepted' | 'provider_error' | 'transport_close' |
-    'transport_error' | 'transport_close_requested';
+  stage:
+    | 'transport_open'
+    | 'server_frame'
+    | 'client_event_sent'
+    | 'configuration_accepted'
+    | 'provider_error'
+    | 'transport_close'
+    | 'transport_error'
+    | 'transport_close_requested';
   eventType: LiveTranslateProtocolEventType;
   eventIdPresent: boolean;
-  schema: Partial<Record<LiveTranslateProtocolSchemaPath, LiveTranslateProtocolValueType>>;
+  schema: Partial<
+    Record<LiveTranslateProtocolSchemaPath, LiveTranslateProtocolValueType>
+  >;
   unknownKeyCount: number;
   frameBytes?: number;
   frameBinary?: boolean;
@@ -163,9 +256,16 @@ export type LiveTranslateProtocolEvent = {
     code: 'invalid_value' | 'other' | null;
     type: 'invalid_request_error' | 'other' | null;
     /** Known protocol parameter paths; not an inferred provider error enumeration. */
-    parameter: 'session.modalities' | 'session.voice' | 'session.output_modalities' |
-      'session.enable_voice_clone' | 'session.translation.language' |
-      'session.audio.input.format' | 'session.audio.output.format' | 'other' | null;
+    parameter:
+      | 'session.modalities'
+      | 'session.voice'
+      | 'session.output_modalities'
+      | 'session.enable_voice_clone'
+      | 'session.translation.language'
+      | 'session.audio.input.format'
+      | 'session.audio.output.format'
+      | 'other'
+      | null;
   };
 };
 export type LiveTranslateProtocolDiagnostic = {
@@ -173,22 +273,71 @@ export type LiveTranslateProtocolDiagnostic = {
   at: number;
   stage: 'connecting' | 'configuring' | 'ready' | 'finishing' | 'closed';
   eventType: LiveTranslateProtocolEventType;
-  validationPath: LiveTranslateProtocolSchemaPath | 'frame' | 'frame.binary' | 'frame.bytes' | 'frame.utf8' |
-    'transport.send' | 'transport.ready_timeout' | 'transport.finish_timeout' |
-    'json' | 'state' | 'internal.handler' |
-    'source.binding' | 'source.translation' | 'response.audio.done' | 'response.text.done';
-  expected: 'json_object' | 'event_type_string' | 'optional_identifier_string' |
-    'nonempty_identifier_string' | 'matching_session_id' | 'exact_model' |
-    'exact_output_modalities' | 'pcm' | '16000' | '24000' | 'Aiden' | 'Tina' | 'Andre' | 'false' |
-    'speaker_detection' | '0.5' | 'target_language' | 'nonnegative_integer' |
-    'zero_index' | 'text_within_limit' | 'base64_pcm16' | 'completed' |
-    'in_progress' | 'pending_output_complete' | 'no_provider_error' |
-    'valid_protocol_transition' | 'bounded_capacity' | 'valid_callback' |
-    'text_json_frame' | 'valid_json' | 'known_3_8_event' | 'single_output_item' |
-    'single_content_part' | 'consistent_source_binding' | 'consistent_item_binding' |
-    'response_created_before_output' | 'output_modality' | 'error_free_transport' |
-    'send_available' | 'handler_completed' | 'array' | 'object' | 'valid_utf8' | 'Andre_or_Tina_declaration' |
-    'exact_input_modalities' | 'audio_input_enabled' | 'nondecreasing_offset' | 'pcm16_bytes';
+  validationPath:
+    | LiveTranslateProtocolSchemaPath
+    | 'frame'
+    | 'frame.binary'
+    | 'frame.bytes'
+    | 'frame.utf8'
+    | 'transport.send'
+    | 'transport.ready_timeout'
+    | 'transport.finish_timeout'
+    | 'json'
+    | 'state'
+    | 'internal.handler'
+    | 'source.binding'
+    | 'source.translation'
+    | 'response.audio.done'
+    | 'response.text.done';
+  expected:
+    | 'json_object'
+    | 'event_type_string'
+    | 'optional_identifier_string'
+    | 'nonempty_identifier_string'
+    | 'matching_session_id'
+    | 'exact_model'
+    | 'exact_output_modalities'
+    | 'pcm'
+    | '16000'
+    | '24000'
+    | 'Aiden'
+    | 'Tina'
+    | 'Andre'
+    | 'false'
+    | 'speaker_detection'
+    | '0.5'
+    | 'target_language'
+    | 'nonnegative_integer'
+    | 'zero_index'
+    | 'text_within_limit'
+    | 'base64_pcm16'
+    | 'completed'
+    | 'in_progress'
+    | 'pending_output_complete'
+    | 'no_provider_error'
+    | 'valid_protocol_transition'
+    | 'bounded_capacity'
+    | 'valid_callback'
+    | 'text_json_frame'
+    | 'valid_json'
+    | 'known_3_8_event'
+    | 'single_output_item'
+    | 'single_content_part'
+    | 'consistent_source_binding'
+    | 'consistent_item_binding'
+    | 'response_created_before_output'
+    | 'output_modality'
+    | 'error_free_transport'
+    | 'send_available'
+    | 'handler_completed'
+    | 'array'
+    | 'object'
+    | 'valid_utf8'
+    | 'Andre_or_Tina_declaration'
+    | 'exact_input_modalities'
+    | 'audio_input_enabled'
+    | 'nondecreasing_offset'
+    | 'pcm16_bytes';
   actualType: LiveTranslateProtocolValueType;
   fatal: boolean;
   code: string;
@@ -279,6 +428,8 @@ export type LiveTranslateUsage = {
 };
 export type LiveTranslateClientOptions = {
   enabled?: boolean;
+  /** Trusted server selection. Phone retains a bounded active window instead of a cumulative audition cap. */
+  usage?: 'audition' | 'phone';
   role: LiveTranslateRole;
   /** Trusted caller policy; standalone and duplex clients retain Aiden by default. */
   voice?: LiveTranslateVoice;
@@ -317,6 +468,18 @@ export type LiveTranslateClient = {
   append(pcm16k: Buffer): void;
   finish(): Promise<void>;
   abort(): void;
+  /** Counts only; no text, audio, provider identifiers or credentials. */
+  retentionSnapshot?: () => LiveTranslateRetentionSnapshot;
+};
+export type LiveTranslateRetentionSnapshot = {
+  usage: 'audition' | 'phone';
+  activeSources: number;
+  activeTranslations: number;
+  activeResponses: number;
+  pendingAssociations: number;
+  retainedEventIds: number;
+  terminalIdentifiers: number;
+  sourceOffsetFloorMs: number;
 };
 
 /** Exact fixed local diagnoses; arbitrary provider text/prefixes never qualify. */
@@ -356,6 +519,8 @@ export const LIVE_TRANSLATE_FAILURE_CODES = [
   'LIVETRANSLATE_SEND_UNAVAILABLE',
   'LIVETRANSLATE_SESSION_MISMATCH',
   'LIVETRANSLATE_SOURCE_CONFLICT',
+  'LIVETRANSLATE_SOURCE_ANCHOR_MISSING',
+  'LIVETRANSLATE_SOURCE_RETIRED',
   'LIVETRANSLATE_TRANSCRIPT_INVALID',
   'LIVETRANSLATE_UNEXPECTED_AUDIO',
   'LIVETRANSLATE_UNEXPECTED_FINISH',

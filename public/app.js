@@ -449,7 +449,9 @@
     if (!visible) { node.textContent = ''; return; }
     if (!activeSession) { node.textContent = record?.endedAt ? '通话已结束；以上字幕可能包含未定稿内容。' : '接通后单独显示字幕连接状态；英文原声无需等待字幕。'; return; }
     if (!eventsOnline) { node.textContent = '字幕状态连接恢复中；电话音频使用独立连接。'; return; }
-    node.textContent = captionStatus?.state === 'failed'
+    node.textContent = activeSession?.translationStopped === true || captionStatus?.translationStopped === true
+      ? '翻译已停止，电话仍在进行；可听对方原声。请手动挂断后检查，系统不会自动重连或切换模型。'
+      : captionStatus?.state === 'failed'
       ? '中文字幕暂不可用；英文原声继续传送，通话仍可继续。'
       : captionStatus?.state === 'ready'
       ? '字幕连接已就绪 · 正在识别英文并翻译中文；“更新中”为未定稿。'
@@ -617,7 +619,7 @@
   function applyCaptionStatus(value) {
     if (!value || !activeSession || !usesRemoteCaptions(activeSession.translationEngine) || value.sessionId !== activeSession.id || terminal(activeSession.status) || activeSession.status === 'ending') return;
     if (!['connecting', 'ready', 'failed'].includes(value.state)) return;
-    captionStatus = { sessionId: value.sessionId, state: value.state };
+    captionStatus = { sessionId: value.sessionId, state: value.state, translationStopped: value.translationStopped === true };
     renderCaptionStatus();
   }
   function applyTranslationConnection(value) {

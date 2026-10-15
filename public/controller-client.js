@@ -26,7 +26,7 @@ const disconnect = call => { try { call?.disconnect?.(); } catch { /* Cleanup mu
 const validId = value => typeof value === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(value);
 function safeCall(call) {
   if (!call || !validId(call.id) || typeof call.status !== 'string') return null;
-  return Object.freeze(Object.fromEntries(['id', 'status', 'to', 'from', 'translationEngine', 'translationReady', 'captionState', 'outgoingCaptionState', 'error', 'cleanupUnconfirmed']
+  return Object.freeze(Object.fromEntries(['id', 'status', 'to', 'from', 'translationEngine', 'translationReady', 'captionState', 'outgoingCaptionState', 'translationStopped', 'error', 'cleanupUnconfirmed']
     .filter(key => typeof call[key] === 'string' || typeof call[key] === 'boolean')
     .map(key => [key, call[key]])));
 }

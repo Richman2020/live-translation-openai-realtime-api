@@ -32,6 +32,7 @@ import {
 } from './cloud-translation-selection';
 import { freezePhoneTranslationSelection } from './aliyun-planb-config';
 import { diagnosticLogRecord } from './diagnostic-log';
+import { reportCloudLiveTranslateDiagnostic } from './livetranslate-phone-diagnostics';
 
 /** Only this content-free event reaches the selected Plan B runtime log. */
 export function reportCloudPlanBTiming(event: {
@@ -431,6 +432,8 @@ export async function createCloudService(
     manager.on('diagnostic', reportCloudCallTermination);
     if (translationProvider.provider === 'aliyun-plan-b')
       manager.on('event', reportCloudPlanBTiming);
+    if (translationProvider.provider === 'aliyun-livetranslate')
+      manager.on('event', reportCloudLiveTranslateDiagnostic);
     const leases = new CloudControllerLeases({ policy: login.policy, now });
     const voice = new CloudVoiceJoin({
       policy: login.policy,
@@ -454,7 +457,7 @@ export async function createCloudService(
       allowedTranslationEngines: ['continuous-captions'],
       defaultTranslationEngine: 'continuous-captions',
       outgoingPairedCaptions:
-        translationProvider.provider === 'aliyun-plan-b' ||
+        translationProvider.provider !== 'openai' ||
         config.outgoingPairedCaptions,
       maintainAuthentication: (context, callId) =>
         login!.renewFromVerifiedCall(context, callId),

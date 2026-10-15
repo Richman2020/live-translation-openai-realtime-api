@@ -162,12 +162,13 @@ export async function startControlledWorkbench() {
             : '输入号码直接拨打。其他页面正在通话或线路清理未确认时，请等待。');
     let connectionText = call ? statusNames[call.status] || '等待电话状态确认' : '等待开始';
     if (call?.status === 'active' && (!sdkAccepted || sdkCallId !== call.id)) connectionText = '服务器通话已开始 · 本页音频未确认连接';
+    else if (call?.status === 'active' && call.translationStopped === true) connectionText = '电话仍在进行 · 翻译已停止';
     else if (call?.status === 'active' && !call.translationReady) connectionText = '电话已接通 · 译音线路准备中';
     if (sdkAccepted && call?.status !== 'active') connectionText = '浏览器音频已连接 · 等待对方接听';
     if (snapshot.cleanupPending) connectionText = '线路关闭待确认';
     text('connection-text', connectionText);
     text('connection-mode-label', !currentEngine ? '等待翻译策略确认' : continuous ? '连续英文译音 · 英文原声回程' : 'Pocket Michael 英文译音 · 英文原声回程');
-    text('bridge-caption', call?.status === 'active' && sdkAccepted && call.translationReady ? '译音线路已就绪 · 请按字幕辅助交流' : '等待电话接通与译音线路就绪');
+    text('bridge-caption', call?.translationStopped === true ? '翻译已停止 · 电话仍在进行，请手动挂断后检查' : call?.status === 'active' && sdkAccepted && call.translationReady ? '译音线路已就绪 · 请按字幕辅助交流' : '等待电话接通与译音线路就绪');
     text('return-audio-label', 'English 原声 + 中文字幕');
     $('connection-status').classList.toggle('active', call?.status === 'active' && sdkAccepted);
     const remoteCaption = captionState?.state || call?.captionState;
@@ -177,7 +178,9 @@ export async function startControlledWorkbench() {
       ? '本页逐句文字暂不可用；连续英文译音走独立线路。'
       : localCaption === 'ready' ? '本页逐句文字旁路已就绪。'
         : localCaption === 'connecting' ? '本页逐句文字正在准备。' : '';
-    text('caption-status', localCaptionMessage + remoteCaptionMessage);
+    text('caption-status', call?.translationStopped === true || captionState?.translationStopped === true
+      ? '翻译已停止，电话仍在进行；可听对方原声。请手动挂断后检查，系统不会自动重连或切换模型。'
+      : localCaptionMessage + remoteCaptionMessage);
     $('caption-status').hidden = !call;
     applySession(call, snapshot);
   }

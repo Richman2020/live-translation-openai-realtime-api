@@ -15,7 +15,12 @@ import {
   type ContinuousTranslationOptions,
   type ContinuousTranslationTransportUsage,
 } from './continuous-translation-client';
-import { muLawToPcm16, Pcm24kToPcmu, PcmuToPcm24k } from './translation-pcm';
+import {
+  muLawToPcm16,
+  Pcm24kToPcmu,
+  PcmuToPcm24k,
+  PcmuToPcm16k,
+} from './translation-pcm';
 import { createNanoTextCommitter } from './nano-text-committer';
 import {
   createOutgoingPrefixClient,
@@ -55,6 +60,11 @@ export type LocalVoiceSynthesizer = {
   }>;
 };
 export type ContinuousTranslationBridgeOptions = TranslationBridgeOptions & {
+  /** Trusted provider adapter only; the existing OpenAI paths remain 24 kHz. */
+  inputSampleRate?: 16000 | 24000;
+  /** Trusted selected-provider policy. Legacy providers keep call-fatal errors;
+   * this callback opts only model-side failures into translation-only stop. */
+  onTranslationFailure?: (role: TranslationRole, reason: string) => void;
   /** Trusted per-call DI only; never selected by a browser or environment flag. */
   callContext?: ReturnType<typeof createCallContext>;
   createClient?: (
@@ -95,7 +105,8 @@ export type ContinuousBridgeAudioAdmission = {
     | 'remote_captions'
     | 'return_original';
   stage: 'connect' | 'input' | 'output';
-  /** PCM16 at 24 kHz, except return_original which is PCMU at 8 kHz. */
+  /** Input PCM16 uses the selected 16/24 kHz rate; output is PCM24k.
+   * return_original is always unmodified PCMU at 8 kHz. */
   bytes: number;
   audioMs: number;
 };
@@ -123,7 +134,7 @@ type Phone = {
 type Provider = {
   client?: ContinuousTranslationClient;
   ready: boolean;
-  input: PcmuToPcm24k;
+  input: PcmuToPcm24k | PcmuToPcm16k;
   output: Pcm24kToPcmu;
   outputEpoch?: number;
   transcript: string;
@@ -250,6 +261,8 @@ export class ContinuousTranslationBridge {
 
   private closed = false;
 
+  private translationStopped = false;
+
   private providerConnectionSequence = 0;
 
   private readonly nanoAbort = new AbortController();
@@ -282,7 +295,7 @@ export class ContinuousTranslationBridge {
 
   private captionFailed = false;
 
-  private readonly captionInput = new PcmuToPcm24k();
+  private readonly captionInput: PcmuToPcm24k | PcmuToPcm16k;
 
   private captionPending: Buffer[] = [];
 
@@ -317,6 +330,19 @@ export class ContinuousTranslationBridge {
 
   constructor(private readonly options: ContinuousTranslationBridgeOptions) {
     this.callContext = options.callContext ?? createCallContext();
+    if (
+      options.inputSampleRate !== undefined &&
+      ![16000, 24000].includes(options.inputSampleRate)
+    )
+      throw new Error('INVALID_CONTINUOUS_INPUT_RATE');
+    if (
+      options.inputSampleRate === 16000 &&
+      (options.localVoice ||
+        options.outgoingPrefixes ||
+        options.outgoingCaptions)
+    )
+      throw new Error('INVALID_CONTINUOUS_INPUT_RATE');
+    this.captionInput = this.inputConverter();
     const timeout = options.playbackTimeoutMs ?? 20000;
     if (!Number.isFinite(timeout) || timeout < 1 || timeout > 120000)
       throw new Error('INVALID_CONTINUOUS_PLAYBACK_TIMEOUT');
@@ -539,6 +565,96 @@ export class ContinuousTranslationBridge {
     this.shutdown();
   }
 
+  /** A trusted adapter may stop only translation after a model failure.
+   * Keep authenticated phone listeners and the independent remote-original
+   * route alive; phone/owner loss and manual end still own both call legs. */
+  public stopTranslation(): void {
+    if (this.closed || this.translationStopped) return;
+    this.translationStopped = true;
+    this.captionFailed = true;
+    this.captionReady = false;
+    this.captionPending = [];
+    this.captionPendingBytes = 0;
+    this.captionInput.reset();
+    for (const client of [this.captionClient, this.outgoingCaptionClient]) {
+      try {
+        client?.abort();
+      } catch {
+        /* Continue resource cleanup. */
+      }
+    }
+    for (const [role, provider] of this.providers) {
+      provider.ready = false;
+      try {
+        provider.client?.abort();
+      } catch {
+        /* Continue resource cleanup. */
+      }
+      provider.input.reset();
+      provider.output.reset();
+      this.connection(role, 'disconnected');
+    }
+    for (const phone of this.phones.values()) {
+      phone.pending = [];
+      phone.pendingBytes = 0;
+    }
+    for (const [name, delivery] of this.deliveries) {
+      // eslint-disable-next-line no-continue -- Preserve independent remote-original deliveries.
+      if (delivery.role !== 'local') continue;
+      clearTimeout(delivery.timer);
+      this.deliveries.delete(name);
+      const phone = this.phones.get(delivery.recipientRole);
+      if (phone)
+        phone.outstandingBytes = Math.max(
+          0,
+          phone.outstandingBytes - delivery.generatedBytes,
+        );
+      this.diagnostic(delivery, 'unconfirmed');
+    }
+    for (const id of this.pendingUtterances)
+      this.utterancePlayback(id, 'cancelled');
+    this.pendingUtterances.clear();
+    this.utteranceDeliveryCounts.clear();
+    const remote = this.phones.get('remote');
+    if (remote?.socket.readyState === WebSocket.OPEN) {
+      try {
+        remote.socket.send(
+          JSON.stringify({ event: 'clear', streamSid: remote.streamSid }),
+          () => {},
+        );
+      } catch {
+        /* Phone owner still handles a real media failure. */
+      }
+    }
+    try {
+      this.options.onCaptionState?.({
+        state: 'failed',
+        translationStopped: true,
+      });
+    } catch {
+      /* Status is not phone ownership. */
+    }
+  }
+
+  private inputConverter(): PcmuToPcm24k | PcmuToPcm16k {
+    return this.options.inputSampleRate === 16000
+      ? new PcmuToPcm16k()
+      : new PcmuToPcm24k();
+  }
+
+  private translationFailure(role: TranslationRole, reason: string): void {
+    if (!this.options.onTranslationFailure) {
+      this.shutdown(reason);
+      return;
+    }
+    this.stopTranslation();
+    try {
+      this.options.onTranslationFailure(role, reason);
+    } catch {
+      /* Phone ownership cannot depend on a failure observer. */
+    }
+  }
+
   private listen(
     socket: WebSocket,
     name: string,
@@ -575,10 +691,11 @@ export class ContinuousTranslationBridge {
   }
 
   private startProvider(role: TranslationRole): void {
+    if (this.translationStopped) return;
     if (!this.admit(role, 'native_translation', 'connect', 0, 0)) return;
     const provider: Provider = {
       ready: false,
-      input: new PcmuToPcm24k(),
+      input: this.inputConverter(),
       output: new Pcm24kToPcmu(),
       transcript: '',
       transcriptSequence: 0,
@@ -639,7 +756,10 @@ export class ContinuousTranslationBridge {
               // Never expose provider errors, credentials, audio or transcripts.
               onError: (code) => {
                 this.providerFailureDiagnostic(role, { reason: code });
-                this.shutdown(`continuous_provider_failed:${role}`);
+                this.translationFailure(
+                  role,
+                  `continuous_provider_failed:${role}`,
+                );
               },
             });
       provider.client = client;
@@ -653,7 +773,12 @@ export class ContinuousTranslationBridge {
           : client.ready;
       readiness
         .then(() => {
-          if (this.closed || this.providers.get(role) !== provider) return;
+          if (
+            this.closed ||
+            this.translationStopped ||
+            this.providers.get(role) !== provider
+          )
+            return;
           provider.ready = true;
           this.connection(role, 'ready');
           const phone = this.phones.get(role);
@@ -666,9 +791,12 @@ export class ContinuousTranslationBridge {
             this.append(role, provider, chunk);
           }
         })
-        .catch(() => this.shutdown(`continuous_provider_failed:${role}`));
+        .catch(() => {
+          if (!this.translationStopped)
+            this.translationFailure(role, `continuous_provider_failed:${role}`);
+        });
     } catch {
-      this.shutdown(`continuous_provider_failed:${role}`);
+      this.translationFailure(role, `continuous_provider_failed:${role}`);
     }
   }
 
@@ -755,6 +883,10 @@ export class ContinuousTranslationBridge {
 
   private failCaptions(): void {
     if (this.closed || this.captionFailed) return;
+    if (this.options.onTranslationFailure) {
+      this.translationFailure('remote', 'continuous_provider_failed:remote');
+      return;
+    }
     if (this.options.captionFailureEndsCall) {
       this.shutdown('continuous_provider_failed:remote');
       return;
@@ -773,6 +905,7 @@ export class ContinuousTranslationBridge {
   }
 
   private startCaptions(): void {
+    if (this.translationStopped) return;
     this.captionState('connecting');
     if (!this.admit('remote', 'remote_captions', 'connect', 0, 0)) return;
     try {
@@ -864,7 +997,7 @@ export class ContinuousTranslationBridge {
             'remote_captions',
             'input',
             pcm.length,
-            pcm.length / 48,
+            pcm.length / ((this.options.inputSampleRate ?? 24000) / 500),
           )
         )
           return;
@@ -919,12 +1052,14 @@ export class ContinuousTranslationBridge {
   ): NonNullable<RemoteCaptionOptions['createWebSocket']> {
     const active = () =>
       !this.closed &&
+      !this.translationStopped &&
       (path === 'native_translation' ||
         !(path === 'outgoing_captions'
           ? this.outgoingCaptionFailed
           : this.captionFailed));
     return (url, settings) => {
-      const connectionId = `provider_${++this.providerConnectionSequence}`;
+      this.providerConnectionSequence += 1;
+      const connectionId = `provider_${this.providerConnectionSequence}`;
       // Recheck each native/ASR/text creation after branch-level preflight.
       if (
         !active() ||
@@ -1152,13 +1287,17 @@ export class ContinuousTranslationBridge {
       )
         return;
       this.forwardOriginal(audio);
-      this.appendCaption(audio);
+      if (!this.translationStopped) this.appendCaption(audio);
       return;
     }
+    if (this.translationStopped) return;
     const provider = this.providers.get(role);
     if (!provider?.ready) {
       if (phone.pendingBytes + audio.length > MAX_PENDING_BYTES) {
-        this.shutdown(`continuous_input_before_ready_overflow:${role}`);
+        this.translationFailure(
+          role,
+          `continuous_input_before_ready_overflow:${role}`,
+        );
         return;
       }
       phone.pending.push(audio);
@@ -1192,14 +1331,14 @@ export class ContinuousTranslationBridge {
             'native_translation',
             'input',
             pcm.length,
-            pcm.length / 48,
+            pcm.length / ((this.options.inputSampleRate ?? 24000) / 500),
           )
         )
           return;
         provider.client.append(pcm);
       }
     } catch {
-      this.shutdown(`continuous_input_send_failed:${role}`);
+      this.translationFailure(role, `continuous_input_send_failed:${role}`);
     }
   }
 
@@ -1209,7 +1348,12 @@ export class ContinuousTranslationBridge {
     pcm: Buffer,
     metadata?: ContinuousTranslationAudioMetadata,
   ): void {
-    if (this.closed || this.providers.get(role) !== provider) return;
+    if (
+      this.closed ||
+      this.translationStopped ||
+      this.providers.get(role) !== provider
+    )
+      return;
     if (role === 'local' && this.options.localVoice) return;
     if (
       !this.admit(

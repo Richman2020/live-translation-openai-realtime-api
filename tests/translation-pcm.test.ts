@@ -6,6 +6,7 @@ import {
   pcm16ToMuLaw,
   Pcm24kToPcmu,
   PcmuToPcm24k,
+  PcmuToPcm16k,
   TRANSLATION_PCM_FILTER_DELAY_MS,
 } from '../src/solo/translation-pcm';
 
@@ -78,6 +79,47 @@ test('PCMU upsampling is byte-identical across arbitrary chunk boundaries', () =
   );
   assert.deepEqual(actual, expected);
   assert.equal(actual.length, input.length * 6);
+});
+
+test('16 kHz telephone input is stateful across packets, with exact duration and reset', () => {
+  const input = Buffer.from(
+    Array.from({ length: 977 }, (_, index) => (index * 37) % 256),
+  );
+  const expected = new PcmuToPcm16k().push(input);
+  const converter = new PcmuToPcm16k();
+  assert.deepEqual(
+    Buffer.concat(
+      chunks(input, [1, 7, 160, 2, 31]).map((part) => converter.push(part)),
+    ),
+    expected,
+  );
+  assert.equal(expected.length, input.length * 4);
+  converter.reset();
+  const silence = converter.push(Buffer.alloc(8000, 0xff));
+  assert.equal(silence.length, 32000);
+  assert(silence.every((byte) => byte === 0));
+  const dc = new PcmuToPcm16k().push(Buffer.alloc(1000, 0x90));
+  for (let index = 300; index < 1900; index += 1)
+    assert(Math.abs(dc.readInt16LE(index * 2) - muLawToPcm16(0x90)) <= 2);
+});
+
+test('16 kHz interpolation preserves telephone passband and suppresses the zero-stuffing image', () => {
+  const input = Buffer.from(signal(1000, 8000).map(pcm16ToMuLaw));
+  const output = new PcmuToPcm16k().push(input);
+  const amplitude = (frequency: number) => {
+    let cosine = 0;
+    let sine = 0;
+    for (let index = 200; index < output.length / 2; index += 1) {
+      const sample = output.readInt16LE(index * 2);
+      const phase = (2 * Math.PI * frequency * index) / 16000;
+      cosine += sample * Math.cos(phase);
+      sine += sample * Math.sin(phase);
+    }
+    return (Math.hypot(cosine, sine) * 2) / (output.length / 2 - 200);
+  };
+  const fundamental = amplitude(1000);
+  assert(fundamental > 11000 && fundamental < 12500);
+  assert(amplitude(7000) < fundamental * 0.01);
 });
 
 test('PCM downsampling retains split bytes and modulo-three sample boundaries', () => {

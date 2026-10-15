@@ -4,6 +4,7 @@ import { createOpenAIWebSocket } from './openai-websocket';
 import { DEFAULT_TRANSCRIPTION_MODEL, validTranscriptionModel } from './config';
 import type { RemoteCaptionInputDiagnostic } from './remote-caption-client';
 import type { PlanBTimingEvent } from './aliyun-planb-types';
+import type { LiveTranslatePhoneDiagnostic } from './livetranslate-phone-types';
 
 export type TranslationRole = 'local' | 'remote';
 
@@ -76,6 +77,8 @@ export type TranslationConnection = {
 export type CaptionState = {
   state: 'connecting' | 'ready' | 'failed';
   code?: string;
+  /** Explicit model-failure state. The telephone remains under its normal owner. */
+  translationStopped?: true;
 };
 
 export type TranslationAudioDiagnostic = {
@@ -144,6 +147,7 @@ export type TranslationBridgeOptions = {
   onAudioDiagnostic?: (event: TranslationAudioDiagnostic) => void;
   /** Selected Plan B only. Metadata, not speech content or audibility proof. */
   onPlanBTiming?: (event: PlanBTimingEvent) => void;
+  onLiveTranslateDiagnostic?: (event: LiveTranslatePhoneDiagnostic) => void;
   onCaptionState?: (event: CaptionState) => void;
   onCaptionInputDiagnostic?: (event: RemoteCaptionInputDiagnostic) => void;
   onProviderDiagnostic?: (event: TranslationProviderDiagnostic) => void;

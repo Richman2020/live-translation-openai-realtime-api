@@ -24,8 +24,10 @@ export const LIVETRANSLATE_SINGLE_LOCAL_PARENT =
 export type LiveTranslateAuditionMode = 'dual' | 'single-local';
 export const liveTranslateAuditionVoice = (
   mode: LiveTranslateAuditionMode = 'dual',
-) => mode === 'single-local'
-  ? LIVETRANSLATE_SINGLE_LOCAL_VOICE : LIVETRANSLATE_AUDITION_VOICE;
+) =>
+  mode === 'single-local'
+    ? LIVETRANSLATE_SINGLE_LOCAL_VOICE
+    : LIVETRANSLATE_AUDITION_VOICE;
 export const LIVETRANSLATE_AUDITION_LIMITS = Object.freeze({
   sessions: 2,
   sessionsPerRole: 1,

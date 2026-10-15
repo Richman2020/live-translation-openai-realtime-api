@@ -105,7 +105,7 @@ export function parseCloudServiceConfig(
     TWILIO_CALLER_NUMBER: required(env, 'TWILIO_CALLER_NUMBER'),
     // No OpenAI credential is read or required for an explicit Aliyun call.
     OPENAI_API_KEY:
-      translationProvider.provider === 'aliyun-plan-b'
+      translationProvider.provider !== 'openai'
         ? ''
         : required(env, 'OPENAI_API_KEY'),
     OPENAI_REALTIME_MODEL: 'gpt-realtime-1.5',
@@ -117,7 +117,7 @@ export function parseCloudServiceConfig(
     (check) =>
       check.name !== 'LOCAL_ACCESS_TOKEN' &&
       !(
-        translationProvider.provider === 'aliyun-plan-b' &&
+        translationProvider.provider !== 'openai' &&
         check.name === 'OPENAI_API_KEY'
       ) &&
       check.status !== 'ready',

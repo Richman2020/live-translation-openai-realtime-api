@@ -68,9 +68,12 @@ async function main(): Promise<void> {
   const config = parseCloudServiceConfig(process.env);
   if (args[0] === '--check') {
     const planB = config.translationProvider?.provider === 'aliyun-plan-b';
+    const liveTranslate =
+      config.translationProvider?.provider === 'aliyun-livetranslate';
+    const independentAliyun = planB || liveTranslate;
     let openaiSocketsPerCall = 3;
     let optionalOutgoingCaptionSockets = 0;
-    if (planB) openaiSocketsPerCall = 0;
+    if (independentAliyun) openaiSocketsPerCall = 0;
     else if (config.outgoingPairedCaptions) {
       openaiSocketsPerCall = 5;
       optionalOutgoingCaptionSockets = 2;
@@ -87,19 +90,15 @@ async function main(): Promise<void> {
         openaiSocketsPerCall,
         optionalOutgoingCaptionSockets,
         outgoingPairedCaptions:
-          config.translationProvider?.provider === 'aliyun-plan-b' ||
-          config.outgoingPairedCaptions,
-        openaiModels:
-          config.translationProvider?.provider === 'aliyun-plan-b'
-            ? []
-            : [
-                'gpt-realtime-translate',
-                'gpt-4o-transcribe',
-                'gpt-realtime-1.5',
-                ...(config.outgoingPairedCaptions
-                  ? ['gpt-live-transcribe']
-                  : []),
-              ],
+          independentAliyun || config.outgoingPairedCaptions,
+        openaiModels: independentAliyun
+          ? []
+          : [
+              'gpt-realtime-translate',
+              'gpt-4o-transcribe',
+              'gpt-realtime-1.5',
+              ...(config.outgoingPairedCaptions ? ['gpt-live-transcribe'] : []),
+            ],
         ...(config.translationProvider?.provider === 'aliyun-plan-b'
           ? {
               translationProvider: 'aliyun-plan-b',
@@ -112,6 +111,18 @@ async function main(): Promise<void> {
               aliyunVoice: 'loongandy_v3',
               aliyunAsrTasksPerCall: 2,
               aliyunTtsTasks: 'per_committed_local_section',
+            }
+          : {}),
+        ...(liveTranslate
+          ? {
+              translationProvider: 'aliyun-livetranslate',
+              aliyunRegion: 'beijing',
+              aliyunModels: ['qwen3.8-livetranslate-flash-realtime'],
+              aliyunVoice: 'Andre',
+              aliyunRealtimeSessionsPerCall: 2,
+              aliyunRemoteOutput: 'text_only_original_audio_passthrough',
+              automaticRetries: 0,
+              automaticReconnects: 0,
             }
           : {}),
         maxConcurrentCalls: 1,

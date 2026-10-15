@@ -4,7 +4,19 @@
 
 需求见 [PROJECT_BRIEF.md](PROJECT_BRIEF.md)，工作规则见 [AGENTS.md](AGENTS.md)，运行步骤见 [LOCAL_SETUP.md](LOCAL_SETUP.md)，后续执行入口见 [LOCAL_CODEX_HANDOFF.md](LOCAL_CODEX_HANDOFF.md)。
 
-## 最新：单中文LiveTranslate试听准备完成（2026-10-15，未执行付费试听）
+## 最新：LiveTranslate 3.8 + Andre 电话离线集成（2026-10-15，未推送/部署/通话）
+
+- 核附件SHA256 `759e042cca0b182609fefba1d87bae3d27040eb5c14045ed65817de77e51556c`，独立282载荷/460源码/121依赖/221提交及3补丁tree匹配。实际开发基线BCC完整，原未提交/附件不动，另有基线bundle保护；B28源`b28db017b72d1b600b6ce8452e4b0efa94d4e0ab`为BCC后代。
+- 新独立分支`codex/ai-phone-livetranslate-integration-20261015`/同名workspace。导入ac17c062仅24协议/试听兼容及回放路径，保留B28与BCC双历史；未整树覆盖，旧PROGRESS/brief/5历史docs未套用。默认OpenAI及三段方案完整保留，新provider`aliyun-livetranslate`显式选择才启用、启动快照冻结、单通无切换/回退/自动重连。
+- 新电话bridge复用认证后媒体链：中文PCMU8k→有状态PCM16k→本地Andre英文PCM24k→既有PCMU8k播放；对方原PCMU独立直通耳麦，另会话仅中文字幕，无中配/译音回灌。原24k路径不改，源/译文版本与连续同方显示复用既有adapter/model；PCM首块即排队，不等全文或ASRfinal。
+- 保留请求/created/updated双层/response.created/done的独立voice证据与同ACK冻结allowlist，不恢复effectiveVoice误判。local固定Andre、复刻false，仅同ACK窄例外；remote显式Tina协议字段但textonly/严格一致，不扩大local例外，不生成Tina声音。用户只认可来源16.72s单文件，不等于电话音色稳定或英文方向已验收。
+- 模型fatal停两模型/译音积压并clear未播音，明确translationStopped进snapshot/SSE/UI，不静默重连/换模型；remote原声和用户挂断仍可用，电话可能继续计费应手动挂断。真实owner/媒体/原声传输故障仍原两腿清理、nonce/账户/单通/身份/控制权不放宽；不恢复金额/固定总时长/旧倒计时，不用24/6/36/90试听限量驱动电话。
+- 生产client按offset/可靠边安全保留，32完成来源grace支持稍迟新关联，累计4096事件/420轮已模拟正常；**仍有256保留关联身份上限（含已done，不仅active），独立单源257响应会明确停翻译，0重播/重连**。此为长密集单源剩余适配限制，不能宣称无限长已解决，不为消提示删除身份防重。
+- 新时序字段有本地source/response序号，输入提交/供应商估计端点/识别定稿/译文/首PCM/电话queue/mark分开，epoch与mono标签分开；两层白名单日志不含正文/原音/供应商ID/完整号码/密钥，ear playback始终unknown。旧两通挂断与farmer首因仍未确认，未用模拟或completed补根因。
+- **本轮最终统一检查**：`node --import tsx --test --test-concurrency=4 tests/*.test.ts`（npm test相同完整glob，仅并行度4）**2142 total / 2137 pass / 5 Windows条件skip / 0 fail/cancel**；完整`npm run typecheck`、`npm run build`、38个变更TS/MTS的ESLint、3个前端JS语法和diff-check通过。lint仅cloud-service.ts:175/:217两项既有no-console warning，固定枚举/数字元数据无正文/凭据/完整号码；既有controller测试样式未扩大清理，该文件功能测试仍在全量内，不声称全仓历史lint全绿。外部网络guard共151进程、0外连尝试，本地loopback用于离线服务模拟。独立审查定向51/51和另写生命周期3/3通过，原中间态grace测试失败已闭合，来源205/历史数量不作本轮成绩。初始B28测试union属性类型错误及等价lint兼容已修；没有安装/新增依赖，本地prepare只复制锁定SDK。
+- 本轮0模型/0新上传/0拨号/0push/0deploy/0平台配置或实际密钥读取，不操作portal-test。最后已知线上6d/f260只是历史参考，本轮未新核运行。发布/回退仅指定ai-phone-test，需另确认、CI及平台非敏感核验；真实先用户一通短测再决定长通话，旧付费授权不复用。详见[电话集成/容量边界/发布与试打计划](docs/LIVETRANSLATE_PHONE_INTEGRATION_2026-10-15.md)。
+
+## 前一阶段：单中文LiveTranslate试听准备完成（2026-10-15，未执行付费试听）
 
 - 从完整 `f2e0acd4ec1d42450feb29e290fd0455244bc466` 最小增量，仅改audition input/runner/artifacts/CLI及相关测试和专属记录。原候选/封存包、OpenAI/旧三段/挂断诊断及线上均保留；默认仍纯离线，未安装、推送、部署或调用模型，不改凭据/网络/平台。
 - 原21.097333333333335s/24k中文录音SHA256 `2fa83fd693485802a715e17666e83a4d748a30a78cdcf5d4b0d14ca5f11059e1`前后不变；已有FFmpeg完整重采样为16k mono PCM16，337558样本/21.097375s/675116PCM字节，派生SHA256 `58419fda20d4b0062e5ede15b289fdd052c3a5b4c789b6e195a22f9fa4f8af1f`。向上舍入多约0.041667ms、不裁剪/变速/重录；录音不入Git。此前“尚未转换/需英文素材”仅原双向历史状态，现单中文不再以英文录音为前提。

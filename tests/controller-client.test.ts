@@ -457,9 +457,10 @@ test('advertised comparison selection and per-direction caption state survive a 
   await f.client.startCall('+15550000000', { translationEngine: 'pocket-prefix', connectVoice: async () => callFixture().call });
   assert.equal(posts(f, '/api/calls')[0].body.translationEngine, 'pocket-prefix');
   assert.equal(f.client.state.outgoingPairedCaptions, true);
-  f.client.handleEvent('call', { id: 'call-1', status: 'active', captionState: 'ready', outgoingCaptionState: 'failed' });
+  f.client.handleEvent('call', { id: 'call-1', status: 'active', captionState: 'ready', outgoingCaptionState: 'failed', translationStopped: true });
   assert.equal(f.client.state.call.captionState, 'ready');
   assert.equal(f.client.state.call.outgoingCaptionState, 'failed');
+  assert.equal(f.client.state.call.translationStopped, true);
   await f.close();
 });
 

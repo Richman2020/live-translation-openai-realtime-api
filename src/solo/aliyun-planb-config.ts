@@ -3,6 +3,11 @@ import type {
   AliyunPlanBRegion,
 } from './aliyun-planb-types';
 import { validOpenAIProxyUrl } from './openai-websocket';
+import {
+  assertLiveTranslatePhoneConfig,
+  parseLiveTranslatePhoneConfig,
+  type LiveTranslatePhoneConfig,
+} from './livetranslate-phone-config';
 
 export const PLAN_B_ENDPOINTS = Object.freeze({
   beijing: Object.freeze({
@@ -21,6 +26,7 @@ export const PLAN_B_ENDPOINTS = Object.freeze({
 export type PhoneTranslationSelection = Readonly<
   | { provider: 'openai' }
   | { provider: 'aliyun-plan-b'; config: AliyunPlanBConfig }
+  | { provider: 'aliyun-livetranslate'; config: LiveTranslatePhoneConfig }
 >;
 
 /** Default-off. Disabled selection never even reads regional credential fields. */
@@ -29,6 +35,11 @@ export function parsePhoneTranslationSelection(
 ): PhoneTranslationSelection {
   const provider = env.CLOUD_PHONE_TRANSLATION_PROVIDER ?? 'openai';
   if (provider === 'openai') return Object.freeze({ provider });
+  if (provider === 'aliyun-livetranslate')
+    return Object.freeze({
+      provider,
+      config: parseLiveTranslatePhoneConfig(env),
+    });
   if (provider !== 'aliyun-plan-b')
     throw new Error(
       'CLOUD_PLAN_B_CONFIG_INVALID:CLOUD_PHONE_TRANSLATION_PROVIDER',
@@ -106,6 +117,13 @@ export function freezePhoneTranslationSelection(
 ): PhoneTranslationSelection {
   if (!selection || selection.provider === 'openai')
     return Object.freeze({ provider: 'openai' });
+  if (selection.provider === 'aliyun-livetranslate') {
+    assertLiveTranslatePhoneConfig(selection.config);
+    return Object.freeze({
+      provider: 'aliyun-livetranslate',
+      config: Object.freeze({ ...selection.config }),
+    });
+  }
   if (selection.provider !== 'aliyun-plan-b')
     throw new Error('PLAN_B_CONFIG_INVALID');
   assertAliyunPlanBConfig(selection.config);

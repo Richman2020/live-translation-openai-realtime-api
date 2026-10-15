@@ -375,7 +375,7 @@ async function buildPhoneApplication(
             (check) =>
               check.name !== 'LOCAL_ACCESS_TOKEN' &&
               !(
-                phoneTranslationProvider.provider === 'aliyun-plan-b' &&
+                phoneTranslationProvider.provider !== 'openai' &&
                 check.name === 'OPENAI_API_KEY'
               ),
           )

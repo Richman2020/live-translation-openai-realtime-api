@@ -54,47 +54,52 @@ export function pcm16ToMuLaw(sample: number): number {
   return ~(sign | (exponent << 4) | mantissa) & 0xff;
 }
 
-function createLowPass(): Float64Array {
-  const coefficients = new Float64Array(FILTER_LENGTH);
-  const center = (FILTER_LENGTH - 1) / 2;
-  const cutoff = FILTER_CUTOFF_HZ / PCM_RATE;
+function createLowPass(rate = PCM_RATE, length = FILTER_LENGTH): Float64Array {
+  const coefficients = new Float64Array(length);
+  const center = (length - 1) / 2;
+  const cutoff = FILTER_CUTOFF_HZ / rate;
   let sum = 0;
-  for (let index = 0; index < FILTER_LENGTH; index += 1) {
+  for (let index = 0; index < length; index += 1) {
     const offset = index - center;
     const sinc =
       offset === 0
         ? 2 * cutoff
         : Math.sin(2 * Math.PI * cutoff * offset) / (Math.PI * offset);
-    const phase = (2 * Math.PI * index) / (FILTER_LENGTH - 1);
+    const phase = (2 * Math.PI * index) / (length - 1);
     const window = 0.42 - 0.5 * Math.cos(phase) + 0.08 * Math.cos(2 * phase);
     coefficients[index] = sinc * window;
     sum += coefficients[index];
   }
   // Exact unity DC gain for decimation. Interpolation applies a gain of three.
-  for (let index = 0; index < FILTER_LENGTH; index += 1) {
+  for (let index = 0; index < length; index += 1) {
     coefficients[index] /= sum;
   }
   return coefficients;
 }
 
 const LOW_PASS = createLowPass();
+const LOW_PASS_16K = createLowPass(16000, 129);
 
 class StreamingLowPass {
-  private readonly history = new Float64Array(FILTER_LENGTH);
+  private readonly history: Float64Array;
 
   private cursor = 0;
 
+  constructor(private readonly coefficients = LOW_PASS) {
+    this.history = new Float64Array(coefficients.length);
+  }
+
   append(sample: number): void {
     this.history[this.cursor] = sample;
-    this.cursor = (this.cursor + 1) % FILTER_LENGTH;
+    this.cursor = (this.cursor + 1) % this.history.length;
   }
 
   value(): number {
     let result = 0;
     let index = this.cursor;
-    for (let tap = 0; tap < FILTER_LENGTH; tap += 1) {
-      index = index === 0 ? FILTER_LENGTH - 1 : index - 1;
-      result += LOW_PASS[tap] * this.history[index];
+    for (let tap = 0; tap < this.history.length; tap += 1) {
+      index = index === 0 ? this.history.length - 1 : index - 1;
+      result += this.coefficients[tap] * this.history[index];
     }
     return result;
   }
@@ -102,6 +107,29 @@ class StreamingLowPass {
   reset(): void {
     this.history.fill(0);
     this.cursor = 0;
+  }
+}
+
+/** Independent 8→16 kHz stream. 129 taps retain the same 4 ms FIR delay;
+ * never label the existing 24 kHz stream as 16 kHz or reset between packets. */
+export class PcmuToPcm16k {
+  private readonly filter = new StreamingLowPass(LOW_PASS_16K);
+
+  push(input: Buffer): Buffer {
+    const output = Buffer.allocUnsafe(input.length * 4);
+    let offset = 0;
+    for (const code of input) {
+      for (let phase = 0; phase < 2; phase += 1) {
+        this.filter.append(phase === 0 ? muLawToPcm16(code) : 0);
+        output.writeInt16LE(clampPcm16(this.filter.value() * 2), offset);
+        offset += 2;
+      }
+    }
+    return output;
+  }
+
+  reset(): void {
+    this.filter.reset();
   }
 }
 

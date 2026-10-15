@@ -9,6 +9,7 @@ import TwilioRestException from 'twilio/lib/base/RestException';
 import type { SoloConfig } from './config';
 import { safeEqual } from './security';
 import { ConversationEventAdapter } from './conversation-events';
+import { sanitizeLiveTranslatePhoneDiagnostic } from './livetranslate-phone-diagnostics';
 import {
   classifyCallTermination,
   createCallTerminationDiagnostic,
@@ -52,6 +53,7 @@ export type CallView = {
   translationReady: boolean;
   captionState?: 'connecting' | 'ready' | 'failed';
   outgoingCaptionState?: 'connecting' | 'ready' | 'failed';
+  translationStopped?: boolean;
   error?: string;
   providerErrorCode?: number;
   providerHttpStatus?: number;
@@ -1391,10 +1393,20 @@ export class SessionManager extends EventEmitter {
             )
               return;
             session.view.captionState = caption.state;
+            if (caption.translationStopped === true) {
+              session.view.translationStopped = true;
+              session.view.translationReady = false;
+            }
             this.publish(session);
             this.emit('event', {
               event: 'caption-status',
-              data: { state: caption.state, sessionId: session.view.id },
+              data: {
+                state: caption.state,
+                ...(caption.translationStopped === true
+                  ? { translationStopped: true }
+                  : {}),
+                sessionId: session.view.id,
+              },
             });
           },
           onOutgoingCaptionState: (caption) => {
@@ -1446,6 +1458,15 @@ export class SessionManager extends EventEmitter {
                 basis: timing.basis,
                 actualPlaybackStartAt: null,
               },
+            });
+          },
+          onLiveTranslateDiagnostic: (diagnostic) => {
+            if (!this.liveAdmission(session)) return;
+            const safe = sanitizeLiveTranslatePhoneDiagnostic(diagnostic);
+            if (!safe) return;
+            this.emit('event', {
+              event: 'translation-live',
+              data: { ...safe, sessionId: session.view.id },
             });
           },
           onCaptionInputDiagnostic: (diagnostic) => {
