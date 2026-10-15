@@ -4,7 +4,18 @@
 
 需求见 [PROJECT_BRIEF.md](PROJECT_BRIEF.md)，工作规则见 [AGENTS.md](AGENTS.md)，运行步骤见 [LOCAL_SETUP.md](LOCAL_SETUP.md)，后续执行入口见 [LOCAL_CODEX_HANDOFF.md](LOCAL_CODEX_HANDOFF.md)。
 
-## 最新：LiveTranslate独立离线原型完成（2026-10-15，未推送/部署/试听）
+## 最新：单中文LiveTranslate试听准备完成（2026-10-15，未执行付费试听）
+
+- 从完整 `f2e0acd4ec1d42450feb29e290fd0455244bc466` 最小增量，仅改audition input/runner/artifacts/CLI及相关测试和专属记录。原候选/封存包、OpenAI/旧三段/挂断诊断及线上均保留；默认仍纯离线，未安装、推送、部署或调用模型，不改凭据/网络/平台。
+- 原21.097333333333335s/24k中文录音SHA256 `2fa83fd693485802a715e17666e83a4d748a30a78cdcf5d4b0d14ca5f11059e1`前后不变；已有FFmpeg完整重采样为16k mono PCM16，337558样本/21.097375s/675116PCM字节，派生SHA256 `58419fda20d4b0062e5ede15b289fdd052c3a5b4c789b6e195a22f9fa4f8af1f`。向上舍入多约0.041667ms、不裁剪/变速/重录；录音不入Git。此前“尚未转换/需英文素材”仅原双向历史状态，现单中文不再以英文录音为前提。
+- 新manifest v2 `single-local`支持仅local一会话，固定3.8/Tina/clone=false；旧v1双向保持。新审批scope绑定模式/最终SHA/实际host/样本hash与新金额及发送同意，拒复用旧授权。配置ACK严格接受/拒绝已模拟，真实供应商ACK和Tina听感未验证；缺clone字段也会保守拒绝，不自动降级或换voice。
+- ≤24秒完整输入、≤6接纳响应、≤36秒音频保存、90秒等待、0重试重连均为本地限制，非输出token或账单硬封顶。逐20ms发送完整1055包/末556B；新增逐帧发送、clip发送结束、音频收集/文件写完时间，区分首PCM接收与FIFO交付、全文与响应完成。真实声学终点/实际播放未知，不拿文件结束或首包代替用户等待。
+- **本轮检查**：audition50+既有真实client假WS E2E2＝52/52通过，独审复跑同52/52；定向ESLint、typecheck、build、diff-check通过。独审另用真实派生录音+默认真实wait+内存fake-client验证1055包/675116B逐字节一致，首末append跨度21309.688ms、发送完成21326.290ms（名义21097.375ms）；0真实连接/key读取/试听产物。这是本地节奏验证，不是模型实测。f2e旧全量1973不算本轮结果。
+- 用户提供非秘密workspace `ws-y26guohg2gsusct1`，真实manifest SHA256 `d67f3988d0d7f038856da1d1f3d17aba13383d8641b9f5564440b889cd4e6d80`；默认CLI实际dry-run通过，精确域 `ws-y26guohg2gsusct1.cn-beijing.maas.aliyuncs.com`。当前任务metadata revision126无ready阿里绑定/专属host，不读值、不绕过策略。沿用`ALIYUN_BEIJING_API_KEY`，由用户在既有环境`live-translation-openai-realtime-api`核匹配space/model并手动补精确key目标域/受限放行、保存发布，新任务核生效；不动Railway。
+- 北京公开价音频入40/译文出100/音频出160元/M token。实际单中文输入约147.681625token ¥0.005907265；36秒译音计划¥0.072＋1024译文token预留¥0.1024，合计**¥0.180307265**。原¥0.28352为旧24秒/双向2048译文token例，非实测。6×4096最高价输出＋6轮重复输入观察预留约¥3.96760359，**新建议¥5未批准、非硬封顶**；隐式history/inputtext和关停前生成风险不能当0。
+- 本轮模型请求/录音上传/费用均0，未创建真实approval。仍需用户手动完成环境域名与key归属/权限核对，另明确本录音向LiveTranslate发送同意及新金额；不复用已消费授权。英文方向不验收，真实准确性/声音/时延/usage/入账与长通话未证实。资料在`/workspace/ai-phone-reference/livetranslate-single-local-20261015`；完整最小操作、哈希、费用及未来交付见[单中文试听准备](docs/LIVETRANSLATE_SINGLE_LOCAL_PREP_2026-10-15.md)。
+
+## 前一阶段：LiveTranslate独立离线原型完成（2026-10-15，未推送/部署/试听）
 
 - 用户调整为先验证北京精确 `qwen3.8-livetranslate-flash-realtime`；停止旧三段大规模提速。以完整 `ffb3f7a2178c678177cb08641970c3215a310e6f` 为父，另建 `codex/ai-phone-livetranslate-prototype-20261015` / `/workspace/ai-phone-livetranslate-prototype-20261015`。旧候选211提交bundle独立clone/fsck恢复、428/428源码哈希一致，原6d未提交PROGRESS及48份incident/display证据单独封存；8f96/320f/e106/6d/ffb均为基线祖先。原工作树、OpenAI、三段方案和回退路径不改。
 - 仅新增experiments/专属脚本/测试/文档，不注册生产provider，不改现有选择器或默认；缺显式enabled拒绝建会话。local中文音频直接LiveTranslate→英文分片及原/译文；remote原音先直通，再独立text-only中文字幕，0中文配音，无Fun-ASR/Qwen-MT/CosyVoice串行调用，0中途供应商回退。

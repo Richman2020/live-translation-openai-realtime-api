@@ -22,6 +22,8 @@ import {
   LIVETRANSLATE_AUDITION_MODEL,
   LIVETRANSLATE_AUDITION_PARENT,
   LIVETRANSLATE_AUDITION_SCOPE,
+  LIVETRANSLATE_SINGLE_LOCAL_SCOPE,
+  LIVETRANSLATE_SINGLE_LOCAL_PARENT,
   LIVETRANSLATE_AUDITION_VOICE,
   liveTranslateExactKeys,
   liveTranslateRecord,
@@ -75,9 +77,14 @@ export function parseLiveTranslateAuditionArgs(
   return args;
 }
 export type LiveTranslateAuditionApproval = {
-  version: 1;
-  scope: typeof LIVETRANSLATE_AUDITION_SCOPE;
-  parentCandidate: typeof LIVETRANSLATE_AUDITION_PARENT;
+  version: 1 | 2;
+  mode?: 'single-local';
+  scope:
+    | typeof LIVETRANSLATE_AUDITION_SCOPE
+    | typeof LIVETRANSLATE_SINGLE_LOCAL_SCOPE;
+  parentCandidate:
+    | typeof LIVETRANSLATE_AUDITION_PARENT
+    | typeof LIVETRANSLATE_SINGLE_LOCAL_PARENT;
   candidateSha: string;
   model: typeof LIVETRANSLATE_AUDITION_MODEL;
   voice: 'Tina';
@@ -123,12 +130,14 @@ export function readLiveTranslateAuditionApproval(
   } catch {
     fail('APPROVAL_FILE_INVALID');
   }
+  const single = input.mode === 'single-local';
   const minimum =
-    estimateLiveTranslateAuditionCost().planningReserve.estimatedCny;
+    estimateLiveTranslateAuditionCost(input).planningReserve.estimatedCny;
   if (
     !liveTranslateRecord(value) ||
     !liveTranslateExactKeys(value, [
       'version',
+      ...(single ? ['mode'] : []),
       'scope',
       'parentCandidate',
       'candidateSha',
@@ -147,9 +156,16 @@ export function readLiveTranslateAuditionApproval(
       'approvedAt',
       'preflight',
     ]) ||
-    value.version !== 1 ||
-    value.scope !== LIVETRANSLATE_AUDITION_SCOPE ||
-    value.parentCandidate !== LIVETRANSLATE_AUDITION_PARENT ||
+    value.version !== (single ? 2 : 1) ||
+    (single && value.mode !== 'single-local') ||
+    value.scope !==
+      (single
+        ? LIVETRANSLATE_SINGLE_LOCAL_SCOPE
+        : LIVETRANSLATE_AUDITION_SCOPE) ||
+    value.parentCandidate !==
+      (single
+        ? LIVETRANSLATE_SINGLE_LOCAL_PARENT
+        : LIVETRANSLATE_AUDITION_PARENT) ||
     typeof value.candidateSha !== 'string' ||
     !/^[a-f0-9]{40}$/u.test(value.candidateSha) ||
     (candidateSha !== undefined && value.candidateSha !== candidateSha) ||
@@ -244,6 +260,7 @@ function consumeApproval(
     .update(
       JSON.stringify([
         approval.scope,
+        approval.mode ?? 'dual',
         approval.candidateSha,
         approval.manifestSha256,
         approval.spaceHost,
@@ -340,6 +357,7 @@ const safeCodes = new Set([
     'RESERVATION_INVALID',
     'RESERVATION_NOT_EMPTY',
     'OUTPUT_LIMIT',
+    'ESTIMATE_INPUT_INVALID',
     'REMOTE_AUDIO_FORBIDDEN',
   ].map((code) => `LIVETRANSLATE_AUDITION_ARTIFACT_${code}`),
 ]);
@@ -374,13 +392,20 @@ export async function liveTranslateAuditionMain(
       return 0;
     }
     const input = prepareLiveTranslateAuditionInput(args.manifest!);
-    const planning = estimateLiveTranslateAuditionCost();
+    const planning = estimateLiveTranslateAuditionCost(input);
     if (!args.executeOnce) {
       write(
         JSON.stringify({
           mode: 'offline_preflight',
-          scope: LIVETRANSLATE_AUDITION_SCOPE,
-          parentCandidate: LIVETRANSLATE_AUDITION_PARENT,
+          auditionMode: input.mode ?? 'dual',
+          scope:
+            input.mode === 'single-local'
+              ? LIVETRANSLATE_SINGLE_LOCAL_SCOPE
+              : LIVETRANSLATE_AUDITION_SCOPE,
+          parentCandidate:
+            input.mode === 'single-local'
+              ? LIVETRANSLATE_SINGLE_LOCAL_PARENT
+              : LIVETRANSLATE_AUDITION_PARENT,
           model: LIVETRANSLATE_AUDITION_MODEL,
           voice: LIVETRANSLATE_AUDITION_VOICE,
           spaceHost: input.spaceHost,

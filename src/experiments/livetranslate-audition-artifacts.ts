@@ -12,8 +12,9 @@ import {
 import { dirname, join, parse, resolve, sep } from 'node:path';
 
 import {
-  LIVETRANSLATE_AUDITION_LIMITS,
   LIVETRANSLATE_AUDITION_PARENT,
+  LIVETRANSLATE_SINGLE_LOCAL_PARENT,
+  liveTranslateAuditionLimits,
   type PreparedLiveTranslateAuditionInput,
 } from './livetranslate-audition-input';
 import type { LiveTranslateAuditionResult } from './livetranslate-audition-runner';
@@ -32,34 +33,56 @@ export const LIVETRANSLATE_PUBLIC_RATES = Object.freeze({
   textInputPerMillion: null,
   sourceTranscription: 'documented_free',
 });
-export function estimateLiveTranslateAuditionCost() {
+export function estimateLiveTranslateAuditionCost(
+  input?: Pick<PreparedLiveTranslateAuditionInput, 'mode' | 'totalSeconds'>,
+) {
+  const mode = input?.mode ?? 'dual';
+  const limits = liveTranslateAuditionLimits(mode);
+  const inputSeconds = input?.totalSeconds ?? 24;
+  if (!Number.isFinite(inputSeconds) || inputSeconds <= 0 || inputSeconds > 24)
+    throw new Error('LIVETRANSLATE_AUDITION_ARTIFACT_ESTIMATE_INPUT_INVALID');
   const expected = {
-    inputAudioTokens: 24 * 7,
-    outputAudioTokens: 36 * 12.5,
-    outputTextTokenReserve: 2048,
+    inputAudioTokens: inputSeconds * 7,
+    outputAudioTokens: limits.savedOutputSeconds * 12.5,
+    outputTextTokenReserve: mode === 'single-local' ? 1024 : 2048,
   };
   const expectedCny =
     (expected.inputAudioTokens * 40) / 1e6 +
     (expected.outputAudioTokens * 160) / 1e6 +
     (expected.outputTextTokenReserve * 100) / 1e6;
-  const outputPlanningTokens = 6 * 4096;
-  const repeatedInputAudioTokens = 24 * 7 * 6;
+  const outputPlanningTokens = limits.acceptedResponses * 4096;
+  const repeatedInputAudioTokens = inputSeconds * 7 * limits.acceptedResponses;
   const observationReserveCny =
     (outputPlanningTokens * 160) / 1e6 + (repeatedInputAudioTokens * 40) / 1e6;
+  const recommendedApprovalCny = 5;
   return {
     rates: LIVETRANSLATE_PUBLIC_RATES,
+    assumptions: {
+      mode,
+      sessions: limits.sessions,
+      actualInputSeconds: inputSeconds,
+      savedOutputSecondsPlanning: limits.savedOutputSeconds,
+      acceptedResponsesObservation: limits.acceptedResponses,
+    },
     expected: { ...expected, estimatedCny: expectedCny },
     planningReserve: {
       outputTokens: outputPlanningTokens,
       repeatedInputAudioTokens,
       estimatedCny: observationReserveCny,
-      recommendedApprovalCny: 5,
-      marginCny: 5 - observationReserveCny,
+      recommendedApprovalCny,
+      marginCny: recommendedApprovalCny - observationReserveCny,
     },
-    localStops: LIVETRANSLATE_AUDITION_LIMITS,
+    localStops: limits,
+    legacyDual24SecondExample: {
+      mode: 'dual',
+      inputSeconds: 24,
+      sessions: 2,
+      estimatedCny: 0.28352,
+      note: 'Historical two-direction planning example only; not the cost estimate for a supplied single-local file.',
+    },
     unknown: [
       'Input-text/history billing mechanism and input-text rate are not established.',
-      'Six responses and 36 saved seconds are local observations; further generation before closure may be billed.',
+      'Response count and saved output seconds are local observations; further generation before closure may be billed.',
       '4096 model-page output capacity is only a planning assumption, not a supported client parameter or a verified cross-modality maximum.',
       'Prices and account access need current authorized verification before execution.',
     ],
@@ -313,7 +336,7 @@ export function writeLiveTranslateAuditionArtifacts(
     write('english-combined.wav', liveTranslateAuditionWave(combined));
   write(
     'report.json',
-    `${JSON.stringify({ version: 1, parentCandidate: LIVETRANSLATE_AUDITION_PARENT, provider: 'aliyun-livetranslate-independent-prototype', input: { manifestSha256: input.manifestSha256, workspaceId: input.workspaceId, spaceHost: input.spaceHost, totalSeconds: input.totalSeconds, clips: input.clips.map(({ id, role, durationMs, sha256, speechEndMs }) => ({ id, role, durationMs, sha256, speechEndMs: speechEndMs ?? null })), referenceAnswers: 'not_read_or_uploaded' }, ...result, audio, costs: calculateLiveTranslateAuditionCost(result.usage), planning: estimateLiveTranslateAuditionCost(), actualPlaybackStart: 'unknown_no_automatic_playback', comparison: 'pending matching baseline receipt; no latency improvement claim without identical sample hashes and speech-end basis' }, null, 2)}\n`,
+    `${JSON.stringify({ version: 1, parentCandidate: input.mode === 'single-local' ? LIVETRANSLATE_SINGLE_LOCAL_PARENT : LIVETRANSLATE_AUDITION_PARENT, provider: 'aliyun-livetranslate-independent-prototype', input: { mode: input.mode ?? 'dual', manifestSha256: input.manifestSha256, workspaceId: input.workspaceId, spaceHost: input.spaceHost, totalSeconds: input.totalSeconds, clips: input.clips.map(({ id, role, durationMs, sha256, speechEndMs }) => ({ id, role, durationMs, sha256, speechEndMs: speechEndMs ?? null })), referenceAnswers: 'not_read_or_uploaded' }, ...result, audio, audioCollectionCompletedAt: result.endedAt, audioCollectionTimeBasis: 'runner_monotonic_fence_closed', audioFilesSavedCompletedAtEpochMs: Date.now(), audioFileWriteBasis: 'synchronous_write_returned_not_fsync_or_playback', costs: calculateLiveTranslateAuditionCost(result.usage), planning: estimateLiveTranslateAuditionCost(input), actualPlaybackStart: 'unknown_no_automatic_playback', comparison: 'pending matching baseline receipt; no latency improvement claim without identical sample hashes and speech-end basis' }, null, 2)}\n`,
   );
   write('files.sha256.json', `${JSON.stringify(files, null, 2)}\n`);
   return { output, files: files.map((item) => item.file) };

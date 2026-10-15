@@ -17,6 +17,7 @@ import type {
 } from './livetranslate-types';
 import {
   LIVETRANSLATE_AUDITION_LIMITS,
+  liveTranslateAuditionLimits,
   LIVETRANSLATE_AUDITION_MODEL,
   LIVETRANSLATE_AUDITION_VOICE,
   liveTranslateSpaceHost,
@@ -30,6 +31,7 @@ export type LiveTranslateAuditionResult = {
   startedAt: number;
   endedAt: number;
   configuration: {
+    mode: 'dual' | 'single-local';
     model: typeof LIVETRANSLATE_AUDITION_MODEL;
     voice: typeof LIVETRANSLATE_AUDITION_VOICE;
     spaceHost: string;
@@ -48,6 +50,15 @@ export type LiveTranslateAuditionResult = {
     audioBytesReceived: number;
     audioBytesSaved: number;
   };
+  sends: {
+    clipId: string;
+    offsetBytes: number;
+    bytes: number;
+    streamStartMs: number;
+    streamEndMs: number;
+    sentAt: number;
+    basis: 'application_append_observed';
+  }[];
   sources: (LiveTranslateSource & { clipId: string; receivedAt: number })[];
   translations: (LiveTranslateTranslation & {
     clipId: string;
@@ -73,6 +84,9 @@ export type LiveTranslateAuditionResult = {
   clips: {
     id: string;
     sendStartedAt: number | null;
+    sendCompletedAt: number | null;
+    sendElapsedMs: number | null;
+    nominalDurationMs: number;
     finishRequestedAt: number | null;
     endedAt: number | null;
   }[];
@@ -109,13 +123,17 @@ export async function runLiveTranslateAudition(
   options: LiveTranslateAuditionRunnerOptions,
 ): Promise<LiveTranslateAuditionResult> {
   const { input } = options;
+  const mode = input?.mode ?? 'dual';
+  const limits = liveTranslateAuditionLimits(mode);
   const timeoutMs =
     options.timeoutMs ?? LIVETRANSLATE_AUDITION_LIMITS.totalTimeoutMs;
   if (
     !input ||
     !Array.isArray(input.clips) ||
-    input.clips.length !== 2 ||
-    new Set(input.clips.map((clip) => clip.role)).size !== 2 ||
+    !['dual', 'single-local'].includes(mode) ||
+    input.clips.length !== limits.sessions ||
+    new Set(input.clips.map((clip) => clip.role)).size !== limits.sessions ||
+    (mode === 'single-local' && input.clips[0]?.role !== 'local') ||
     !input.clips.every(
       (clip) =>
         ['local', 'remote'].includes(clip.role) &&
@@ -133,6 +151,11 @@ export async function runLiveTranslateAudition(
   )
     throw new Error('LIVETRANSLATE_AUDITION_RUN_INPUT_INVALID');
   const now = options.now ?? (() => performance.now());
+  // Each role retains its own partial tail; dual clips can need 1201 frames.
+  const frameBudget = input.clips.reduce(
+    (sum, clip) => sum + Math.ceil(clip.pcm.length / 640),
+    0,
+  );
   const startedAt = now();
   const controller = new AbortController();
   const result: LiveTranslateAuditionResult = {
@@ -140,6 +163,7 @@ export async function runLiveTranslateAudition(
     startedAt,
     endedAt: startedAt,
     configuration: {
+      mode,
       model: LIVETRANSLATE_AUDITION_MODEL,
       voice: LIVETRANSLATE_AUDITION_VOICE,
       spaceHost: input.spaceHost,
@@ -158,6 +182,7 @@ export async function runLiveTranslateAudition(
       audioBytesReceived: 0,
       audioBytesSaved: 0,
     },
+    sends: [],
     sources: [],
     translations: [],
     timing: [],
@@ -166,6 +191,9 @@ export async function runLiveTranslateAudition(
     clips: input.clips.map((clip) => ({
       id: clip.id,
       sendStartedAt: null,
+      sendCompletedAt: null,
+      sendElapsedMs: null,
+      nominalDurationMs: clip.durationMs,
       finishRequestedAt: null,
       endedAt: null,
     })),
@@ -223,7 +251,7 @@ export async function runLiveTranslateAudition(
     if (!responses.has(key)) {
       responses.add(key);
       result.counters.observedResponses = responses.size;
-      if (responses.size > LIVETRANSLATE_AUDITION_LIMITS.acceptedResponses) {
+      if (responses.size > limits.acceptedResponses) {
         stop('LIVETRANSLATE_AUDITION_RESPONSE_OBSERVATION_LIMIT');
         return false;
       }
@@ -358,8 +386,7 @@ export async function runLiveTranslateAudition(
           if (audioEvents.has(key)) return;
           audioEvents.add(key);
           const available =
-            LIVETRANSLATE_AUDITION_LIMITS.savedOutputSeconds * 48000 -
-            result.counters.audioBytesSaved;
+            limits.savedOutputSeconds * 48000 - result.counters.audioBytesSaved;
           const save = pcm.subarray(0, Math.min(available, pcm.length));
           let record = result.audio.find(
             (item) =>
@@ -460,13 +487,30 @@ export async function runLiveTranslateAudition(
         offset += 640
       ) {
         const frame = clip.pcm.subarray(offset, offset + 640);
+        if (result.sends.length >= frameBudget) {
+          stop('LIVETRANSLATE_AUDITION_SEND_TIMELINE_LIMIT');
+          break;
+        }
+        const sentAt = now();
         client.append(frame);
         result.counters.inputBytesSent += frame.length;
+        result.sends.push({
+          clipId: clip.id,
+          offsetBytes: offset,
+          bytes: frame.length,
+          streamStartMs: offset / 32,
+          streamEndMs: (offset + frame.length) / 32,
+          sentAt,
+          basis: 'application_append_observed',
+        });
         await fenced(
           (options.delay ?? wait)(frame.length / 32, controller.signal),
         );
       }
       if (stopped) break;
+      clipState.sendCompletedAt = now();
+      clipState.sendElapsedMs =
+        clipState.sendCompletedAt - clipState.sendStartedAt;
       clipState.finishRequestedAt = now();
       await fenced(client.finish());
       clipState.endedAt = now();
@@ -486,7 +530,22 @@ export async function runLiveTranslateAudition(
             audio.pcm.length > 0 &&
             audio.responseDoneAt !== null,
         );
-      if (!sourceComplete || !translationComplete || !localAudioComplete) {
+      const responsesComplete = [...responses]
+        .filter((key) => key.startsWith(`${clip.id}:`))
+        .every((key) =>
+          result.timing.some(
+            (event) =>
+              event.clipId === clip.id &&
+              `${clip.id}:${event.responseId}` === key &&
+              event.stage === 'response_completed',
+          ),
+        );
+      if (
+        !sourceComplete ||
+        !translationComplete ||
+        !localAudioComplete ||
+        !responsesComplete
+      ) {
         stop('LIVETRANSLATE_AUDITION_INCOMPLETE_OUTPUT');
         break;
       }

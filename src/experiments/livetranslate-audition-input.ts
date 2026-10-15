@@ -16,6 +16,11 @@ export const LIVETRANSLATE_AUDITION_MODEL =
 export const LIVETRANSLATE_AUDITION_VOICE = 'Tina';
 export const LIVETRANSLATE_AUDITION_SCOPE =
   'livetranslate-comparison-audition-v1';
+export const LIVETRANSLATE_SINGLE_LOCAL_SCOPE =
+  'livetranslate-single-local-audition-v1';
+export const LIVETRANSLATE_SINGLE_LOCAL_PARENT =
+  'f2e0acd4ec1d42450feb29e290fd0455244bc466';
+export type LiveTranslateAuditionMode = 'dual' | 'single-local';
 export const LIVETRANSLATE_AUDITION_LIMITS = Object.freeze({
   sessions: 2,
   sessionsPerRole: 1,
@@ -28,6 +33,16 @@ export const LIVETRANSLATE_AUDITION_LIMITS = Object.freeze({
   providerOutputTokenLimit: null,
   providerCancelSupported: false,
 });
+export const LIVETRANSLATE_SINGLE_LOCAL_LIMITS = Object.freeze({
+  ...LIVETRANSLATE_AUDITION_LIMITS,
+  sessions: 1,
+});
+export const liveTranslateAuditionLimits = (
+  mode: LiveTranslateAuditionMode = 'dual',
+) =>
+  mode === 'single-local'
+    ? LIVETRANSLATE_SINGLE_LOCAL_LIMITS
+    : LIVETRANSLATE_AUDITION_LIMITS;
 export type LiveTranslateAuditionClip = {
   id: string;
   role: 'local' | 'remote';
@@ -38,6 +53,8 @@ export type LiveTranslateAuditionClip = {
   wavPath: string;
 };
 export type PreparedLiveTranslateAuditionInput = {
+  /** Omitted only by legacy trusted dual fixtures; parsed manifests always set it. */
+  mode?: LiveTranslateAuditionMode;
   manifestPath: string;
   manifestSha256: string;
   workspaceId: string;
@@ -165,11 +182,21 @@ export function prepareLiveTranslateAuditionInput(
   }
   if (
     !liveTranslateRecord(value) ||
-    !liveTranslateExactKeys(value, ['version', 'workspaceId', 'clips']) ||
-    value.version !== 1 ||
+    !(
+      (value.version === 1 &&
+        liveTranslateExactKeys(value, ['version', 'workspaceId', 'clips'])) ||
+      (value.version === 2 &&
+        value.mode === 'single-local' &&
+        liveTranslateExactKeys(value, [
+          'version',
+          'mode',
+          'workspaceId',
+          'clips',
+        ]))
+    ) ||
     typeof value.workspaceId !== 'string' ||
     !Array.isArray(value.clips) ||
-    value.clips.length !== 2
+    value.clips.length !== (value.version === 2 ? 1 : 2)
   )
     fail('MANIFEST_INVALID');
   const spaceHost = liveTranslateSpaceHost(value.workspaceId);
@@ -189,6 +216,7 @@ export function prepareLiveTranslateAuditionInput(
       !/^[a-z][a-z0-9-]{0,47}$/u.test(clip.id) ||
       ids.has(clip.id) ||
       !['local', 'remote'].includes(clip.role as string) ||
+      (value.version === 2 && clip.role !== 'local') ||
       roles.has(clip.role as string) ||
       typeof clip.wav !== 'string' ||
       !clip.wav ||
@@ -232,6 +260,7 @@ export function prepareLiveTranslateAuditionInput(
     hashes.add(sha256);
   }
   return {
+    mode: value.version === 2 ? 'single-local' : 'dual',
     manifestPath,
     manifestSha256: createHash('sha256').update(bytes).digest('hex'),
     workspaceId: value.workspaceId,
