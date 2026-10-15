@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - 'codex/cloud-phone-conversation-*'
+      - 'codex/ai-phone-aliyun-integration-20261015'
 
 permissions:
   contents: read
