@@ -14,13 +14,13 @@ export const LIVETRANSLATE_AUDITION_PARENT =
 export const LIVETRANSLATE_AUDITION_MODEL =
   'qwen3.8-livetranslate-flash-realtime';
 export const LIVETRANSLATE_AUDITION_VOICE = 'Aiden';
-export const LIVETRANSLATE_SINGLE_LOCAL_VOICE = 'Tina';
+export const LIVETRANSLATE_SINGLE_LOCAL_VOICE = 'Andre';
 export const LIVETRANSLATE_AUDITION_SCOPE =
   'livetranslate-comparison-audition-v1';
 export const LIVETRANSLATE_SINGLE_LOCAL_SCOPE =
-  'livetranslate-single-local-tina-audition-v1';
+  'livetranslate-single-local-andre-audition-v1';
 export const LIVETRANSLATE_SINGLE_LOCAL_PARENT =
-  'a66fd3f5881f0258ee704988592ea5640a3d0559';
+  '7a938da8400f76b8178350937b711b17de207131';
 export type LiveTranslateAuditionMode = 'dual' | 'single-local';
 export const liveTranslateAuditionVoice = (
   mode: LiveTranslateAuditionMode = 'dual',

@@ -1,7 +1,7 @@
 import type WebSocket from 'ws';
 
 export type LiveTranslateRole = 'local' | 'remote';
-export type LiveTranslateVoice = 'Aiden' | 'Tina';
+export type LiveTranslateVoice = 'Aiden' | 'Tina' | 'Andre';
 export type LiveTranslateSession = {
   sessionId: string;
   role: LiveTranslateRole;
@@ -30,7 +30,7 @@ export type LiveTranslateSessionConfiguration = {
   receivedAt: number;
   basis: 'provider_session_updated';
   model: LiveTranslateSession['model'] | 'other' | null;
-  voice: 'Aiden' | 'Tina' | 'other' | null;
+  voice: LiveTranslateVoice | 'other' | null;
   voiceCloneEnabled: boolean | null;
   targetLanguage: 'en' | 'zh' | 'other' | null;
   accepted: boolean;
@@ -127,7 +127,7 @@ export type LiveTranslateProtocolDiagnostic = {
     'source.binding' | 'source.translation' | 'response.audio.done' | 'response.text.done';
   expected: 'json_object' | 'event_type_string' | 'optional_identifier_string' |
     'nonempty_identifier_string' | 'matching_session_id' | 'exact_model' |
-    'exact_output_modalities' | 'pcm' | '16000' | '24000' | 'Aiden' | 'Tina' | 'false' |
+    'exact_output_modalities' | 'pcm' | '16000' | '24000' | 'Aiden' | 'Tina' | 'Andre' | 'false' |
     'speaker_detection' | '0.5' | 'target_language' | 'nonnegative_integer' |
     'zero_index' | 'text_within_limit' | 'base64_pcm16' | 'completed' |
     'in_progress' | 'pending_output_complete' | 'no_provider_error' |

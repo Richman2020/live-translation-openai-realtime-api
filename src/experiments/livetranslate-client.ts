@@ -142,7 +142,7 @@ export function createLiveTranslateClient(
   const voice = options.voice === undefined ? LIVE_TRANSLATE_VOICE : options.voice;
   if (
     !['local', 'remote'].includes(role) ||
-    !['Aiden', 'Tina'].includes(voice) ||
+    !['Aiden', 'Tina', 'Andre'].includes(voice) ||
     typeof options.apiKey !== 'string' ||
     !options.apiKey.trim() ||
     (options.timeoutMs !== undefined &&
@@ -750,7 +750,7 @@ export function createLiveTranslateClient(
         receivedAt,
         basis: 'provider_session_updated',
         model: sessionValue(s?.model, [LIVE_TRANSLATE_MODEL]),
-        voice: sessionValue(s?.audio?.output?.voice, ['Aiden', 'Tina']),
+        voice: sessionValue(s?.audio?.output?.voice, ['Aiden', 'Tina', 'Andre']),
         voiceCloneEnabled:
           typeof s?.enable_voice_clone === 'boolean'
             ? s.enable_voice_clone

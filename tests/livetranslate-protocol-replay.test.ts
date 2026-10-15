@@ -176,13 +176,79 @@ for (const scenario of contract.scenarios) {
   });
 }
 
+for (const scenario of [
+  { file: 'actual-aiden-top-level-nested-tina.redacted.json', voice: 'Aiden' as const,
+    provenance: 'actual_provider_redacted_inbound', captured: true },
+  { file: 'synthetic-andre-top-level-nested-tina.json', voice: 'Andre' as const,
+    provenance: 'synthetic_mutation_of_actual_redacted_structure', captured: false },
+]) {
+  test(`voice gate replay (${scenario.provenance}): top-level ${scenario.voice} cannot override nested Tina`, async () => {
+    const path = fileURLToPath(new URL(`./fixtures/livetranslate-protocol/${scenario.file}`, import.meta.url));
+    const captured = JSON.parse(readFileSync(path, 'utf8'));
+    assert.equal(captured.provenance, scenario.provenance);
+    assert.equal(captured.capturedProviderPayload, scenario.captured);
+    assert.equal(captured.originalOutboundCaptured, false);
+    assert.equal(captured.providerFrames.length, 2);
+    const socket = new ReplaySocket(true);
+    const diagnostics: LiveTranslateProtocolDiagnostic[] = [];
+    const events: LiveTranslateProtocolEvent[] = [];
+    const configurations: any[] = [];
+    const faults: string[] = [];
+    let ready = false;
+    let constructions = 0;
+    const client = createLiveTranslateClient({
+      enabled: true, role: 'local', voice: scenario.voice,
+      workspaceId: 'offline-workspace', apiKey: 'SYNTHETIC_UNUSED_CREDENTIAL',
+      allowMissingVoiceCloneEcho: true,
+      createWebSocket() { constructions += 1; return socket as unknown as WebSocket; },
+      onProtocolEvent: (event) => events.push(event),
+      onProtocolDiagnostic: (event) => diagnostics.push(event),
+      onSessionConfiguration: (event) => configurations.push(event),
+      onError: (code) => faults.push(code),
+    });
+    client.ready.then(() => { ready = true; }, () => {});
+    for (const frame of captured.providerFrames) {
+      // These are replayed inbound messages. Any socket.send here is a new fake
+      // application effect, never evidence of an uncaptured historical request.
+      socket.emit('message', Buffer.from(JSON.stringify(frame.event)), frame.binary);
+    }
+    await assert.rejects(client.ready, /CONFIGURATION_REJECTED/);
+    assert.equal(ready, false);
+    assert.equal(constructions, 1);
+    assert.equal(socket.sent.length, 1);
+    assert.equal(socket.sent[0].type, 'session.update');
+    assert.equal(socket.sent[0].session.voice, scenario.voice);
+    assert.equal(socket.sent[0].session.enable_voice_clone, false);
+    assert.equal(socket.sent.filter((event) => event.type === 'input_audio_buffer.append').length, 0);
+    assert.equal(faults[0], 'LIVETRANSLATE_CONFIGURATION_REJECTED');
+    assert.equal(diagnostics[0].validationPath, 'session.audio.output.voice');
+    assert.equal(diagnostics[0].expected, scenario.voice);
+    assert.equal(diagnostics[0].actualType, 'string');
+    assert.equal(configurations[0].accepted, false);
+    assert.equal(configurations[0].voice, 'Tina');
+    reports.push({
+      scenario: `top-${scenario.voice}-nested-Tina`, source: captured.provenance,
+      fixturePath: path, capturedProviderPayload: captured.capturedProviderPayload,
+      originalOutboundCaptured: false, replayOutboundEvidence: captured.replayOutboundEvidence,
+      sourceFileSha256: captured.sourceFileSha256 ?? null,
+      timingBasis: 'replay_order_only_not_new_model_measurement',
+      ready, constructions, appendCount: 0,
+      fatalCode: faults[0], fatalPath: diagnostics[0].validationPath,
+      nestedVoiceObserved: configurations[0].voice,
+      serverFrameOrder: events.filter((event) => event.stage === 'server_frame').map((event) => event.eventType),
+      assertionsPassed: true,
+    });
+  });
+}
+
 after(() => {
   const outputPath = process.env.LIVETRANSLATE_PROTOCOL_REPLAY_REPORT;
   if (outputPath) writeFileSync(outputPath, `${JSON.stringify({
     schemaVersion: 1,
-    provenance: contract.provenance,
-    capturedProviderPayload: false,
-    timingBasis: contract.timingBasis,
+    provenance: 'offline_replay_mixed_sources',
+    reportContainsProviderPayload: false,
+    fixtureCaptureStatus: 'per_scenario_fixture_provenance',
+    timingBasis: 'per_scenario_simulation_or_replay_order_not_new_model_latency',
     fixturePath,
     scenarioCount: reports.length,
     scenarios: reports,

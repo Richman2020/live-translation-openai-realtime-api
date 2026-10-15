@@ -1,5 +1,9 @@
 # 项目进度与交接
 
+## 2026-10-15 当前：Andre预设男声仅离线适配
+
+用户最新要求保持精确3.8，从官方明确支持英文的预设男声选一款；本轮无真实连接授权。选择Andre（安德雷），官方LiveTranslate专节明确3.8/英文/沉稳男声。独立副本基于7a938，仅single-local改Andre及授权绑定，按LiveTranslate客户端表保留session.voice setter，输出字段仍须Andre；历史Aiden/Tina冲突真实帧与人工Andre冲突分别回归。指定7文件170项离线检查在网络阻断guard下通过；默认CLI预检另存guard计数为0。官方3.8完整例仍为复刻场景，preset setter实际生效与男声听感未验证；完整类型检查保留集成缺项，未重复查找编译器。原录音/旧输出/四枚spent保留，不安装/推送/部署/改密钥网络。下一步在当次新授权后单次完整试听，以实际英文完整性、男声听感和无明显漂移验收。见[依据、改动及限制](docs/LIVETRANSLATE_ANDRE_OFFLINE_SELECTION_2026-10-15.md)。以下各段为此前阶段记录。
+
 ## 2026-10-15 最新：单中文Tina独立试听候选
 
 本轮新授权改用Tina以先取得完整英文译音；仅single-local明确选择及确认Tina，其他已有协议/限量不变，默认client/dual/duplex继续Aiden。基于a66在独立目录保留旧候选、失败记录和三枚spent；相关7文件168项离线回归在网络阻断保护下通过，diff检查通过；再按一次5元授权执行，无自动补跑。真实回执保存于独立执行根，不把离线或短试听当长通话验收。见[本轮范围](docs/LIVETRANSLATE_TINA_SINGLE_AUDITION_2026-10-15.md)。

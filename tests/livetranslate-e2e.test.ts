@@ -377,7 +377,7 @@ test('real audition runner and protocol client consume two synthetic PCM clips, 
   assert.equal(result.configuration.providerCancelSupported, false);
 });
 
-test('single-local runner uses Tina, permits an authorized missing clone echo with a warning and rejects incompatible configurations', async () => {
+test('single-local runner requests the Andre candidate, permits an authorized missing clone echo with a warning and rejects incompatible configurations', async () => {
   const sample = Buffer.alloc(3200, 1);
   const input: PreparedLiveTranslateAuditionInput = {
     mode: 'single-local',
@@ -393,18 +393,19 @@ test('single-local runner uses Tina, permits an authorized missing clone echo wi
     totalSeconds: 0.1,
   };
   const cases = [
-    { voice: 'Tina', success: true, patch: (session: any) => session },
+    { voice: 'Andre', success: true, patch: (session: any) => session },
+    { voice: 'Tina', patch: (session: any) => ({ ...session, audio: { ...session.audio, output: { ...session.audio.output, voice: 'Tina' } } }) },
     { voice: 'Aiden', patch: (session: any) => ({ ...session, audio: { ...session.audio, output: { ...session.audio.output, voice: 'Aiden' } } }) },
     { voice: null, patch: (session: any) => ({ ...session, audio: { ...session.audio, output: { ...session.audio.output, voice: undefined } } }) },
-    { voice: 'Tina', success: true, missingCloneEcho: true, patch: (session: any) => ({ ...session, enable_voice_clone: undefined }) },
-    { voice: 'Tina', patch: (session: any) => ({ ...session, enable_voice_clone: true }) },
-    { voice: 'Tina', patch: (session: any) => ({ ...session, enable_voice_clone: null }) },
-    { voice: 'Tina', patch: (session: any) => ({ ...session, enable_voice_clone: 'false' }) },
-    { voice: 'Tina', patch: (session: any) => ({ ...session, model: 'qwen3.5-livetranslate-flash-realtime' }) },
-    { voice: 'Tina', patch: (session: any) => ({ ...session, translation: { language: 'zh' } }) },
-    { voice: 'Tina', patch: (session: any) => ({ ...session, translation: undefined }) },
-    { voice: 'Tina', patch: (session: any) => ({ ...session, audio: { ...session.audio, input: { ...session.audio.input, format: { type: 'pcm', sample_rate: 24000 } } } }) },
-    { voice: 'Tina', patch: (session: any) => ({ ...session, audio: { ...session.audio, output: { ...session.audio.output, format: undefined } } }) },
+    { voice: 'Andre', success: true, missingCloneEcho: true, patch: (session: any) => ({ ...session, enable_voice_clone: undefined }) },
+    { voice: 'Andre', patch: (session: any) => ({ ...session, enable_voice_clone: true }) },
+    { voice: 'Andre', patch: (session: any) => ({ ...session, enable_voice_clone: null }) },
+    { voice: 'Andre', patch: (session: any) => ({ ...session, enable_voice_clone: 'false' }) },
+    { voice: 'Andre', patch: (session: any) => ({ ...session, model: 'qwen3.5-livetranslate-flash-realtime' }) },
+    { voice: 'Andre', patch: (session: any) => ({ ...session, translation: { language: 'zh' } }) },
+    { voice: 'Andre', patch: (session: any) => ({ ...session, translation: undefined }) },
+    { voice: 'Andre', patch: (session: any) => ({ ...session, audio: { ...session.audio, input: { ...session.audio.input, format: { type: 'pcm', sample_rate: 24000 } } } }) },
+    { voice: 'Andre', patch: (session: any) => ({ ...session, audio: { ...session.audio, output: { ...session.audio.output, format: undefined } } }) },
   ];
   for (const item of cases) {
     const wires: Wire[] = [];
@@ -440,7 +441,7 @@ test('single-local runner uses Tina, permits an authorized missing clone echo wi
     });
     assert.equal(result.counters.sessions, 1);
     assert.equal(wires.length, 1);
-    assert.equal(wires[0].sent[0].session.voice, 'Tina');
+    assert.equal(wires[0].sent[0].session.voice, 'Andre');
     assert.equal(wires[0].sent[0].session.enable_voice_clone, false);
     assert.equal(wires[0].closed, 1);
     if (item.success) {
@@ -451,9 +452,9 @@ test('single-local runner uses Tina, permits an authorized missing clone echo wi
       assert.equal(result.observedSessionConfigurations.length, 1);
       const confirmed = result.confirmedSessions[0];
       const acknowledged = result.observedSessionConfigurations[0];
-      assert.equal(result.configuration.voice, 'Tina');
-      assert.equal(confirmed.voice, 'Tina');
-      assert.equal(acknowledged.voice, 'Tina');
+      assert.equal(result.configuration.voice, 'Andre');
+      assert.equal(confirmed.voice, 'Andre');
+      assert.equal(acknowledged.voice, 'Andre');
       assert.equal(acknowledged.accepted, true);
       assert.equal(acknowledged.voiceCloneEnabled, item.missingCloneEcho ? null : false);
       assert.equal(confirmed.voiceCloneEnabled, item.missingCloneEcho ? null : false);
@@ -514,16 +515,16 @@ test('single-local runner rejects a claimed missing-clone warning without a corr
     clientFactory(options) {
       creates += 1;
       assert.equal(options.allowMissingVoiceCloneEcho, true);
-      assert.equal(options.voice, 'Tina');
+      assert.equal(options.voice, 'Andre');
       const session: LiveTranslateSession = {
-        role: 'local', sessionId: 'synthetic_warningless', model: MODEL, voice: 'Tina',
+        role: 'local', sessionId: 'synthetic_warningless', model: MODEL, voice: 'Andre',
         voiceCloneEnabled: null, voiceCloneConfirmation: 'missing_echo_warning', targetLanguage: 'en',
         inputSampleRate: 16000, outputSampleRate: 24000, outputModalities: ['text', 'audio'],
         configurationAcknowledgement: { eventId: 'synthetic_ack', receiveSequence: 2,
           receivedAt: 0, basis: 'provider_session_updated' },
       };
       options.onSessionConfiguration?.({
-        role: 'local', sessionId: session.sessionId, model: MODEL, voice: 'Tina',
+        role: 'local', sessionId: session.sessionId, model: MODEL, voice: 'Andre',
         voiceCloneEnabled: null, targetLanguage: 'en', accepted: true,
         ...session.configurationAcknowledgement,
       });
