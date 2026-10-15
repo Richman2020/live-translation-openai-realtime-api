@@ -139,8 +139,10 @@ export function createLiveTranslateClient(
   if (options.enabled !== true) throw new Error('LIVETRANSLATE_DISABLED');
   const endpoint = buildLiveTranslateEndpoint(options.workspaceId);
   const { role } = options;
+  const voice = options.voice === undefined ? LIVE_TRANSLATE_VOICE : options.voice;
   if (
     !['local', 'remote'].includes(role) ||
+    !['Aiden', 'Tina'].includes(voice) ||
     typeof options.apiKey !== 'string' ||
     !options.apiKey.trim() ||
     (options.timeoutMs !== undefined &&
@@ -356,8 +358,8 @@ export function createLiveTranslateClient(
     return accepted && !closed();
   };
   const responseConfiguration = (raw: any) =>
-    requireValue(raw?.voice === undefined || raw.voice === LIVE_TRANSLATE_VOICE,
-      'response.voice', 'Aiden', raw?.voice, 'LIVETRANSLATE_CONFIGURATION_REJECTED') &&
+    requireValue(raw?.voice === undefined || raw.voice === voice,
+      'response.voice', voice, raw?.voice, 'LIVETRANSLATE_CONFIGURATION_REJECTED') &&
     requireValue(raw?.modalities === undefined || (Array.isArray(raw.modalities) &&
       raw.modalities.length === modalities.length &&
       modalities.every((value) => raw.modalities.includes(value)) &&
@@ -697,7 +699,7 @@ export function createLiveTranslateClient(
         type: 'session.update',
         session: {
           output_modalities: [...modalities],
-          voice: LIVE_TRANSLATE_VOICE,
+          voice,
           enable_voice_clone: false,
           audio: {
             input: {
@@ -730,8 +732,8 @@ export function createLiveTranslateClient(
         [s?.audio?.input?.format?.sample_rate === 16000, 'session.audio.input.format.sample_rate', '16000', s?.audio?.input?.format?.sample_rate],
         [s?.audio?.output?.format?.type === 'pcm', 'session.audio.output.format.type', 'pcm', s?.audio?.output?.format?.type],
         [s?.audio?.output?.format?.sample_rate === 24000, 'session.audio.output.format.sample_rate', '24000', s?.audio?.output?.format?.sample_rate],
-        [s?.audio?.output?.voice === LIVE_TRANSLATE_VOICE, 'session.audio.output.voice', 'Aiden', s?.audio?.output?.voice],
-        [s?.voice === undefined || s.voice === LIVE_TRANSLATE_VOICE, 'session.voice', 'Aiden', s?.voice],
+        [s?.audio?.output?.voice === voice, 'session.audio.output.voice', voice, s?.audio?.output?.voice],
+        [s?.voice === undefined || s.voice === voice, 'session.voice', voice, s?.voice],
         [s?.enable_voice_clone === false || allowMissingCloneEcho,
           'session.enable_voice_clone', 'false', s?.enable_voice_clone],
         [s?.audio?.input?.turn_detection?.type === 'speaker_detection', 'session.audio.input.turn_detection.type', 'speaker_detection', s?.audio?.input?.turn_detection?.type],

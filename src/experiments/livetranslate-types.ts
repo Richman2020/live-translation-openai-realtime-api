@@ -1,11 +1,12 @@
 import type WebSocket from 'ws';
 
 export type LiveTranslateRole = 'local' | 'remote';
+export type LiveTranslateVoice = 'Aiden' | 'Tina';
 export type LiveTranslateSession = {
   sessionId: string;
   role: LiveTranslateRole;
   model: 'qwen3.8-livetranslate-flash-realtime';
-  voice: 'Aiden';
+  voice: LiveTranslateVoice;
   /** null means the provider omitted this field; never infer false from the request. */
   voiceCloneEnabled: false | null;
   voiceCloneConfirmation?: 'explicit_false' | 'missing_echo_warning';
@@ -126,7 +127,7 @@ export type LiveTranslateProtocolDiagnostic = {
     'source.binding' | 'source.translation' | 'response.audio.done' | 'response.text.done';
   expected: 'json_object' | 'event_type_string' | 'optional_identifier_string' |
     'nonempty_identifier_string' | 'matching_session_id' | 'exact_model' |
-    'exact_output_modalities' | 'pcm' | '16000' | '24000' | 'Aiden' | 'false' |
+    'exact_output_modalities' | 'pcm' | '16000' | '24000' | 'Aiden' | 'Tina' | 'false' |
     'speaker_detection' | '0.5' | 'target_language' | 'nonnegative_integer' |
     'zero_index' | 'text_within_limit' | 'base64_pcm16' | 'completed' |
     'in_progress' | 'pending_output_complete' | 'no_provider_error' |
@@ -217,6 +218,8 @@ export type LiveTranslateUsage = {
 export type LiveTranslateClientOptions = {
   enabled?: boolean;
   role: LiveTranslateRole;
+  /** Trusted caller policy; standalone and duplex clients retain Aiden by default. */
+  voice?: LiveTranslateVoice;
   workspaceId: string;
   apiKey: string;
   proxyUrl?: string;

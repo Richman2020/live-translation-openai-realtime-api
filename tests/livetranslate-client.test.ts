@@ -100,7 +100,7 @@ function fixture(
         format: { type: 'pcm', sample_rate: 16000 },
         turn_detection: { type: 'speaker_detection', threshold: 0.5 },
       },
-      output: { format: { type: 'pcm', sample_rate: 24000 }, voice: 'Aiden' },
+      output: { format: { type: 'pcm', sample_rate: 24000 }, voice: extras.voice ?? 'Aiden' },
     },
     translation: { language: role === 'local' ? 'en' : 'zh' },
   });
@@ -284,6 +284,43 @@ test('Aiden input remains fenced until a complete server configuration acknowled
   f.client.append(Buffer.alloc(320));
   assert.deepEqual(f.socket.sent.map((event) => event.type), ['session.update', 'input_audio_buffer.append']);
   f.client.abort();
+});
+
+test('trusted Tina selection pins request, nested ACK and optional top-level voice without changing the Aiden default', async () => {
+  const selected = fixture('local', { voice: 'Tina' });
+  await selected.start({ voice: 'Tina' });
+  const session = await selected.client.ready;
+  assert.equal(selected.socket.sent[0].session.voice, 'Tina');
+  assert.equal(selected.socket.sent[0].session.enable_voice_clone, false);
+  assert.equal(session.voice, 'Tina');
+  selected.client.append(Buffer.alloc(320));
+  assert.equal(selected.socket.sent[1].type, 'input_audio_buffer.append');
+  selected.client.abort();
+
+  for (const field of ['nested', 'top-level']) {
+    const rejected = fixture('local', { voice: 'Tina' });
+    const patch = field === 'nested'
+      ? { audio: { ...rejected.session().audio, output: { ...rejected.session().audio.output, voice: 'Aiden' } } }
+      : { voice: 'Aiden' };
+    // eslint-disable-next-line no-await-in-loop -- Every incompatible voice has one isolated fake socket.
+    await assert.rejects(rejected.start(patch), /CONFIGURATION_REJECTED/);
+    assert.equal(rejected.protocolDiagnostics[0].expected, 'Tina');
+    assert.equal(rejected.socket.sent.filter((event) => event.type === 'input_audio_buffer.append').length, 0);
+    assert.equal(rejected.addresses.length, 1);
+  }
+  const response = fixture('local', { voice: 'Tina' });
+  await response.start();
+  response.receive({ type: 'response.created', response: { id: 'wrong_response_voice', status: 'in_progress', voice: 'Aiden' } });
+  assert.equal(response.errors[0].code, 'LIVETRANSLATE_CONFIGURATION_REJECTED');
+  assert.equal(response.protocolDiagnostics[0].validationPath, 'response.voice');
+  assert.equal(response.protocolDiagnostics[0].expected, 'Tina');
+  assert.equal(response.socket.sent.length, 1);
+
+  const unchanged = fixture();
+  await unchanged.start();
+  assert.equal(unchanged.socket.sent[0].session.voice, 'Aiden');
+  unchanged.client.abort();
+  assert.throws(() => fixture('local', { voice: 'unlisted' as any }), /CONFIG_INVALID/);
 });
 
 test('Tina, absent voice, clone uncertainty and wrong language stop with safe evidence and zero input', async () => {

@@ -23,7 +23,7 @@ import {
   LIVETRANSLATE_AUDITION_LIMITS,
   liveTranslateAuditionLimits,
   LIVETRANSLATE_AUDITION_MODEL,
-  LIVETRANSLATE_AUDITION_VOICE,
+  liveTranslateAuditionVoice,
   liveTranslateSpaceHost,
   type PreparedLiveTranslateAuditionInput,
 } from './livetranslate-audition-input';
@@ -38,7 +38,7 @@ export type LiveTranslateAuditionResult = {
   configuration: {
     mode: 'dual' | 'single-local';
     model: typeof LIVETRANSLATE_AUDITION_MODEL;
-    voice: typeof LIVETRANSLATE_AUDITION_VOICE;
+    voice: ReturnType<typeof liveTranslateAuditionVoice>;
     spaceHost: string;
     inputSampleRate: 16000;
     outputSampleRate: 24000;
@@ -136,6 +136,7 @@ export async function runLiveTranslateAudition(
 ): Promise<LiveTranslateAuditionResult> {
   const { input } = options;
   const mode = input?.mode ?? 'dual';
+  const voice = liveTranslateAuditionVoice(mode);
   const limits = liveTranslateAuditionLimits(mode);
   const timeoutMs =
     options.timeoutMs ?? LIVETRANSLATE_AUDITION_LIMITS.totalTimeoutMs;
@@ -177,7 +178,7 @@ export async function runLiveTranslateAudition(
     configuration: {
       mode,
       model: LIVETRANSLATE_AUDITION_MODEL,
-      voice: LIVETRANSLATE_AUDITION_VOICE,
+      voice,
       spaceHost: input.spaceHost,
       inputSampleRate: 16000,
       outputSampleRate: 24000,
@@ -300,6 +301,7 @@ export async function runLiveTranslateAudition(
       const client = (options.clientFactory ?? createLiveTranslateClient)({
         enabled: true,
         role: clip.role,
+        voice,
         workspaceId: input.workspaceId,
         apiKey: options.apiKey,
         proxyUrl: options.proxyUrl,
@@ -535,7 +537,7 @@ export async function runLiveTranslateAudition(
         (observedSessionId !== undefined &&
           observedSessionId !== session.sessionId) ||
         session.model !== LIVETRANSLATE_AUDITION_MODEL ||
-        session.voice !== LIVETRANSLATE_AUDITION_VOICE ||
+        session.voice !== voice ||
         (session.voiceCloneEnabled !== false && !acceptedMissingCloneEcho) ||
         session.targetLanguage !== (clip.role === 'local' ? 'en' : 'zh') ||
         session.configurationAcknowledgement?.basis !==

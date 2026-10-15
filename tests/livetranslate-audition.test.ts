@@ -158,7 +158,7 @@ function mock(
         ready: Promise.resolve({
           ...base,
           model: LIVETRANSLATE_AUDITION_MODEL,
-          voice: 'Aiden',
+          voice: client.voice ?? 'Aiden',
           voiceCloneEnabled: false,
           targetLanguage: client.role === 'local' ? 'en' : 'zh',
           configurationAcknowledgement: {
@@ -1170,6 +1170,7 @@ function singleFixture(t: TestContext, seconds = 1) {
 function singleApproval(input: PreparedLiveTranslateAuditionInput) {
   return {
     ...approval(input),
+    voice: 'Tina',
     version: 2,
     mode: 'single-local',
     scope: LIVETRANSLATE_SINGLE_LOCAL_SCOPE,
@@ -1241,9 +1242,12 @@ test('single-local mock uses exactly one session and preserves first receive, fu
   const result = await runLiveTranslateAudition(h.options);
   assert.equal(result.status, 'completed');
   assert.equal(result.configuration.mode, 'single-local');
+  assert.equal(result.configuration.voice, 'Tina');
   assert.equal(result.counters.sessions, 1);
   assert.equal(h.captured.length, 1);
   assert.equal(h.captured[0].role, 'local');
+  assert.equal(h.captured[0].voice, 'Tina');
+  assert.equal(result.confirmedSessions[0].voice, 'Tina');
   assert.equal(result.audio.length, 1);
   assert.equal(result.audio[0].firstPcmBasis, 'client_receive_timing');
   assert.equal(result.audio[0].firstPcmAt, 1025);
@@ -1314,6 +1318,9 @@ test('dual clips keep both partial tail frames rather than dropping audio to fit
   const h = mock(f.input());
   const result = await runLiveTranslateAudition(h.options);
   assert.equal(result.status, 'completed');
+  assert.equal(result.configuration.voice, 'Aiden');
+  assert.ok(h.captured.every(({ voice }) => voice === 'Aiden'));
+  assert.ok(result.confirmedSessions.every(({ voice }) => voice === 'Aiden'));
   assert.equal(result.sends.length, 1201);
   assert.deepEqual(
     result.sends
@@ -1335,6 +1342,8 @@ test('single-local approval has a fresh isolated scope and cannot exchange autho
     fixedNow,
   );
   assert.equal(value.scope, LIVETRANSLATE_SINGLE_LOCAL_SCOPE);
+  assert.equal(value.scope, 'livetranslate-single-local-tina-audition-v1');
+  assert.equal(value.parentCandidate, 'a66fd3f5881f0258ee704988592ea5640a3d0559');
   assert.equal(value.mode, 'single-local');
   writeFileSync(path, JSON.stringify(approval(input)));
   assert.throws(
@@ -1478,7 +1487,7 @@ class SingleAuditionWire extends EventEmitter {
           format: { type: 'pcm', sample_rate: 16000 },
           turn_detection: { type: 'speaker_detection', threshold: 0.5 },
         },
-        output: { format: { type: 'pcm', sample_rate: 24000 }, voice: 'Aiden' },
+        output: { format: { type: 'pcm', sample_rate: 24000 }, voice: 'Tina' },
       },
       translation: { language: 'en' },
     };
@@ -1584,6 +1593,7 @@ test('single-local real client plus fake wire preserves default 20ms pacing and 
     clientFactory: (options) => {
       creates += 1;
       assert.equal(options.role, 'local');
+      assert.equal(options.voice, 'Tina');
       const client = createLiveTranslateClient({
         ...options,
         createWebSocket: (url) => {
@@ -1604,6 +1614,8 @@ test('single-local real client plus fake wire preserves default 20ms pacing and 
   assert.equal(result.status, 'completed', result.errorCode);
   assert.equal(creates, 1);
   assert.equal(result.counters.sessions, 1);
+  assert.equal(result.configuration.voice, 'Tina');
+  assert.equal(result.confirmedSessions[0].voice, 'Tina');
   assert.equal(result.counters.inputBytesSent, 3840);
   assert.equal(wire.appendedAt.length, 6);
   assert.equal(result.sends.length, 6);
@@ -1639,7 +1651,7 @@ test('single-local real client plus fake wire preserves default 20ms pacing and 
   assert.equal(report.protocolTraceTruncated, false);
 });
 
-test('Aiden one-shot approval records pending in-session validation and rejects Tina or a fabricated prior access claim', (t) => {
+test('Tina single-local one-shot approval records pending in-session validation and rejects Aiden or a fabricated prior access claim', (t) => {
   const f = singleFixture(t);
   const value = singleApproval(f.input());
   const path = join(f.directory, 'approval.json');
@@ -1647,11 +1659,11 @@ test('Aiden one-shot approval records pending in-session validation and rejects 
   const accepted = readLiveTranslateAuditionApproval(
     path, f.input(), candidate, fixedNow,
   );
-  assert.equal(accepted.voice, 'Aiden');
+  assert.equal(accepted.voice, 'Tina');
   assert.equal(
     accepted.preflight.modelAndVoiceAccess, 'verify_in_authorized_session',
   );
-  writeFileSync(path, JSON.stringify({ ...value, voice: 'Tina' }));
+  writeFileSync(path, JSON.stringify({ ...value, voice: 'Aiden' }));
   assert.throws(
     () => readLiveTranslateAuditionApproval(path, f.input(), candidate, fixedNow),
     /APPROVAL_BINDING_INVALID$/u,

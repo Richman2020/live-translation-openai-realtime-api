@@ -24,7 +24,7 @@ import {
   LIVETRANSLATE_AUDITION_SCOPE,
   LIVETRANSLATE_SINGLE_LOCAL_SCOPE,
   LIVETRANSLATE_SINGLE_LOCAL_PARENT,
-  LIVETRANSLATE_AUDITION_VOICE,
+  liveTranslateAuditionVoice,
   liveTranslateExactKeys,
   liveTranslateRecord,
   prepareLiveTranslateAuditionInput,
@@ -87,7 +87,7 @@ export type LiveTranslateAuditionApproval = {
     | typeof LIVETRANSLATE_SINGLE_LOCAL_PARENT;
   candidateSha: string;
   model: typeof LIVETRANSLATE_AUDITION_MODEL;
-  voice: typeof LIVETRANSLATE_AUDITION_VOICE;
+  voice: ReturnType<typeof liveTranslateAuditionVoice>;
   spaceHost: string;
   manifestSha256: string;
   sampleHashes: { id: string; sha256: string }[];
@@ -170,7 +170,7 @@ export function readLiveTranslateAuditionApproval(
     !/^[a-f0-9]{40}$/u.test(value.candidateSha) ||
     (candidateSha !== undefined && value.candidateSha !== candidateSha) ||
     value.model !== LIVETRANSLATE_AUDITION_MODEL ||
-    value.voice !== LIVETRANSLATE_AUDITION_VOICE ||
+    value.voice !== liveTranslateAuditionVoice(input.mode) ||
     value.spaceHost !== input.spaceHost ||
     value.manifestSha256 !== input.manifestSha256 ||
     value.currency !== 'CNY' ||
@@ -387,7 +387,7 @@ export async function liveTranslateAuditionMain(
     const args = parseLiveTranslateAuditionArgs(argv);
     if (args.help) {
       write(
-        'Offline only by default: node --import tsx scripts/livetranslate-audition.mts --manifest PATH. Future --run also requires --approval PATH --out NEW_PRIVATE_DIRECTORY and a new model/Aiden/space-host/data/CNY authorization. No microphone, phone, automatic playback, retry or reconnect.',
+        'Offline only by default: node --import tsx scripts/livetranslate-audition.mts --manifest PATH. Future --run also requires --approval PATH --out NEW_PRIVATE_DIRECTORY and a new model/voice/space-host/data/CNY authorization. Single-local uses Tina; dual uses Aiden. No microphone, phone, automatic playback, retry or reconnect.',
       );
       return 0;
     }
@@ -407,7 +407,7 @@ export async function liveTranslateAuditionMain(
               ? LIVETRANSLATE_SINGLE_LOCAL_PARENT
               : LIVETRANSLATE_AUDITION_PARENT,
           model: LIVETRANSLATE_AUDITION_MODEL,
-          voice: LIVETRANSLATE_AUDITION_VOICE,
+          voice: liveTranslateAuditionVoice(input.mode),
           spaceHost: input.spaceHost,
           manifestSha256: input.manifestSha256,
           samples: input.clips.map(
