@@ -4,6 +4,18 @@
 
 需求见 [PROJECT_BRIEF.md](PROJECT_BRIEF.md)，工作规则见 [AGENTS.md](AGENTS.md)，运行步骤见 [LOCAL_SETUP.md](LOCAL_SETUP.md)，后续执行入口见 [LOCAL_CODEX_HANDOFF.md](LOCAL_CODEX_HANDOFF.md)。
 
+## 最新：首轮后停译分类缺陷修复，本地验收完成（2026-10-16，北京时间）
+
+- 本轮以精确 `b0d7d81230a83d717d47af21416d1e351a206f5a` 为父，独立分支 `codex/ai-phone-livetranslate-item-conflict-20261016`；原分支、原未提交全文/patch及全部既有证据封存保留。未纳入既有 `node_modules` 链接或旧未提交进度资料。
+- 最新只读核验：线上确为 b0，部署 `8752d205-4d9d-47ee-b776-e1033e14f29c` SUCCESS，source固定 b0，staged=null。本轮没有发布；下面先前“最终确认取消/待用户提交”的段落是当时记录，不能覆盖用户随后手动发布及本轮实际回读结果。
+- 本次 call `12d46269-f186-48c8-bb94-432f126aa485` 的既有日志匹配：UTC02:25:58.786 local sourceSequence3，152ms后ITEM_CONFLICT，媒体到02:26:35.839才停止。缺原始故障帧、event.type、source/item/response ID关系和fatal分支，**具体实通根因仍未确认**，不由最终清理日志推断挂断发起者，没有第257响应证据。
+- **确定并复现的代码缺陷已修**：真实B28原音簿记也用assistant/input_audio；旧role+prev分类会污染译项绑定。改为正面识别input_audio/VAD/ASR，未知创建项有界暂存，真实response输出确证后才绑定；ASR final前首chunk可发声。真正ID/slot/response/source冲突、VAD播放准入、FIFO/去重、迟到/退休/挂断保护均保留。
+- 补首个fatal固定分支、事件类型、路径、值类型及本地收帧序号的两层安全投影，不记供应商原ID/正文/音频/密钥。真正失败仍停双方向翻译并保留电话和英文原声；页面明确停译提示已通过真实SSE/DOM及刷新持久回归。现场页面是否收到仍未知。
+- **本轮实际成绩**：最终LiveTranslate专项289/289；全量2215 total /2210 pass /5既有Windows专用skip /0 fail；typecheck、额外.mts夹具类型、build、public JS语法、diff-check均通过。7组浏览器各一次全过：43/107/123/120/29/50/84，exceptions=[]、externalRequests=0，模拟供应商无真实调用；独立审查无剩余阻断。
+- 全部尝试保留：新增分类16项在b0为4pass/12fail，修后16/16再21/21；最终22项含在289专项中。诊断初次typecheck曾因新测试夹具缺必需回调/参数失败，修正后通过；没有删/跳测试或盲目重跑。全量后仅修正两行测试注释，独审精确核对执行逻辑不变。
+- 完整证据/修改/剩余风险见 [本轮报告](docs/LIVETRANSLATE_ITEM_CLASSIFICATION_FIX_2026-10-16.md)，审计原件在 `/workspace/ai-phone-reference/livetranslate-item-conflict-20261016`，最终候选SHA见该提交与FINAL_RECEIPT.json。不把历史五帧声线回放或合成多轮当本次缺失事故帧的精确重放。
+- 未执行：新GitHub CI、Docker构建、真实通话和模型请求。未安装、推送、部署、拨号、启麦、读取密钥或改平台/供应商配置；Andre、原音直通、OpenAI/阿里三段及回退保留。**第257响应停止翻译仍未解决**。下一步需新候选推送/CI授权，发布和真实试打另行确认；不复用旧授权。
+
 ## 最新：CI #73 本地夹具同步与安全诊断完成（2026-10-16，未推送）
 
 - 精确父提交`e97ab1a3139381411daaedec99b2b29f4252058b`，独立本地分支`codex/ai-phone-ci73-controlled-fixture-20261016`。原分支、原失败日志及原未提交PROGRESS全文/patch均已哈希封存；下面前阶段失败记录保留。只改受控浏览器夹具、安全诊断helper、2份测试及文档，不改src/public、模型、音色、workflow、依赖或第257响应限制。

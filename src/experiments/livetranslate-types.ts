@@ -219,15 +219,18 @@ export const LIVE_TRANSLATE_PROTOCOL_SCHEMA_PATHS = [
 ] as const;
 export type LiveTranslateProtocolSchemaPath =
   (typeof LIVE_TRANSLATE_PROTOCOL_SCHEMA_PATHS)[number];
+export const LIVE_TRANSLATE_PROTOCOL_VALUE_TYPES = [
+  'missing',
+  'null',
+  'boolean',
+  'number',
+  'string',
+  'array',
+  'object',
+  'binary',
+] as const;
 export type LiveTranslateProtocolValueType =
-  | 'missing'
-  | 'null'
-  | 'boolean'
-  | 'number'
-  | 'string'
-  | 'array'
-  | 'object'
-  | 'binary';
+  (typeof LIVE_TRANSLATE_PROTOCOL_VALUE_TYPES)[number];
 export type LiveTranslateProtocolEvent = {
   role: LiveTranslateRole;
   at: number;
@@ -268,79 +271,96 @@ export type LiveTranslateProtocolEvent = {
       | null;
   };
 };
+export const LIVE_TRANSLATE_ITEM_CONFLICT_KINDS = [
+  'source_after_output',
+  'output_after_source',
+  'response_slot_rebound',
+  'output_response_rebound',
+  'vad_after_output',
+  'created_input_after_output',
+  'completed_output_missing',
+] as const;
+export const LIVE_TRANSLATE_PROTOCOL_DIAGNOSTIC_PATHS = [
+  ...LIVE_TRANSLATE_PROTOCOL_SCHEMA_PATHS,
+  'frame',
+  'frame.binary',
+  'frame.bytes',
+  'frame.utf8',
+  'transport.send',
+  'transport.ready_timeout',
+  'transport.finish_timeout',
+  'json',
+  'state',
+  'internal.handler',
+  'source.binding',
+  'source.translation',
+  'response.audio.done',
+  'response.text.done',
+] as const;
+export const LIVE_TRANSLATE_PROTOCOL_DIAGNOSTIC_EXPECTATIONS = [
+  'json_object',
+  'event_type_string',
+  'optional_identifier_string',
+  'nonempty_identifier_string',
+  'matching_session_id',
+  'exact_model',
+  'exact_output_modalities',
+  'pcm',
+  '16000',
+  '24000',
+  'Aiden',
+  'Tina',
+  'Andre',
+  'false',
+  'speaker_detection',
+  '0.5',
+  'target_language',
+  'nonnegative_integer',
+  'zero_index',
+  'text_within_limit',
+  'base64_pcm16',
+  'completed',
+  'in_progress',
+  'pending_output_complete',
+  'no_provider_error',
+  'valid_protocol_transition',
+  'bounded_capacity',
+  'valid_callback',
+  'text_json_frame',
+  'valid_json',
+  'known_3_8_event',
+  'single_output_item',
+  'single_content_part',
+  'consistent_source_binding',
+  'consistent_item_binding',
+  'response_created_before_output',
+  'output_modality',
+  'error_free_transport',
+  'send_available',
+  'handler_completed',
+  'array',
+  'object',
+  'valid_utf8',
+  'Andre_or_Tina_declaration',
+  'exact_input_modalities',
+  'audio_input_enabled',
+  'nondecreasing_offset',
+  'pcm16_bytes',
+] as const;
 export type LiveTranslateProtocolDiagnostic = {
   role: LiveTranslateRole;
   at: number;
   stage: 'connecting' | 'configuring' | 'ready' | 'finishing' | 'closed';
   eventType: LiveTranslateProtocolEventType;
-  validationPath:
-    | LiveTranslateProtocolSchemaPath
-    | 'frame'
-    | 'frame.binary'
-    | 'frame.bytes'
-    | 'frame.utf8'
-    | 'transport.send'
-    | 'transport.ready_timeout'
-    | 'transport.finish_timeout'
-    | 'json'
-    | 'state'
-    | 'internal.handler'
-    | 'source.binding'
-    | 'source.translation'
-    | 'response.audio.done'
-    | 'response.text.done';
-  expected:
-    | 'json_object'
-    | 'event_type_string'
-    | 'optional_identifier_string'
-    | 'nonempty_identifier_string'
-    | 'matching_session_id'
-    | 'exact_model'
-    | 'exact_output_modalities'
-    | 'pcm'
-    | '16000'
-    | '24000'
-    | 'Aiden'
-    | 'Tina'
-    | 'Andre'
-    | 'false'
-    | 'speaker_detection'
-    | '0.5'
-    | 'target_language'
-    | 'nonnegative_integer'
-    | 'zero_index'
-    | 'text_within_limit'
-    | 'base64_pcm16'
-    | 'completed'
-    | 'in_progress'
-    | 'pending_output_complete'
-    | 'no_provider_error'
-    | 'valid_protocol_transition'
-    | 'bounded_capacity'
-    | 'valid_callback'
-    | 'text_json_frame'
-    | 'valid_json'
-    | 'known_3_8_event'
-    | 'single_output_item'
-    | 'single_content_part'
-    | 'consistent_source_binding'
-    | 'consistent_item_binding'
-    | 'response_created_before_output'
-    | 'output_modality'
-    | 'error_free_transport'
-    | 'send_available'
-    | 'handler_completed'
-    | 'array'
-    | 'object'
-    | 'valid_utf8'
-    | 'Andre_or_Tina_declaration'
-    | 'exact_input_modalities'
-    | 'audio_input_enabled'
-    | 'nondecreasing_offset'
-    | 'pcm16_bytes';
+  validationPath: (typeof LIVE_TRANSLATE_PROTOCOL_DIAGNOSTIC_PATHS)[number];
+  expected: (typeof LIVE_TRANSLATE_PROTOCOL_DIAGNOSTIC_EXPECTATIONS)[number];
   actualType: LiveTranslateProtocolValueType;
   fatal: boolean;
   code: string;
+  /** Fixed branch evidence, never a provider identifier or supplier message. */
+  conflictKind?: (typeof LIVE_TRANSLATE_ITEM_CONFLICT_KINDS)[number];
+  /** Local receive ordinal; not the provider event ID. */
+  receiveSequence?: number;
   acknowledgement?: {
     sessionId: string;
     eventId: string | null;

@@ -1,4 +1,7 @@
-import type { LiveTranslateVoicePolicy } from '../experiments/livetranslate-types';
+import type {
+  LiveTranslateProtocolDiagnostic,
+  LiveTranslateVoicePolicy,
+} from '../experiments/livetranslate-types';
 
 export const LIVE_TRANSLATE_PHONE_FAILURE_CODES = [
   'LIVETRANSLATE_PHONE_CONFIGURATION_INVALID',
@@ -27,6 +30,7 @@ export type LiveTranslatePhoneDiagnostic = {
   stage:
     | 'configuration'
     | 'voice_evidence'
+    | 'protocol_failure'
     | 'warning'
     | 'input_received'
     | 'association'
@@ -42,6 +46,13 @@ export type LiveTranslatePhoneDiagnostic = {
     | 'usage'
     | 'failed';
   code?: string;
+  fatal?: true;
+  eventType?: LiveTranslateProtocolDiagnostic['eventType'];
+  validationPath?: LiveTranslateProtocolDiagnostic['validationPath'];
+  expected?: LiveTranslateProtocolDiagnostic['expected'];
+  actualType?: LiveTranslateProtocolDiagnostic['actualType'];
+  conflictKind?: LiveTranslateProtocolDiagnostic['conflictKind'];
+  receiveSequence?: number;
   sequence?: number;
   sourceSequence?: number;
   responseSequence?: number;

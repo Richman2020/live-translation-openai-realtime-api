@@ -1,14 +1,23 @@
-import { isLiveTranslateFailureCode } from '../experiments/livetranslate-types';
+import {
+  isLiveTranslateFailureCode,
+  LIVE_TRANSLATE_ITEM_CONFLICT_KINDS,
+  LIVE_TRANSLATE_PROTOCOL_DIAGNOSTIC_EXPECTATIONS,
+  LIVE_TRANSLATE_PROTOCOL_DIAGNOSTIC_PATHS,
+  LIVE_TRANSLATE_PROTOCOL_EVENT_TYPES,
+  LIVE_TRANSLATE_PROTOCOL_VALUE_TYPES,
+} from '../experiments/livetranslate-types';
 import {
   LIVE_TRANSLATE_PHONE_FAILURE_CODES,
   LIVE_TRANSLATE_PHONE_WARNING_CODES,
 } from './livetranslate-phone-types';
+import type { LiveTranslatePhoneDiagnostic } from './livetranslate-phone-types';
 
 const stages = new Set([
   'input_received',
   'association',
   'configuration',
   'voice_evidence',
+  'protocol_failure',
   'warning',
   'source_started',
   'source_stopped',
@@ -26,6 +35,7 @@ const codes = new Set<string>([
   ...LIVE_TRANSLATE_PHONE_FAILURE_CODES,
   ...LIVE_TRANSLATE_PHONE_WARNING_CODES,
 ]);
+const phoneFailureCodes = new Set<string>(LIVE_TRANSLATE_PHONE_FAILURE_CODES);
 function field(value: unknown, name: string): unknown {
   try {
     return value && typeof value === 'object'
@@ -62,6 +72,18 @@ export function sanitizeLiveTranslatePhoneDiagnostic(
     if (allowed.includes(v)) safe[key] = v;
   };
   choose('clock', ['application_epoch_ms']);
+  if (stage === 'protocol_failure') {
+    choose('fatal', [true]);
+    choose('eventType', [
+      ...LIVE_TRANSLATE_PROTOCOL_EVENT_TYPES,
+      'unknown',
+      null,
+    ]);
+    choose('validationPath', LIVE_TRANSLATE_PROTOCOL_DIAGNOSTIC_PATHS);
+    choose('expected', LIVE_TRANSLATE_PROTOCOL_DIAGNOSTIC_EXPECTATIONS);
+    choose('actualType', LIVE_TRANSLATE_PROTOCOL_VALUE_TYPES);
+    choose('conflictKind', LIVE_TRANSLATE_ITEM_CONFLICT_KINDS);
+  }
   choose('providerEndpointBasis', ['provider_stream_estimate']);
   choose('basis', [
     'model_input_submitted',
@@ -98,7 +120,8 @@ export function sanitizeLiveTranslatePhoneDiagnostic(
   const code = field(value, 'code');
   if (
     isLiveTranslateFailureCode(code) ||
-    (typeof code === 'string' && codes.has(code))
+    (typeof code === 'string' &&
+      (stage === 'protocol_failure' ? phoneFailureCodes : codes).has(code))
   )
     safe.code = code;
   for (const key of [
@@ -119,6 +142,13 @@ export function sanitizeLiveTranslatePhoneDiagnostic(
     if (finite(n, Number.MAX_SAFE_INTEGER) && Number.isSafeInteger(n))
       safe[key] = n;
   }
+  const receiveSequence = field(value, 'receiveSequence');
+  if (
+    finite(receiveSequence, Number.MAX_SAFE_INTEGER) &&
+    Number.isSafeInteger(receiveSequence) &&
+    receiveSequence > 0
+  )
+    safe.receiveSequence = receiveSequence;
   for (const key of ['outstandingAudioMs', 'providerAudioMs', 'inputAudioMs']) {
     const n = field(value, key);
     if (finite(n, 4102444800000)) safe[key] = n;
@@ -136,6 +166,58 @@ export function sanitizeLiveTranslatePhoneDiagnostic(
   )
     safe.actualPlaybackStartAt = null;
   return Object.freeze(safe);
+}
+
+/** First boundary: the bridge must not spread arbitrary client callback data.
+ * Reuse the sink projection, then copy only its statically bounded fields. */
+export function projectLiveTranslateProtocolFailure(
+  value: unknown,
+): Omit<LiveTranslatePhoneDiagnostic, 'clock' | 'role'> | undefined {
+  if (field(value, 'fatal') !== true) return undefined;
+  const code = field(value, 'code');
+  if (
+    !isLiveTranslateFailureCode(code) &&
+    !(typeof code === 'string' && phoneFailureCodes.has(code))
+  )
+    return undefined;
+  const safe = sanitizeLiveTranslatePhoneDiagnostic({
+    role: 'local', // Actual track role is supplied by the bridge's closure.
+    stage: 'protocol_failure',
+    at: field(value, 'at'),
+    fatal: true,
+    code,
+    eventType: field(value, 'eventType'),
+    validationPath: field(value, 'validationPath'),
+    expected: field(value, 'expected'),
+    actualType: field(value, 'actualType'),
+    conflictKind: field(value, 'conflictKind'),
+    receiveSequence: field(value, 'receiveSequence'),
+  });
+  if (!safe || typeof safe.code !== 'string') return undefined;
+  // Every optional value above passed the exact corresponding enum or scalar
+  // allowlist, and no caller-provided object property is read through a getter.
+  return safe as Omit<LiveTranslatePhoneDiagnostic, 'clock' | 'role'>;
+}
+
+export function projectLiveTranslateProtocolWarning(
+  value: unknown,
+): Omit<LiveTranslatePhoneDiagnostic, 'clock' | 'role'> | undefined {
+  const code = field(value, 'code');
+  if (
+    field(value, 'fatal') !== false ||
+    typeof code !== 'string' ||
+    !(LIVE_TRANSLATE_PHONE_WARNING_CODES as readonly string[]).includes(code)
+  )
+    return undefined;
+  const safe = sanitizeLiveTranslatePhoneDiagnostic({
+    role: 'local',
+    stage: 'warning',
+    at: field(value, 'at'),
+    code,
+  });
+  return safe as
+    | Omit<LiveTranslatePhoneDiagnostic, 'clock' | 'role'>
+    | undefined;
 }
 
 export function reportCloudLiveTranslateDiagnostic(

@@ -1150,6 +1150,11 @@ test('a translation output cannot reuse a known source item identity in either a
   await linked.start();
   linked.source('shared', 'Synthetic source.');
   linked.link('shared', 'source_other');
+  // An assistant created item alone is not proof of translated output: actual
+  // input_audio bookkeeping also uses assistant. A real response output with
+  // this input ID must still fail.
+  assert.equal(linked.errors.length, 0);
+  linked.delta('response.text.delta', { delta: '合成译文' }, 'shared', 'r1');
   assert.equal(linked.errors[0].code, 'LIVETRANSLATE_ITEM_CONFLICT');
   const reverse = fixture('remote');
   await reverse.start();
@@ -1473,6 +1478,8 @@ test('speech ordering, source conflicts and send failures retain concrete safe v
   binding.source('s2', 'Synthetic second source.');
   binding.link('t1', 's1');
   binding.link('t1', 's2');
+  assert.equal(binding.errors.length, 0);
+  binding.delta('response.text.delta', { delta: '不应显示的合成译文' }, 't1');
   assert.equal(binding.errors[0].code, 'LIVETRANSLATE_SOURCE_CONFLICT');
   assert.equal(binding.protocolDiagnostics[0].validationPath, 'source.binding');
   assert.equal(binding.protocolDiagnostics[0].actualType, 'string');

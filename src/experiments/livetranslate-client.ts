@@ -138,6 +138,7 @@ type ProtocolFailureDetail = {
   validationPath: LiveTranslateProtocolDiagnostic['validationPath'];
   expected: LiveTranslateProtocolDiagnostic['expected'];
   actual: unknown;
+  conflictKind?: LiveTranslateProtocolDiagnostic['conflictKind'];
 };
 type Translation = LiveTranslateTranslation & {
   textDone: boolean;
@@ -210,6 +211,13 @@ export function createLiveTranslateClient(
   const translations = new Map<string, Translation>();
   const associations = new Map<string, string>();
   const pendingAssociations = new Map<string, string>();
+  // A source item can also have role=assistant. Its predecessor is conversation
+  // bookkeeping, not a translation edge. Only a response output proves that an
+  // otherwise ambiguous created item is a translation result.
+  const unclassifiedCreated = new Map<
+    string,
+    { predecessor: string; ambiguous: boolean }
+  >();
   const responses = new Map<string, ResponseState>();
   const seen = new Map<string, string>();
   const eventOwners = new Map<string, readonly string[]>();
@@ -315,6 +323,7 @@ export function createLiveTranslateClient(
     translations.clear();
     associations.clear();
     pendingAssociations.clear();
+    unclassifiedCreated.clear();
     responses.clear();
     seen.clear();
     eventOwners.clear();
@@ -432,6 +441,10 @@ export function createLiveTranslateClient(
         validationPath: diagnostic.validationPath,
         expected: diagnostic.expected,
         actualType: valueType(diagnostic.actual),
+        ...(diagnostic.conflictKind
+          ? { conflictKind: diagnostic.conflictKind }
+          : {}),
+        receiveSequence,
         fatal: true,
         code,
       });
@@ -655,6 +668,19 @@ export function createLiveTranslateClient(
       showTranslation(item);
     }
   };
+  const bindOutputSource = (translationId: string, sourceId: string) => {
+    const prior =
+      associations.get(translationId) ?? pendingAssociations.get(translationId);
+    if (prior !== undefined && prior !== sourceId) {
+      fail('LIVETRANSLATE_SOURCE_CONFLICT');
+      return;
+    }
+    if (associations.size >= MAX_ITEMS && !associations.has(translationId)) {
+      fail('LIVETRANSLATE_ITEM_CAPACITY');
+      return;
+    }
+    associate(translationId, sourceId);
+  };
   const ensureSource = (id: string) => {
     if (phone && terminalIdentifiers.has(`item:${id}`)) return undefined;
     if (
@@ -662,9 +688,17 @@ export function createLiveTranslateClient(
       associations.has(id) ||
       pendingAssociations.has(id)
     ) {
-      fail('LIVETRANSLATE_ITEM_CONFLICT');
+      fail('LIVETRANSLATE_ITEM_CONFLICT', undefined, undefined, {
+        validationPath: 'item_id',
+        expected: 'consistent_item_binding',
+        actual: id,
+        conflictKind: 'source_after_output',
+      });
       return undefined;
     }
+    // VAD, ASR or input_audio is positive input identity; a previously received
+    // empty assistant item must never turn its predecessor into a source edge.
+    unclassifiedCreated.delete(id);
     let source = sources.get(id);
     if (!source) {
       if (sources.size >= MAX_ITEMS) {
@@ -809,20 +843,35 @@ export function createLiveTranslateClient(
     )
       return undefined;
     if (sources.has(event.item_id)) {
-      fail('LIVETRANSLATE_ITEM_CONFLICT');
+      fail('LIVETRANSLATE_ITEM_CONFLICT', undefined, undefined, {
+        validationPath: 'item_id',
+        expected: 'consistent_item_binding',
+        actual: event.item_id,
+        conflictKind: 'output_after_source',
+      });
       return undefined;
     }
     const parent = response(event.response_id);
     if (!parent || parent.done) return undefined;
     const priorId = parent.outputs.get(event.output_index);
     if (priorId && priorId !== event.item_id) {
-      fail('LIVETRANSLATE_ITEM_CONFLICT');
+      fail('LIVETRANSLATE_ITEM_CONFLICT', undefined, undefined, {
+        validationPath: 'item_id',
+        expected: 'consistent_item_binding',
+        actual: event.item_id,
+        conflictKind: 'response_slot_rebound',
+      });
       return undefined;
     }
     parent.outputs.set(event.output_index, event.item_id);
     let item = translations.get(event.item_id);
     if (item && item.responseId !== event.response_id) {
-      fail('LIVETRANSLATE_ITEM_CONFLICT');
+      fail('LIVETRANSLATE_ITEM_CONFLICT', undefined, undefined, {
+        validationPath: 'item_id',
+        expected: 'consistent_item_binding',
+        actual: event.item_id,
+        conflictKind: 'output_response_rebound',
+      });
       return undefined;
     }
     if (!item) {
@@ -847,6 +896,20 @@ export function createLiveTranslateClient(
         audioSeen: false,
       };
       translations.set(event.item_id, item);
+    }
+    const created = unclassifiedCreated.get(event.item_id);
+    if (created) {
+      unclassifiedCreated.delete(event.item_id);
+      if (created.ambiguous) {
+        fail('LIVETRANSLATE_SOURCE_CONFLICT', undefined, undefined, {
+          validationPath: 'source.binding',
+          expected: 'consistent_source_binding',
+          actual: created.predecessor,
+        });
+        return undefined;
+      }
+      bindOutputSource(event.item_id, created.predecessor);
+      if (closed()) return undefined;
     }
     return item;
   };
@@ -947,6 +1010,7 @@ export function createLiveTranslateClient(
   }
   const rememberTerminal = (keys: readonly string[]) => {
     for (const key of keys) {
+      if (key.startsWith('item:')) unclassifiedCreated.delete(key.slice(5));
       terminalIdentifiers.set(key, true);
       const wait = anchorWaits.get(key);
       if (wait) clearTimeout(wait);
@@ -1694,7 +1758,12 @@ export function createLiveTranslateClient(
           associations.has(event.item_id) ||
           pendingAssociations.has(event.item_id))
       ) {
-        fail('LIVETRANSLATE_ITEM_CONFLICT');
+        fail('LIVETRANSLATE_ITEM_CONFLICT', undefined, undefined, {
+          validationPath: 'item_id',
+          expected: 'consistent_item_binding',
+          actual: event.item_id,
+          conflictKind: 'vad_after_output',
+        });
         return;
       }
       if (
@@ -1830,30 +1899,54 @@ export function createLiveTranslateClient(
         )
       )
         return;
+      if (phone && terminalIdentifiers.has(`item:${event.item.id}`)) return;
+      if (
+        Array.isArray(event.item.content) &&
+        event.item.content.some((part: any) => part?.type === 'input_audio')
+      ) {
+        if (
+          translations.has(event.item.id) ||
+          associations.has(event.item.id) ||
+          pendingAssociations.has(event.item.id)
+        ) {
+          fail('LIVETRANSLATE_ITEM_CONFLICT', undefined, undefined, {
+            validationPath: 'item.id',
+            expected: 'consistent_item_binding',
+            actual: event.item.id,
+            conflictKind: 'created_input_after_output',
+          });
+          return;
+        }
+        ensureSource(event.item.id);
+        return;
+      }
       if (event.item.role !== 'assistant') return;
       if (
         !identifier(event.previous_item_id) ||
         event.previous_item_id === event.item.id
       )
         return;
-      if (sources.has(event.item.id)) {
-        fail('LIVETRANSLATE_ITEM_CONFLICT');
+      if (sources.has(event.item.id)) return;
+      if (!translations.has(event.item.id)) {
+        const prior = unclassifiedCreated.get(event.item.id);
+        if (prior) {
+          // Do not guess whether this is a source or output. If later proved
+          // output, inconsistent predecessor evidence still fails closed.
+          prior.ambiguous ||= prior.predecessor !== event.previous_item_id;
+        } else {
+          if (unclassifiedCreated.size >= MAX_ITEMS) {
+            fail('LIVETRANSLATE_ITEM_CAPACITY');
+            return;
+          }
+          unclassifiedCreated.set(event.item.id, {
+            predecessor: event.previous_item_id,
+            ambiguous: false,
+          });
+        }
         return;
       }
-      if (
-        (associations.has(event.item.id) &&
-          associations.get(event.item.id) !== event.previous_item_id) ||
-        (pendingAssociations.has(event.item.id) &&
-          pendingAssociations.get(event.item.id) !== event.previous_item_id)
-      ) {
-        fail('LIVETRANSLATE_SOURCE_CONFLICT');
-        return;
-      }
-      if (associations.size >= MAX_ITEMS && !associations.has(event.item.id)) {
-        fail('LIVETRANSLATE_ITEM_CAPACITY');
-        return;
-      }
-      associate(event.item.id, event.previous_item_id);
+      bindOutputSource(event.item.id, event.previous_item_id);
+      if (closed()) return;
       if (phone) {
         publishPhoneUsage();
         drainAudio();
@@ -2076,6 +2169,7 @@ export function createLiveTranslateClient(
           validationPath: 'response.output',
           expected: 'consistent_item_binding',
           actual: event.response.output,
+          conflictKind: 'completed_output_missing',
         });
         return;
       }

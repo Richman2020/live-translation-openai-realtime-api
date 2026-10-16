@@ -1,10 +1,200 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import {
+  LIVE_TRANSLATE_ITEM_CONFLICT_KINDS,
+  LIVE_TRANSLATE_FAILURE_CODES,
+  LIVE_TRANSLATE_PROTOCOL_DIAGNOSTIC_EXPECTATIONS,
+  LIVE_TRANSLATE_PROTOCOL_DIAGNOSTIC_PATHS,
+  LIVE_TRANSLATE_PROTOCOL_EVENT_TYPES,
+  LIVE_TRANSLATE_PROTOCOL_VALUE_TYPES,
+} from '../src/experiments/livetranslate-types';
+import {
+  LIVE_TRANSLATE_PHONE_FAILURE_CODES,
+  LIVE_TRANSLATE_PHONE_WARNING_CODES,
+} from '../src/solo/livetranslate-phone-types';
 
 import {
   reportCloudLiveTranslateDiagnostic,
   sanitizeLiveTranslatePhoneDiagnostic,
+  projectLiveTranslateProtocolFailure,
+  projectLiveTranslateProtocolWarning,
 } from '../src/solo/livetranslate-phone-diagnostics';
+
+const protocolFailure = {
+  role: 'local',
+  stage: 'protocol_failure',
+  fatal: true,
+  at: 2400,
+  code: 'LIVETRANSLATE_ITEM_CONFLICT',
+  eventType: 'conversation.item.created',
+  validationPath: 'item.id',
+  expected: 'consistent_item_binding',
+  actualType: 'string',
+  receiveSequence: 21,
+};
+
+test('fatal diagnostics preserve all fixed conflict branches and local receive ordinal', () => {
+  for (const conflictKind of LIVE_TRANSLATE_ITEM_CONFLICT_KINDS) {
+    const event = { ...protocolFailure, conflictKind };
+    const projected = projectLiveTranslateProtocolFailure(event);
+    assert.equal(projected?.conflictKind, conflictKind);
+    assert.equal(projected?.receiveSequence, 21);
+    assert.equal(projected?.fatal, true);
+    assert.equal(projected?.code, 'LIVETRANSLATE_ITEM_CONFLICT');
+    const logged = sanitizeLiveTranslatePhoneDiagnostic(projected);
+    assert.equal(logged?.conflictKind, conflictKind);
+    assert.equal(logged?.eventType, 'conversation.item.created');
+    assert.equal(logged?.validationPath, 'item.id');
+    assert.equal(logged?.expected, 'consistent_item_binding');
+    assert.equal(logged?.actualType, 'string');
+  }
+});
+
+test('protocol field enums survive both metadata boundaries without accepting arbitrary values', () => {
+  for (const [fieldName, values] of [
+    ['eventType', [...LIVE_TRANSLATE_PROTOCOL_EVENT_TYPES, 'unknown', null]],
+    ['validationPath', LIVE_TRANSLATE_PROTOCOL_DIAGNOSTIC_PATHS],
+    ['expected', LIVE_TRANSLATE_PROTOCOL_DIAGNOSTIC_EXPECTATIONS],
+    ['actualType', LIVE_TRANSLATE_PROTOCOL_VALUE_TYPES],
+  ] as const) {
+    for (const value of values) {
+      const projected = projectLiveTranslateProtocolFailure({
+        ...protocolFailure,
+        [fieldName]: value,
+      });
+      assert.equal(projected?.[fieldName], value);
+      assert.equal(
+        sanitizeLiveTranslatePhoneDiagnostic(projected)?.[fieldName],
+        value,
+      );
+    }
+  }
+  const hostile = {
+    ...protocolFailure,
+    conflictKind: 'supplier-private-text',
+    eventType: '+12025550100',
+    validationPath: 'secret-path',
+    expected: 'secret-token',
+    actualType: 'private-speech',
+    sourceId: 'private-source',
+    responseId: 'private-response',
+    text: 'private-content',
+    Authorization: 'private-auth',
+    receiveSequence: 0,
+  };
+  assert.deepEqual(projectLiveTranslateProtocolFailure(hostile), {
+    role: 'local',
+    stage: 'protocol_failure',
+    at: 2400,
+    fatal: true,
+    code: 'LIVETRANSLATE_ITEM_CONFLICT',
+  });
+  for (const sequence of [-1, 1.5, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+    assert.equal(
+      projectLiveTranslateProtocolFailure({
+        ...protocolFailure,
+        receiveSequence: sequence,
+      })?.receiveSequence,
+      undefined,
+    );
+  }
+  assert.equal(
+    projectLiveTranslateProtocolFailure({
+      ...protocolFailure,
+      code: 'private-code',
+    }),
+    undefined,
+  );
+});
+
+test('first and second protocol projections never invoke getters, including fatal and code', () => {
+  let getters = 0;
+  const hostile = { ...protocolFailure };
+  for (const name of [
+    'eventType',
+    'validationPath',
+    'expected',
+    'actualType',
+    'conflictKind',
+    'receiveSequence',
+  ])
+    Object.defineProperty(hostile, name, {
+      get() {
+        getters += 1;
+        throw new Error('DO_NOT_READ');
+      },
+      configurable: true,
+    });
+  assert.deepEqual(projectLiveTranslateProtocolFailure(hostile), {
+    role: 'local',
+    stage: 'protocol_failure',
+    at: 2400,
+    fatal: true,
+    code: 'LIVETRANSLATE_ITEM_CONFLICT',
+  });
+  assert.deepEqual(sanitizeLiveTranslatePhoneDiagnostic(hostile), {
+    role: 'local',
+    stage: 'protocol_failure',
+    at: 2400,
+    fatal: true,
+    code: 'LIVETRANSLATE_ITEM_CONFLICT',
+  });
+  for (const name of ['fatal', 'code']) {
+    const event = { ...protocolFailure };
+    Object.defineProperty(event, name, {
+      get() {
+        getters += 1;
+        throw new Error('DO_NOT_READ');
+      },
+    });
+    assert.equal(projectLiveTranslateProtocolFailure(event), undefined);
+    assert.equal(projectLiveTranslateProtocolWarning(event), undefined);
+  }
+  assert.equal(getters, 0);
+});
+
+test('only fixed error and warning codes cross their corresponding callback boundary', () => {
+  for (const code of [
+    ...LIVE_TRANSLATE_FAILURE_CODES,
+    ...LIVE_TRANSLATE_PHONE_FAILURE_CODES,
+  ]) {
+    assert.equal(
+      projectLiveTranslateProtocolFailure({ ...protocolFailure, code })?.code,
+      code,
+    );
+    assert.equal(
+      projectLiveTranslateProtocolWarning({
+        ...protocolFailure,
+        fatal: false,
+        code,
+      })?.code,
+      (LIVE_TRANSLATE_PHONE_WARNING_CODES as readonly string[]).includes(code)
+        ? code
+        : undefined,
+    );
+  }
+  for (const code of LIVE_TRANSLATE_PHONE_WARNING_CODES) {
+    assert.equal(
+      projectLiveTranslateProtocolWarning({
+        ...protocolFailure,
+        fatal: false,
+        code,
+      })?.code,
+      code,
+    );
+    if (!(LIVE_TRANSLATE_FAILURE_CODES as readonly string[]).includes(code)) {
+      assert.equal(
+        projectLiveTranslateProtocolFailure({ ...protocolFailure, code }),
+        undefined,
+      );
+      assert.equal(
+        sanitizeLiveTranslatePhoneDiagnostic({ ...protocolFailure, code })
+          ?.code,
+        undefined,
+      );
+    }
+  }
+});
 
 test('voice declarations retain requested, created/done and both ACK layers without an effective-voice guess', () => {
   const base = {

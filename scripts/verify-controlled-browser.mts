@@ -1941,6 +1941,49 @@ try {
       check(apiRequests.filter(item=>item.method==='POST').length,afterWrites,'Late retired-stream event creates no cleanup or dial write');
     } finally {gate.release.resolve(); bootstrapReplyGate=undefined;page.eventRequestGate=undefined;}
   }
+  if (continuous) {
+    // Synthetic adapter status, not the captured phone's browser evidence.
+    // The separate item-conflict lifecycle suite starts at real client frames;
+    // this case follows the real manager -> owner SSE -> production DOM path.
+    await page.click('refresh-controlled-state');
+    await eventually(async () => (await page.state()).start, 'Translation-stop fixture can dial after prior cleanup');
+    await dial();
+    await eventually(async () => manager.activeSession?.status === 'active' && (await page.state()).mute, 'Translation-stop fixture accepted media');
+    const stoppedCall = manager.activeSession!.id;
+    const stoppedBridge = bridges.at(-1)!;
+    const stopHangups = providerHangups.length;
+    const stopCreates = providerCreates.length;
+    const stopSdkConnects = await page.evaluate('window.__offlineVoice.connects');
+    stoppedBridge.onOutgoingCaptionState?.({ role: 'local', state: 'failed', translationSource: 'independent_text' });
+    stoppedBridge.onCaptionState?.({ state: 'failed', translationStopped: true });
+    const stoppedDom = () => page.evaluate(`(() => ({
+      connection:document.getElementById('connection-text').textContent,
+      bridge:document.getElementById('bridge-caption').textContent,
+      captions:document.getElementById('caption-status').textContent,
+      captionVisible:!document.getElementById('caption-status').hidden,
+      endEnabled:!document.getElementById('end-call').disabled,
+      muteEnabled:!document.getElementById('mute-button').disabled,
+      sdkClosed:window.__offlineVoice.lastCall.closed===true
+    }))()`);
+    await eventually(async () => (await stoppedDom()).connection === '电话仍在进行 · 翻译已停止', 'Synthetic translation failure reaches owner DOM');
+    const failedDom = await stoppedDom();
+    check({id:manager.activeSession?.id,stopped:manager.activeSession?.translationStopped}, {id:stoppedCall,stopped:true}, 'Translation stopped is persisted on the real active call');
+    check({ status:manager.activeSession?.status,hangups:providerHangups.length }, { status:'active',hangups:stopHangups }, 'Translation failure status does not terminate either fake phone leg');
+    check(failedDom.bridge, '翻译已停止 · 电话仍在进行，请手动挂断后检查', 'Translation failure is visibly explained beside the phone');
+    check(failedDom.captions, '翻译已停止，电话仍在进行；可听对方原声。请手动挂断后检查，系统不会自动重连或切换模型。', 'Caption status explains original audio and manual recovery without claiming translation continues');
+    check({ visible:failedDom.captionVisible,end:failedDom.endEnabled,mute:failedDom.muteEnabled,sdkClosed:failedDom.sdkClosed }, { visible:true,end:true,mute:true,sdkClosed:false }, 'Active stopped-translation call retains the accepted SDK and manual hangup');
+    const beforeStoppedRefresh = await page.diagnostic();
+    await page.click('refresh-controlled-state');
+    await waitFreshEvents(beforeStoppedRefresh.bootstrapStarted,beforeStoppedRefresh.sseCurrent);
+    const refreshedStop = await stoppedDom();
+    check(refreshedStop, failedDom, 'Fresh bootstrap and owner SSE snapshot keep the persisted translation failure visible');
+    check({ creates:providerCreates.length,connects:await page.evaluate('window.__offlineVoice.connects'),hangups:providerHangups.length }, { creates:stopCreates,connects:stopSdkConnects,hangups:stopHangups }, 'Refreshing a translation failure neither redials nor disconnects the accepted phone');
+    await page.click('end-call');
+    await eventually(() => !manager.controlAdmissionBlocked && heldVoiceReservations.size === 0 && controllerStatus().mode === 'available', 'Manual hangup cleans a stopped-translation call');
+    await eventually(async () => !(await page.state()).mute && (await page.state()).start, 'Stopped-translation manual hangup returns to direct dialing');
+    check(providerHangups.length-stopHangups,2,'Manual hangup after translation stop cleans both fake provider legs exactly once');
+    check(await page.evaluate('window.__offlineVoice.lastCall.closed===true'),true,'Manual hangup after translation stop closes the accepted SDK');
+  }
   await observer.click('refresh-controlled-state');
   await eventually(
     async () => (await observer.state()).start,

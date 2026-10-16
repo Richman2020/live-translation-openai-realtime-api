@@ -22,7 +22,6 @@ import {
 } from './livetranslate-phone-config';
 import {
   LIVE_TRANSLATE_PHONE_FAILURE_CODES,
-  LIVE_TRANSLATE_PHONE_WARNING_CODES,
   type LiveTranslatePhoneDiagnostic,
 } from './livetranslate-phone-types';
 import type {
@@ -31,13 +30,16 @@ import type {
   TranslationRole,
 } from './translation-bridge';
 import type { ContinuousTranslationOptions } from './continuous-translation-client';
+import {
+  projectLiveTranslateProtocolFailure,
+  projectLiveTranslateProtocolWarning,
+} from './livetranslate-phone-diagnostics';
 
 const MAX_PCM_QUEUE_BYTES = 2 * 1024 * 1024;
 const PCM_PACKET_BYTES = 9600; // 200 ms at 24 kHz, never hold a full paragraph.
 const MAX_PHONE_OUTSTANDING_BYTES = 48000; // Six seconds, below shared 8 s cap.
 const MAX_PROJECTIONS = 2048;
 const phoneCodes = new Set<string>(LIVE_TRANSLATE_PHONE_FAILURE_CODES);
-const warningCodes = new Set<string>(LIVE_TRANSLATE_PHONE_WARNING_CODES);
 type Selection = {
   config: LiveTranslatePhoneConfig;
   deps?: { createClient?: typeof createLiveTranslateClient };
@@ -108,6 +110,7 @@ export function createLiveTranslatePhoneBridge(
   let outputSequence = 0;
   let sourceSequence = 0;
   let responseSequence = 0;
+  let protocolFailureReported = false;
 
   const notify = <T>(callback: ((event: T) => void) | undefined, event: T) => {
     try {
@@ -678,18 +681,17 @@ export function createLiveTranslatePhoneBridge(
         onTranslation: (event) => onTranslation(role, event),
         onAudio: (pcm, metadata) => onAudio(role, pcm, metadata),
         onProtocolDiagnostic: (event) => {
-          if (
-            !stopped &&
-            !closed &&
-            !event.fatal &&
-            warningCodes.has(event.code)
-          )
-            diagnostic({
-              role,
-              at: event.at,
-              stage: 'warning',
-              code: event.code,
-            });
+          if (stopped || closed) return;
+          const failure = projectLiveTranslateProtocolFailure(event);
+          if (failure) {
+            if (!protocolFailureReported) {
+              protocolFailureReported = true;
+              diagnostic({ ...failure, role });
+            }
+            return;
+          }
+          const warning = projectLiveTranslateProtocolWarning(event);
+          if (warning) diagnostic({ ...warning, role });
         },
         onVoiceEvidence: (event) => {
           if (stopped || closed) return;
