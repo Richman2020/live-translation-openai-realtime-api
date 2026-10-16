@@ -4,6 +4,10 @@ import { TextDecoder } from 'node:util';
 import createHttpsProxyAgent from 'https-proxy-agent';
 import WebSocket from 'ws';
 
+import {
+  createLiveTranslateSendPump,
+  type LiveTranslateSendReason,
+} from './livetranslate-send-pump';
 import { validOpenAIProxyUrl } from '../solo/openai-websocket';
 import {
   LIVE_TRANSLATE_PROTOCOL_EVENT_TYPES,
@@ -37,6 +41,7 @@ const MAX_BYTES = 1024 * 1024;
 const MAX_QUEUED_AUDIO_BYTES = 2 * 1024 * 1024;
 const MAX_TERMINAL_IDENTIFIERS = 1024;
 const COMPLETED_SOURCE_GRACE = 32;
+const PHONE_SOURCE_ORDER_WAIT_MS = 5000;
 const identifier = (value: unknown): value is string =>
   typeof value === 'string' && value.length > 0 && value.length <= 1024;
 const integer = (value: unknown): value is number =>
@@ -139,6 +144,12 @@ type ProtocolFailureDetail = {
   expected: LiveTranslateProtocolDiagnostic['expected'];
   actual: unknown;
   conflictKind?: LiveTranslateProtocolDiagnostic['conflictKind'];
+  sendReason?: LiveTranslateSendReason;
+  readyState?: number;
+  bufferedBytes?: number;
+  pendingAudioBytes?: number;
+  sendSequence?: number;
+  callbackDurationMs?: number;
 };
 type Translation = LiveTranslateTranslation & {
   textDone: boolean;
@@ -148,6 +159,7 @@ type Translation = LiveTranslateTranslation & {
 type ResponseState = {
   done: boolean;
   createdSeen: boolean;
+  createdSequence: number;
   audioReleased: boolean;
   audio: {
     pcm: Buffer;
@@ -230,6 +242,12 @@ export function createLiveTranslateClient(
   let sourceOffsetFloorMs = 0;
   const speechSeen = new Set<string>();
   const responseOrder: string[] = [];
+  const phoneSourceOrdinals = new WeakMap<Source, number>();
+  let phoneSourceOrdinal = 0;
+  let responseCreatedSequence = 0;
+  let phoneSourceFrontier: Source | undefined;
+  const phoneOrderWaits = new Map<string, ReturnType<typeof setTimeout>>();
+  let drainingPhoneOutput = false;
   let queuedAudioBytes = 0;
   let drainingAudio = false;
   let state: 'connecting' | 'configuring' | 'ready' | 'finishing' | 'closed' =
@@ -268,6 +286,7 @@ export function createLiveTranslateClient(
   ready.catch(() => {});
   finished.catch(() => {});
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let sendPump: ReturnType<typeof createLiveTranslateSendPump> | undefined;
   const closed = () => state === 'closed';
   const protocolEvent = (
     stage: LiveTranslateProtocolEvent['stage'],
@@ -302,6 +321,9 @@ export function createLiveTranslateClient(
   const cleanup = (graceful = false) => {
     clearTimeout(timer);
     timer = undefined;
+    sendPump?.abort();
+    // eslint-disable-next-line @typescript-eslint/no-use-before-define -- Hoisted cleanup closes the mutually recursive ordering/drain lifecycle.
+    clearPhoneSourceOrder();
     socket.removeAllListeners('message');
     socket.removeAllListeners('open');
     socket.removeAllListeners('unexpected-response');
@@ -444,6 +466,22 @@ export function createLiveTranslateClient(
         ...(diagnostic.conflictKind
           ? { conflictKind: diagnostic.conflictKind }
           : {}),
+        ...(diagnostic.sendReason ? { sendReason: diagnostic.sendReason } : {}),
+        ...(diagnostic.readyState === undefined
+          ? {}
+          : { readyState: diagnostic.readyState }),
+        ...(diagnostic.bufferedBytes === undefined
+          ? {}
+          : { bufferedBytes: diagnostic.bufferedBytes }),
+        ...(diagnostic.pendingAudioBytes === undefined
+          ? {}
+          : { pendingAudioBytes: diagnostic.pendingAudioBytes }),
+        ...(diagnostic.sendSequence === undefined
+          ? {}
+          : { sendSequence: diagnostic.sendSequence }),
+        ...(diagnostic.callbackDurationMs === undefined
+          ? {}
+          : { callbackDurationMs: diagnostic.callbackDurationMs }),
         receiveSequence,
         fatal: true,
         code,
@@ -601,8 +639,53 @@ export function createLiveTranslateClient(
     clearTimeout(timer);
     timer = setTimeout(() => fail(code), options.timeoutMs ?? 20000);
   };
+  if (phone)
+    sendPump = createLiveTranslateSendPump({
+      socket,
+      now,
+      onObservation: (event) => {
+        try {
+          options.onSendObservation?.({ role, ...event });
+        } catch {
+          // Diagnostics cannot replace the first transport failure, stop a
+          // healthy writer or change telephone lifecycle decisions.
+        }
+      },
+      onFailure: (event) =>
+        fail(event.code, undefined, undefined, {
+          validationPath: 'transport.send',
+          expected: 'send_available',
+          actual: event.readyState,
+          sendReason: event.sendReason,
+          readyState: event.readyState,
+          bufferedBytes: event.bufferedBytes,
+          pendingAudioBytes: event.pendingAudioBytes,
+          sendSequence: event.sendSequence,
+          ...(event.callbackDurationMs === undefined
+            ? {}
+            : { callbackDurationMs: event.callbackDurationMs }),
+        }),
+    });
   const send = (event: unknown) => {
     if (closed()) return;
+    if (sendPump) {
+      const value = event as { type?: unknown; audio?: unknown };
+      const eventType =
+        value?.type === 'session.update' ||
+        value?.type === 'input_audio_buffer.append' ||
+        value?.type === 'session.finish'
+          ? value.type
+          : 'unknown';
+      const audioBytes =
+        eventType === 'input_audio_buffer.append' &&
+        typeof value.audio === 'string'
+          ? Buffer.byteLength(value.audio, 'base64')
+          : 0;
+      sendPump.enqueue(JSON.stringify(event), eventType, audioBytes, () =>
+        protocolEvent('client_event_sent', event),
+      );
+      return;
+    }
     if (
       socket.readyState !== WebSocket.OPEN ||
       socket.bufferedAmount > MAX_BYTES
@@ -625,7 +708,7 @@ export function createLiveTranslateClient(
     arm('LIVETRANSLATE_FINISH_TIMEOUT');
     send({ type: 'session.finish' });
   };
-  const showTranslation = (item: Translation) => {
+  const publishTranslation = (item: Translation) => {
     if (phone && item.text.trim() && !phoneSourceAdmitted(item.sourceId))
       waitForPhoneAnchor(`response:${item.responseId}`);
     if (
@@ -648,6 +731,11 @@ export function createLiveTranslateClient(
       final: item.final,
       at: item.at,
     });
+  };
+  const showTranslation = (item: Translation) => {
+    // eslint-disable-next-line @typescript-eslint/no-use-before-define -- The hoisted drain shares publication and source admission guards.
+    if (phone) drainPhoneOutput();
+    else publishTranslation(item);
   };
   const associate = (translationId: string, sourceId: string) => {
     if (!sources.has(sourceId)) {
@@ -734,6 +822,7 @@ export function createLiveTranslateClient(
       item = {
         done: false,
         createdSeen: false,
+        createdSequence: 0,
         audioReleased: false,
         audio: [],
         outputs: new Map(),
@@ -743,6 +832,11 @@ export function createLiveTranslateClient(
     return item;
   };
   const drainAudio = () => {
+    if (phone) {
+      // eslint-disable-next-line @typescript-eslint/no-use-before-define -- Source ordering and publication deliberately share one hoisted drain.
+      drainPhoneOutput();
+      return;
+    }
     if (drainingAudio || closed()) return;
     drainingAudio = true;
     try {
@@ -757,34 +851,8 @@ export function createLiveTranslateClient(
             waitForPhoneAnchor(`response:${parent.audio[0].item.responseId}`);
             break;
           }
-          const chunk = parent.audio.shift()!;
-          queuedAudioBytes -= chunk.pcm.length;
-          audioSequence += 1;
-          const metadata: LiveTranslateAudioMetadata = {
-            role,
-            sessionId,
-            translationId: chunk.item.translationId,
-            responseId: chunk.item.responseId,
-            ...(chunk.item.sourceId ? { sourceId: chunk.item.sourceId } : {}),
-            pairing: chunk.item.pairing,
-            eventId: chunk.eventId,
-            eventIdBasis: chunk.eventIdBasis,
-            sequence: audioSequence,
-            ...(voicePolicy
-              ? {
-                  voiceContext: {
-                    requestedVoice: voice,
-                    policyMode: voicePolicy.mode,
-                    acousticVoice: 'unknown_not_measured' as const,
-                  },
-                }
-              : {}),
-          };
-          try {
-            options.onAudio?.(chunk.pcm, metadata);
-          } catch {
-            fail('LIVETRANSLATE_CALLBACK_FAILED');
-          }
+          // eslint-disable-next-line @typescript-eslint/no-use-before-define -- Both audition and phone drains share the hoisted PCM publisher.
+          publishAudio(parent.audio.shift()!);
         }
         if (!closed() && parent.audioReleased && !parent.audio.length)
           responseOrder.shift();
@@ -794,6 +862,215 @@ export function createLiveTranslateClient(
       drainingAudio = false;
     }
   };
+  function publishAudio(chunk: ResponseState['audio'][number]) {
+    queuedAudioBytes -= chunk.pcm.length;
+    audioSequence += 1;
+    const metadata: LiveTranslateAudioMetadata = {
+      role,
+      sessionId,
+      translationId: chunk.item.translationId,
+      responseId: chunk.item.responseId,
+      ...(chunk.item.sourceId ? { sourceId: chunk.item.sourceId } : {}),
+      pairing: chunk.item.pairing,
+      eventId: chunk.eventId,
+      eventIdBasis: chunk.eventIdBasis,
+      sequence: audioSequence,
+      ...(voicePolicy
+        ? {
+            voiceContext: {
+              requestedVoice: voice,
+              policyMode: voicePolicy.mode,
+              acousticVoice: 'unknown_not_measured' as const,
+            },
+          }
+        : {}),
+    };
+    try {
+      options.onAudio?.(chunk.pcm, metadata);
+    } catch {
+      fail('LIVETRANSLATE_CALLBACK_FAILED');
+    }
+  }
+  function clearPhoneSourceOrder() {
+    for (const wait of phoneOrderWaits.values()) clearTimeout(wait);
+    phoneOrderWaits.clear();
+    phoneSourceFrontier = undefined;
+  }
+  function sourceOrdinal(source: Source) {
+    let ordinal = phoneSourceOrdinals.get(source);
+    if (ordinal === undefined) {
+      phoneSourceOrdinal += 1;
+      ordinal = phoneSourceOrdinal;
+      phoneSourceOrdinals.set(source, ordinal);
+    }
+    return ordinal;
+  }
+  function comparePhoneSources(left: Source, right: Source) {
+    return (
+      left.startMs! - right.startMs! ||
+      sourceOrdinal(left) - sourceOrdinal(right)
+    );
+  }
+  function sourceResponses(sourceId: string) {
+    return [...responses.entries()]
+      .filter(([, parent]) =>
+        [...parent.outputs.values()].some(
+          (id) => translations.get(id)?.sourceId === sourceId,
+        ),
+      )
+      .sort(
+        ([, left], [, right]) => left.createdSequence - right.createdSequence,
+      );
+  }
+  function responseSourceUnknown(parent: ResponseState) {
+    if (!parent.outputs.size) return !parent.done;
+    return [...parent.outputs.values()].some((id) => {
+      const item = translations.get(id);
+      return (
+        !item?.sourceId &&
+        (!parent.done || Boolean(item?.text.trim()) || Boolean(item?.audioSeen))
+      );
+    });
+  }
+  function phoneSourceComplete(source: Source) {
+    if (!source.final || source.endMs === undefined) return false;
+    const parents = sourceResponses(source.sourceId);
+    if (!parents.length) return !source.text.trim();
+    return parents.every(([, parent]) => parent.done && !parent.audio.length);
+  }
+  function hasPendingPhoneOutput(item: Translation) {
+    return (
+      (Boolean(item.text.trim()) &&
+        translationPublishedRevision.get(item.translationId) !==
+          item.revision) ||
+      Boolean(
+        responses
+          .get(item.responseId)
+          ?.audio.some(
+            (chunk) => chunk.item.translationId === item.translationId,
+          ),
+      )
+    );
+  }
+  function drainPhoneOutput() {
+    if (!phone || drainingPhoneOutput || closed()) return;
+    drainingPhoneOutput = true;
+    try {
+      const ordered = [...sources.values()]
+        .filter((source) => source.startMs !== undefined)
+        .sort(comparePhoneSources);
+      // A genuinely new old-source output must not play after a newer source.
+      // Completed/duplicate responses are already fenced before reaching here.
+      if (
+        phoneSourceFrontier &&
+        [...translations.values()].some((item) => {
+          const source = item.sourceId ? sources.get(item.sourceId) : undefined;
+          return (
+            source?.startMs !== undefined &&
+            comparePhoneSources(source, phoneSourceFrontier!) < 0 &&
+            hasPendingPhoneOutput(item)
+          );
+        })
+      ) {
+        fail('LIVETRANSLATE_SOURCE_ORDER_STALE', undefined, undefined, {
+          validationPath: 'source.binding',
+          expected: 'consistent_source_binding',
+          actual: undefined,
+        });
+        return;
+      }
+      for (const source of ordered) {
+        if (
+          phoneSourceFrontier &&
+          comparePhoneSources(source, phoneSourceFrontier) < 0
+        )
+          continue;
+        let sourceBlocked = false;
+        for (const [id, parent] of sourceResponses(source.sourceId)) {
+          if (
+            !parent.createdSeen ||
+            [...responses.values()].some(
+              (prior) =>
+                prior.createdSeen &&
+                prior.createdSequence < parent.createdSequence &&
+                responseSourceUnknown(prior),
+            )
+          ) {
+            sourceBlocked = true;
+            break;
+          }
+          const items = [...parent.outputs.values()].map(
+            (itemId) => translations.get(itemId)!,
+          );
+          for (const item of items) {
+            if (hasPendingPhoneOutput(item)) phoneSourceFrontier = source;
+            publishTranslation(item);
+            if (closed()) return;
+          }
+          while (!closed() && parent.audio.length) {
+            phoneSourceFrontier = source;
+            publishAudio(parent.audio.shift()!);
+          }
+          if (closed()) return;
+          if (parent.done && !parent.audio.length) {
+            const index = responseOrder.indexOf(id);
+            if (index !== -1) responseOrder.splice(index, 1);
+          } else {
+            sourceBlocked = true;
+            break;
+          }
+        }
+        if (sourceBlocked || !phoneSourceComplete(source)) break;
+      }
+      for (const id of [...responseOrder]) {
+        const parent = responses.get(id);
+        if (
+          parent?.done &&
+          !parent.audio.length &&
+          !responseSourceUnknown(parent) &&
+          [...parent.outputs.values()].every((itemId) => {
+            const item = translations.get(itemId);
+            return !item?.sourceId && !item?.text.trim() && !item?.audioSeen;
+          })
+        ) {
+          responseOrder.splice(responseOrder.indexOf(id), 1);
+        }
+      }
+      // Only already-arrived output that is held for ordering starts this clock.
+      // Quiet calls and an active first source do not acquire a call timer.
+      const blocked = new Set(
+        [...translations.values()]
+          .filter(
+            (item) =>
+              phoneSourceAdmitted(item.sourceId) && hasPendingPhoneOutput(item),
+          )
+          .map((item) => item.translationId),
+      );
+      for (const [id, wait] of phoneOrderWaits) {
+        if (!blocked.has(id)) {
+          clearTimeout(wait);
+          phoneOrderWaits.delete(id);
+        }
+      }
+      for (const id of blocked) {
+        if (phoneOrderWaits.has(id)) continue;
+        phoneOrderWaits.set(
+          id,
+          setTimeout(() => {
+            phoneOrderWaits.delete(id);
+            if (!closed())
+              fail('LIVETRANSLATE_SOURCE_ORDER_TIMEOUT', undefined, undefined, {
+                validationPath: 'source.binding',
+                expected: 'consistent_source_binding',
+                actual: undefined,
+              });
+          }, PHONE_SOURCE_ORDER_WAIT_MS),
+        );
+      }
+    } finally {
+      drainingPhoneOutput = false;
+    }
+  }
   const translation = (event: any) => {
     if (
       !requireValue(
@@ -1787,6 +2064,7 @@ export function createLiveTranslateClient(
           return;
         }
         source.startMs = offset;
+        if (phone) sourceOrdinal(source);
         if (source.endMs !== undefined && source.endMs < offset) {
           fail('LIVETRANSLATE_EVENT_INVALID', undefined, undefined, {
             validationPath: 'audio_start_ms',
@@ -1977,6 +2255,8 @@ export function createLiveTranslateClient(
       const item = response(event.response.id);
       if (item && !item.createdSeen && !item.done) {
         item.createdSeen = true;
+        responseCreatedSequence += 1;
+        item.createdSequence = responseCreatedSequence;
         responseOrder.push(event.response.id);
         timing('response_created', { responseId: event.response.id });
       }
@@ -2313,7 +2593,18 @@ export function createLiveTranslateClient(
         item.revision += 1;
         showTranslation(item);
       }
-      timing('response_completed', { responseId: event.response.id });
+      const completedItems = [...translations.values()].filter(
+        (item) => item.responseId === event.response.id,
+      );
+      timing('response_completed', {
+        responseId: event.response.id,
+        outputItemCount: event.response.output.length,
+        outputTextCharacters: completedItems.reduce(
+          (sum, item) => sum + item.text.length,
+          0,
+        ),
+        outputAudioSeen: completedItems.some((item) => item.audioSeen),
+      });
       parent.audioReleased = true;
       drainAudio();
     }
@@ -2411,6 +2702,7 @@ export function createLiveTranslateClient(
     }
     try {
       handle(currentEvent);
+      if (phone) drainPhoneOutput();
       retirePhoneState();
     } catch {
       fail('LIVETRANSLATE_HANDLER_FAILED', undefined, undefined, {
@@ -2446,6 +2738,7 @@ export function createLiveTranslateClient(
   socket.on('close', (code) => {
     if (transportCloseObserved) return;
     transportCloseObserved = true;
+    sendPump?.observeClose(code);
     const metadata =
       integer(code) && code >= 1000 && code <= 4999 ? { code } : {};
     const at = now();

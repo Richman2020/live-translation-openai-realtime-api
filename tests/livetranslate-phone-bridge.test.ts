@@ -718,7 +718,7 @@ test('metadata joins only explicit source edges and keeps provider endpoint, PCM
   assert.equal(h.diagnostics.at(-1).sourceSequence, undefined);
   h.phones.local.media(Buffer.alloc(160));
   const input = h.diagnostics.find((event) => event.stage === 'input_received');
-  assert.equal(input.basis, 'model_input_submitted');
+  assert.equal(input.basis, 'client_accepted_not_written');
   assert.equal(input.inputAudioMs, 20);
   h.bridge.close();
 });

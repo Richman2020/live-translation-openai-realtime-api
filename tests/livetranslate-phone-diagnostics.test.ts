@@ -18,6 +18,7 @@ import {
   sanitizeLiveTranslatePhoneDiagnostic,
   projectLiveTranslateProtocolFailure,
   projectLiveTranslateProtocolWarning,
+  projectLiveTranslateSendObservation,
 } from '../src/solo/livetranslate-phone-diagnostics';
 
 const protocolFailure = {
@@ -32,6 +33,129 @@ const protocolFailure = {
   actualType: 'string',
   receiveSequence: 21,
 };
+
+test('send observations expose bounded progress and trust the authenticated track, not callback text', () => {
+  const event = {
+    role: 'local',
+    stage: 'send_written',
+    at: 2400,
+    eventType: 'input_audio_buffer.append',
+    sendSequence: 9,
+    observedSequence: 21,
+    audioBytes: 640,
+    acceptedAudioBytes: 6400,
+    writtenAudioBytes: 5760,
+    pendingAudioBytes: 640,
+    pendingWireBytes: 900,
+    readyState: 1,
+    bufferedBytes: 1024,
+    queuedDurationMs: 120,
+    callbackDurationMs: 100,
+    text: 'private-content',
+    Authorization: 'private-auth',
+    wire: 'private-audio',
+  };
+  const safe = projectLiveTranslateSendObservation(event, 'remote')!;
+  assert.equal(safe.role, 'remote');
+  assert.equal(safe.basis, 'transport_write_completed_not_received');
+  assert.equal(safe.sendEventType, 'input_audio_buffer.append');
+  for (const key of [
+    'sendSequence',
+    'observedSequence',
+    'audioBytes',
+    'acceptedAudioBytes',
+    'writtenAudioBytes',
+    'pendingAudioBytes',
+    'pendingWireBytes',
+    'readyState',
+    'bufferedBytes',
+    'queuedDurationMs',
+    'callbackDurationMs',
+  ] as const)
+    assert.equal(safe[key], event[key]);
+  const logged = sanitizeLiveTranslatePhoneDiagnostic(safe)!;
+  assert.equal(logged.writtenAudioBytes, 5760);
+  assert.equal(JSON.stringify(logged).includes('private-'), false);
+  for (const sendReason of [
+    'transport_not_open',
+    'transport_buffer_limit',
+    'pending_input_limit',
+    'oldest_send_timeout',
+    'write_callback_error',
+    'write_throw',
+  ]) {
+    const failed = projectLiveTranslateProtocolFailure({
+      ...protocolFailure,
+      code: 'LIVETRANSLATE_SEND_UNAVAILABLE',
+      sendReason,
+      readyState: 3,
+      bufferedBytes: 1048577,
+      pendingAudioBytes: 64000,
+      sendSequence: 10,
+      callbackDurationMs: 2000,
+    })!;
+    assert.equal(failed.sendReason, sendReason);
+    assert.equal(
+      sanitizeLiveTranslatePhoneDiagnostic(failed)?.bufferedBytes,
+      1048577,
+    );
+  }
+});
+
+test('new transport and response summaries reject arbitrary values and getters at both boundaries', () => {
+  let getters = 0;
+  const event = {
+    stage: 'send_failed',
+    at: 2400,
+    eventType: 'private-event',
+    sendReason: 'private-reason',
+    closeCode: 1006,
+    readyState: 77,
+    bufferedBytes: -1,
+    callbackDurationMs: Infinity,
+  };
+  Object.defineProperty(event, 'pendingAudioBytes', {
+    get() {
+      getters += 1;
+      throw new Error('DO_NOT_READ');
+    },
+  });
+  const safe = projectLiveTranslateSendObservation(event, 'local')!;
+  assert.equal(safe.closeCode, 1006);
+  for (const key of [
+    'sendEventType',
+    'sendReason',
+    'readyState',
+    'bufferedBytes',
+    'callbackDurationMs',
+    'pendingAudioBytes',
+  ])
+    assert.equal((safe as unknown as Record<string, unknown>)[key], undefined);
+  assert.equal(getters, 0);
+  assert.equal(
+    projectLiveTranslateSendObservation(
+      { ...event, stage: 'private-stage' },
+      'local',
+    ),
+    undefined,
+  );
+  const completed = sanitizeLiveTranslatePhoneDiagnostic({
+    role: 'local',
+    stage: 'response_completed',
+    at: 2400,
+    outputItemCount: 0,
+    outputTextCharacters: 0,
+    outputAudioSeen: false,
+    inputAcceptedAudioMs: 21000,
+    inputWrittenAudioMs: 20000,
+    transcript: 'private-content',
+  })!;
+  assert.equal(completed.outputItemCount, 0);
+  assert.equal(completed.outputAudioSeen, false);
+  assert.equal(completed.inputAcceptedAudioMs, 21000);
+  assert.equal(completed.inputWrittenAudioMs, 20000);
+  assert.equal('transcript' in completed, false);
+});
 
 test('fatal diagnostics preserve all fixed conflict branches and local receive ordinal', () => {
   for (const conflictKind of LIVE_TRANSLATE_ITEM_CONFLICT_KINDS) {

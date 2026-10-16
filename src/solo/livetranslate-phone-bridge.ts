@@ -33,6 +33,7 @@ import type { ContinuousTranslationOptions } from './continuous-translation-clie
 import {
   projectLiveTranslateProtocolFailure,
   projectLiveTranslateProtocolWarning,
+  projectLiveTranslateSendObservation,
 } from './livetranslate-phone-diagnostics';
 
 const MAX_PCM_QUEUE_BYTES = 2 * 1024 * 1024;
@@ -652,6 +653,9 @@ export function createLiveTranslatePhoneBridge(
     },
   ) => {
     if (role === 'local') localSink = settings.onAudio;
+    const lastSendReports = new Map<string, number>();
+    let inputBytes = 0;
+    let writtenInputBytes: number | undefined;
     let client: LiveTranslateClient;
     try {
       client = factory({
@@ -680,6 +684,37 @@ export function createLiveTranslatePhoneBridge(
         onSource: (event) => onSource(role, event),
         onTranslation: (event) => onTranslation(role, event),
         onAudio: (pcm, metadata) => onAudio(role, pcm, metadata),
+        onSendObservation: (event) => {
+          const safe = projectLiveTranslateSendObservation(event, role);
+          if (!safe) return;
+          if (
+            safe.stage === 'send_written' &&
+            safe.sendEventType === 'input_audio_buffer.append' &&
+            integer(safe.writtenAudioBytes)
+          )
+            writtenInputBytes = safe.writtenAudioBytes;
+          if (
+            (stopped || closed) &&
+            !['transport_closed', 'send_cancelled'].includes(safe.stage)
+          )
+            return;
+          const immediate = [
+            'send_failed',
+            'send_cancelled',
+            'transport_closed',
+          ].includes(safe.stage);
+          const period =
+            safe.stage === 'send_written' || safe.stage === 'send_waiting'
+              ? 200
+              : 1000;
+          if (
+            !immediate &&
+            safe.at - (lastSendReports.get(safe.stage) ?? -Infinity) < period
+          )
+            return;
+          lastSendReports.set(safe.stage, safe.at);
+          diagnostic(safe);
+        },
         onProtocolDiagnostic: (event) => {
           if (stopped || closed) return;
           const failure = projectLiveTranslateProtocolFailure(event);
@@ -739,6 +774,24 @@ export function createLiveTranslatePhoneBridge(
               ...(response === undefined ? {} : { responseSequence: response }),
               ...(integer(event.providerAudioMs)
                 ? { providerAudioMs: event.providerAudioMs }
+                : {}),
+              ...(integer(event.outputItemCount)
+                ? { outputItemCount: event.outputItemCount }
+                : {}),
+              ...(integer(event.outputTextCharacters)
+                ? { outputTextCharacters: event.outputTextCharacters }
+                : {}),
+              ...(typeof event.outputAudioSeen === 'boolean'
+                ? { outputAudioSeen: event.outputAudioSeen }
+                : {}),
+              ...(event.stage === 'source_started' ||
+              event.stage === 'source_stopped'
+                ? {
+                    inputAcceptedAudioMs: inputBytes / 32,
+                    ...(writtenInputBytes === undefined
+                      ? {}
+                      : { inputWrittenAudioMs: writtenInputBytes / 32 }),
+                  }
                 : {}),
             });
           if (
@@ -857,7 +910,6 @@ export function createLiveTranslatePhoneBridge(
         throw error;
       });
     ready.catch(() => {});
-    let inputBytes = 0;
     let nextInputReport = 0;
     return {
       ready,
@@ -874,7 +926,7 @@ export function createLiveTranslatePhoneBridge(
                   stage: 'input_received',
                   bytes: inputBytes,
                   inputAudioMs: inputBytes / 32,
-                  basis: 'model_input_submitted',
+                  basis: 'client_accepted_not_written',
                 });
                 nextInputReport = inputBytes + 6400;
               }

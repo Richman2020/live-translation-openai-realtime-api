@@ -1,0 +1,407 @@
+{
+  "provenance": {
+    "evidenceKind": "actual_application_log_metadata_projection_not_provider_frame_or_audio_replay",
+    "callId": "6e0d0fba-85b4-4354-a26d-db12750716fc",
+    "baseline": "e31ceb45d515c6fd93c8baff2761aec7949f18a8",
+    "deploymentId": "6a933e0e-0860-4404-ae0e-51fed37b65a7",
+    "dateUTC": "2026-10-16",
+    "clock": "application_epoch_ms",
+    "sources": [
+      {
+        "file": "ACTUAL_CALL_EVENTS.json",
+        "sha256": "5f86f93c1d7b4baeb2b9997be25590a2dfd83583acabd569a290a37690b706a0",
+        "rows": 1704
+      },
+      {
+        "file": "ACTUAL_SOURCE_INPUT_OFFSETS.json",
+        "sha256": "2fafea0c37fd4f0b5dcffd8f4916d7927c23903a99c6737eae5c40fb28da033e",
+        "rows": 10
+      },
+      {
+        "file": "ACTUAL_RESPONSE_LIFECYCLE.json",
+        "sha256": "6a3e5631681c97f54154c1a1f602db41d9e26db3b56f7cc99208b7d84f2de727",
+        "rows": 30
+      }
+    ]
+  },
+  "responseLifecycle": [
+    {
+      "role": "local",
+      "stage": "response_created",
+      "at": 1792121047433,
+      "responseSequence": 1,
+      "actualPlaybackStartAt": null
+    },
+    {
+      "role": "local",
+      "stage": "audio_first_sample",
+      "at": 1792121048331,
+      "sourceSequence": 1,
+      "responseSequence": 1,
+      "actualPlaybackStartAt": null
+    },
+    {
+      "role": "local",
+      "stage": "response_completed",
+      "at": 1792121054321,
+      "sourceSequence": 1,
+      "responseSequence": 1,
+      "actualPlaybackStartAt": null
+    },
+    {
+      "role": "local",
+      "stage": "playback_drained",
+      "at": 1792121055310,
+      "sourceSequence": 1,
+      "responseSequence": 1,
+      "sequence": 1,
+      "actualPlaybackStartAt": null
+    },
+    {
+      "role": "local",
+      "stage": "response_created",
+      "at": 1792121071820,
+      "responseSequence": 2,
+      "actualPlaybackStartAt": null
+    },
+    {
+      "role": "local",
+      "stage": "audio_first_sample",
+      "at": 1792121073328,
+      "sourceSequence": 2,
+      "responseSequence": 2,
+      "actualPlaybackStartAt": null
+    },
+    {
+      "role": "local",
+      "stage": "response_completed",
+      "at": 1792121077933,
+      "sourceSequence": 2,
+      "responseSequence": 2,
+      "actualPlaybackStartAt": null
+    },
+    {
+      "role": "remote",
+      "stage": "response_created",
+      "at": 1792121080333,
+      "responseSequence": 3,
+      "actualPlaybackStartAt": null
+    },
+    {
+      "role": "local",
+      "stage": "playback_drained",
+      "at": 1792121080430,
+      "sourceSequence": 2,
+      "responseSequence": 2,
+      "sequence": 2,
+      "actualPlaybackStartAt": null
+    },
+    {
+      "role": "remote",
+      "stage": "response_completed",
+      "at": 1792121083846,
+      "sourceSequence": 3,
+      "responseSequence": 3,
+      "actualPlaybackStartAt": null
+    },
+    {
+      "role": "local",
+      "stage": "response_created",
+      "at": 1792121093520,
+      "responseSequence": 4,
+      "actualPlaybackStartAt": null
+    },
+    {
+      "role": "local",
+      "stage": "audio_first_sample",
+      "at": 1792121095675,
+      "sourceSequence": 4,
+      "responseSequence": 4,
+      "actualPlaybackStartAt": null
+    },
+    {
+      "role": "local",
+      "stage": "response_completed",
+      "at": 1792121098302,
+      "sourceSequence": 4,
+      "responseSequence": 4,
+      "actualPlaybackStartAt": null
+    },
+    {
+      "role": "local",
+      "stage": "playback_drained",
+      "at": 1792121098530,
+      "sourceSequence": 4,
+      "responseSequence": 4,
+      "sequence": 3,
+      "actualPlaybackStartAt": null
+    },
+    {
+      "role": "remote",
+      "stage": "response_created",
+      "at": 1792121113128,
+      "responseSequence": 5,
+      "actualPlaybackStartAt": null
+    },
+    {
+      "role": "remote",
+      "stage": "response_completed",
+      "at": 1792121118152,
+      "sourceSequence": 5,
+      "responseSequence": 5,
+      "actualPlaybackStartAt": null
+    },
+    {
+      "role": "local",
+      "stage": "response_created",
+      "at": 1792121127589,
+      "responseSequence": 6,
+      "actualPlaybackStartAt": null
+    },
+    {
+      "role": "local",
+      "stage": "audio_first_sample",
+      "at": 1792121128948,
+      "sourceSequence": 6,
+      "responseSequence": 6,
+      "actualPlaybackStartAt": null
+    },
+    {
+      "role": "remote",
+      "stage": "response_created",
+      "at": 1792121129978,
+      "responseSequence": 7,
+      "actualPlaybackStartAt": null
+    },
+    {
+      "role": "local",
+      "stage": "response_completed",
+      "at": 1792121131724,
+      "sourceSequence": 6,
+      "responseSequence": 6,
+      "actualPlaybackStartAt": null
+    },
+    {
+      "role": "remote",
+      "stage": "response_completed",
+      "at": 1792121133589,
+      "sourceSequence": 7,
+      "responseSequence": 7,
+      "actualPlaybackStartAt": null
+    },
+    {
+      "role": "local",
+      "stage": "playback_drained",
+      "at": 1792121133610,
+      "sourceSequence": 6,
+      "responseSequence": 6,
+      "sequence": 4,
+      "actualPlaybackStartAt": null
+    },
+    {
+      "role": "local",
+      "stage": "response_created",
+      "at": 1792121163350,
+      "responseSequence": 8,
+      "actualPlaybackStartAt": null
+    },
+    {
+      "role": "local",
+      "stage": "audio_first_sample",
+      "at": 1792121163557,
+      "sourceSequence": 8,
+      "responseSequence": 8,
+      "actualPlaybackStartAt": null
+    },
+    {
+      "role": "remote",
+      "stage": "response_created",
+      "at": 1792121167898,
+      "responseSequence": 9,
+      "actualPlaybackStartAt": null
+    },
+    {
+      "role": "local",
+      "stage": "response_completed",
+      "at": 1792121169007,
+      "sourceSequence": 8,
+      "responseSequence": 8,
+      "actualPlaybackStartAt": null
+    },
+    {
+      "role": "local",
+      "stage": "playback_drained",
+      "at": 1792121170270,
+      "sourceSequence": 8,
+      "responseSequence": 8,
+      "sequence": 5,
+      "actualPlaybackStartAt": null
+    },
+    {
+      "role": "local",
+      "stage": "response_created",
+      "at": 1792121171343,
+      "responseSequence": 10,
+      "actualPlaybackStartAt": null
+    },
+    {
+      "role": "local",
+      "stage": "response_completed",
+      "at": 1792121172923,
+      "sourceSequence": 10,
+      "responseSequence": 10,
+      "actualPlaybackStartAt": null
+    },
+    {
+      "role": "remote",
+      "stage": "response_completed",
+      "at": 1792121174526,
+      "sourceSequence": 9,
+      "responseSequence": 9,
+      "actualPlaybackStartAt": null
+    }
+  ],
+  "sourceInputOffsets": [
+    {
+      "role": "local",
+      "at": 1792121046856,
+      "sourceSequence": 1,
+      "providerAudioMs": 1960,
+      "inputAudioMs": 3220,
+      "differenceMs": 1260
+    },
+    {
+      "role": "local",
+      "at": 1792121071200,
+      "sourceSequence": 2,
+      "providerAudioMs": 26040,
+      "inputAudioMs": 27420,
+      "differenceMs": 1380
+    },
+    {
+      "role": "remote",
+      "at": 1792121079832,
+      "sourceSequence": 3,
+      "providerAudioMs": 15560,
+      "inputAudioMs": 36020,
+      "differenceMs": 20460
+    },
+    {
+      "role": "local",
+      "at": 1792121093363,
+      "sourceSequence": 4,
+      "providerAudioMs": 47960,
+      "inputAudioMs": 49620,
+      "differenceMs": 1660
+    },
+    {
+      "role": "remote",
+      "at": 1792121113030,
+      "sourceSequence": 5,
+      "providerAudioMs": 47640,
+      "inputAudioMs": 69020,
+      "differenceMs": 21380
+    },
+    {
+      "role": "local",
+      "at": 1792121126899,
+      "sourceSequence": 6,
+      "providerAudioMs": 81400,
+      "inputAudioMs": 83220,
+      "differenceMs": 1820
+    },
+    {
+      "role": "remote",
+      "at": 1792121129377,
+      "sourceSequence": 7,
+      "providerAudioMs": 64360,
+      "inputAudioMs": 85420,
+      "differenceMs": 21060
+    },
+    {
+      "role": "local",
+      "at": 1792121162610,
+      "sourceSequence": 8,
+      "providerAudioMs": 117080,
+      "inputAudioMs": 118820,
+      "differenceMs": 1740
+    },
+    {
+      "role": "remote",
+      "at": 1792121167762,
+      "sourceSequence": 9,
+      "providerAudioMs": 103800,
+      "inputAudioMs": 123820,
+      "differenceMs": 20020
+    },
+    {
+      "role": "local",
+      "at": 1792121171038,
+      "sourceSequence": 10,
+      "providerAudioMs": 125840,
+      "inputAudioMs": 127420,
+      "differenceMs": 1580
+    }
+  ],
+  "criticalEvents": [
+    {
+      "role": "remote",
+      "stage": "protocol_failure",
+      "at": 1792121187798,
+      "fatal": true,
+      "eventType": null,
+      "validationPath": "transport.send",
+      "expected": "send_available",
+      "actualType": "number",
+      "code": "LIVETRANSLATE_SEND_UNAVAILABLE",
+      "receiveSequence": 96,
+      "actualPlaybackStartAt": null
+    },
+    {
+      "role": "remote",
+      "stage": "failed",
+      "at": 1792121187801,
+      "code": "LIVETRANSLATE_SEND_UNAVAILABLE",
+      "actualPlaybackStartAt": null
+    },
+    {
+      "role": "unknown",
+      "stage": "call_termination",
+      "at": 1792121249701,
+      "reason": "CALL_END_REQUESTED",
+      "layer": "application",
+      "elapsedMs": 217875
+    }
+  ],
+  "peakQueueObservations": [
+    {
+      "role": "local",
+      "stage": "playback_queued",
+      "at": 1792121051210,
+      "sourceSequence": 1,
+      "responseSequence": 1,
+      "outstandingAudioMs": 2800,
+      "queuedBytes": 0,
+      "actualPlaybackStartAt": null
+    },
+    {
+      "role": "local",
+      "stage": "playback_queued",
+      "at": 1792121048334,
+      "sourceSequence": 1,
+      "responseSequence": 1,
+      "outstandingAudioMs": 200,
+      "queuedBytes": 5760,
+      "actualPlaybackStartAt": null
+    }
+  ],
+  "unknowns": [
+    "websocket_ready_state_at_failure_not_captured",
+    "websocket_buffered_bytes_at_failure_not_captured",
+    "send_callback_timing_not_captured",
+    "provider_frames_not_captured",
+    "response_10_output_content_not_captured",
+    "actual_receiver_playback_start_not_measured",
+    "acoustic_order_and_input_track_echo_not_confirmed"
+  ]
+}

@@ -1,5 +1,10 @@
 import type WebSocket from 'ws';
 
+import type {
+  LiveTranslateSendReason,
+  SendObservation,
+} from './livetranslate-send-pump';
+
 export type LiveTranslateRole = 'local' | 'remote';
 export type LiveTranslateVoice = 'Aiden' | 'Tina' | 'Andre';
 export type LiveTranslateVoiceConfirmation =
@@ -361,6 +366,12 @@ export type LiveTranslateProtocolDiagnostic = {
   conflictKind?: (typeof LIVE_TRANSLATE_ITEM_CONFLICT_KINDS)[number];
   /** Local receive ordinal; not the provider event ID. */
   receiveSequence?: number;
+  sendReason?: LiveTranslateSendReason;
+  readyState?: number;
+  bufferedBytes?: number;
+  pendingAudioBytes?: number;
+  sendSequence?: number;
+  callbackDurationMs?: number;
   acknowledgement?: {
     sessionId: string;
     eventId: string | null;
@@ -432,6 +443,10 @@ export type LiveTranslateTiming = {
   translationId?: string;
   responseId?: string;
   providerAudioMs?: number;
+  /** Counts only; distinguish a valid empty response from missing audio. */
+  outputItemCount?: number;
+  outputTextCharacters?: number;
+  outputAudioSeen?: boolean;
 };
 export type LiveTranslateUsage = {
   role: LiveTranslateRole;
@@ -476,6 +491,10 @@ export type LiveTranslateClientOptions = {
   onVoiceEvidence?: (event: LiveTranslateVoiceEvidence) => void;
   onProtocolEvent?: (event: LiveTranslateProtocolEvent) => void;
   onProtocolDiagnostic?: (event: LiveTranslateProtocolDiagnostic) => void;
+  /** Local write observations, never a supplier acknowledgement. */
+  onSendObservation?: (
+    event: SendObservation & { role: LiveTranslateRole },
+  ) => void;
   onError?: (
     code: string,
     diagnostic: { closeCode?: number; httpStatusCode?: number },
@@ -504,6 +523,8 @@ export type LiveTranslateRetentionSnapshot = {
 
 /** Exact fixed local diagnoses; arbitrary provider text/prefixes never qualify. */
 export const LIVE_TRANSLATE_FAILURE_CODES = [
+  'LIVETRANSLATE_SOURCE_ORDER_TIMEOUT',
+  'LIVETRANSLATE_SOURCE_ORDER_STALE',
   'LIVETRANSLATE_RESPONSE_ORDER_UNKNOWN',
   'LIVETRANSLATE_RESPONSE_AUDIO_MISSING',
   'LIVETRANSLATE_AUDIO_QUEUE_LIMIT',

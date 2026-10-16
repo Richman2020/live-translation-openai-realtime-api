@@ -4,6 +4,17 @@
 
 需求见 [PROJECT_BRIEF.md](PROJECT_BRIEF.md)，工作规则见 [AGENTS.md](AGENTS.md)，运行步骤见 [LOCAL_SETUP.md](LOCAL_SETUP.md)，后续执行入口见 [LOCAL_CODEX_HANDOFF.md](LOCAL_CODEX_HANDOFF.md)。
 
+## 最新：e31 实通停译与源句顺序离线修复（2026-10-16，未推送/部署）
+
+- 精确父提交 `e31ceb45d515c6fd93c8baff2761aec7949f18a8`，独立分支 `codex/ai-phone-livetranslate-send-order-20261016`；原分支、旧候选、既有未提交PROGRESS/附件与失败证据完整保留，新提交仅纳入本节及本轮文件。当前线上只读回核仍e31／部署 `6a933e0e-0860-4404-ae0e-51fed37b65a7`。
+- 独立取齐call `6e0d0fba-85b4-4354-a26d-db12750716fc` 的1704条应用记录，17细窗覆盖03:23–03:28:30 UTC，单窗<=259；粗查前两窗触上限不作完整证据。确认03:26:27.798 remote SEND_UNAVAILABLE，.801 failed，61.903秒后才结束请求。local6/remote4共10响应，非257或旧ITEM_CONFLICT。真实日志元数据自足回放5/5；没有本次原音/供应商wire/浏览器事件，不虚构事故根因或声学先后。
+- 新电话专用单写入泵：待完成PCM含in-flight最多64000B/2秒、wire和socket原1MiB阈值不扩大；慢发送有界等待，持续超时/关闭显式失败，不丢音继续/重试/重连。accepted与written分别记录，后者不是供应商收到；记录安全分支、状态、缓冲、回调耗时、关闭顺序与响应完成计数，不存正文/凭据/号码。
+- 同方向译文和PCM共用已知VAD来源排序，保持当前句流出，防B先回就先播；真正被阻塞输出独立最多5秒等待，迟到新旧源/到期明确停译，完成重复不重播。2秒发送和5秒重排均非总通话时限。跨方向source.at仍是接收时间，无可信声学映射不一律减20秒，真实对话排序仍待验证。
+- 真错误保留全局停翻译策略，持久失败提示、原声与手动挂断继续、真实断线两腿清理；未实现分方向降级。local response10是否合法空输出、约20秒offset原因、截图中文重复/回声、实际耳端起播仍未知。第257保留响应停止翻译限制明确未解决。
+- 最终专项342/342；全量2268 total/2263 pass/5 Windows skip/0 fail或cancel；typecheck/build/额外浏览器夹具类型检查通过。七组浏览器conversation43、controlled107、continuous123、unpaired120、Google29、web-verification50、daily84均通过，externalRequests=0、exceptions=[]；变更6源码lint 0error/0warning、public JS语法与diff-check通过。末次仅import空行/精准lint说明后受影响76/76+typecheck/lint复核。新SHA尚未运行远端CI，未本地Docker拉取/重建。
+- 独立审查两项确定边界（迟回调绕过2秒、诊断观察者覆盖transport首因）均修复并原探针转绿，受影响62/62，未发现剩余可行动阻断，不冒充实通通过。全部尝试保留：初始328/329旧basis断言失败、人工ASR夹具首轮3/4缺字段、helper timer重载类型失败、两轮root漏建guard回执目录退出ENOENT及首次lint8项均有原日志与后续修复依据。
+- 本轮0安装/推送/部署/电话/模型调用/新录音上传/凭据或平台修改，未操作portal-test。详见 [本通证据、修复、完整验证与短测清单](docs/LIVETRANSLATE_SEND_ORDER_FIX_2026-10-16.md)；后续需另行批准精确SHA推送/CI及测试版发布，实通费用和数据范围另确认，由用户亲自短测，无自动补拨。
+
 ## 最新：首轮后停译分类缺陷修复，本地验收完成（2026-10-16，北京时间）
 
 - 本轮以精确 `b0d7d81230a83d717d47af21416d1e351a206f5a` 为父，独立分支 `codex/ai-phone-livetranslate-item-conflict-20261016`；原分支、原未提交全文/patch及全部既有证据封存保留。未纳入既有 `node_modules` 链接或旧未提交进度资料。

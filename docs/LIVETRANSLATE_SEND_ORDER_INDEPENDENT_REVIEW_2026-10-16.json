@@ -1,0 +1,135 @@
+{
+  "reviewedAtUtc": "2026-10-16T03:54:30.240530+00:00",
+  "baselineSha": "e31ceb45d515c6fd93c8baff2761aec7949f18a8",
+  "scope": "Frozen working-tree integration relative to e31, excluding preexisting PROGRESS and untracked node_modules. Review is not a commit/production verification.",
+  "inputSha256": {
+    "src/experiments/livetranslate-client.ts": "b93ba52ccafaeb1e1f3f4ddb57c2adf10a1a955ecabe94fa5c6bb8abc94f7240",
+    "src/experiments/livetranslate-send-pump.ts": "074f31a7be460bb96614b3fc31680f7f8d8fccdd5a1dd204337fddf1f5b4bfb3",
+    "src/experiments/livetranslate-types.ts": "67e361d25442280d50fec7be844692320d86d192a9073703ccf42ce80cea492b",
+    "src/solo/livetranslate-phone-bridge.ts": "19d472d282d00070bb0c44b0483443fe675b41108b4170f50c5683593ce23007",
+    "src/solo/livetranslate-phone-diagnostics.ts": "174eed1d0064d18d6180c070c8c80423f86025fccf0a06a9c7eb985f0af58a5e",
+    "src/solo/livetranslate-phone-types.ts": "ce7814a8c65415b1f1b04066269ac5bf6ab7df312b68df04375ef34a4982c2a1",
+    "tests/livetranslate-send-pump.test.ts": "9ebf8ddd5ff2f2501241857d4bc2b3895caf7de0505057d57993c05a787ba760",
+    "tests/livetranslate-source-order.test.ts": "c9359fbfe918442a6297d3b43e80a2f5544a7b0124f8a135e2fdcdc0edf8ede2",
+    "tests/livetranslate-send-order-lifecycle.test.ts": "6d50af58c62ef9b812a9ae7c24f09366e4ea36d1f988c2dc5638b48db6068548",
+    "tests/livetranslate-phone-diagnostics.test.ts": "39905b2bde91418bd1dfc35ef3276f31e727e7e6fe3bfdc3c29b9172010a9396",
+    "tests/livetranslate-phone-bridge.test.ts": "bfccbef6b3d888a24ac22d1ffffdd9d7fdcdb8aaa29ed1f700f814a48b3dc0d9",
+    "tests/livetranslate-client.test.ts": "003dcfe4ade84d66a6e15949319307498f7f4861ec67ad9efb7a8b99fd87ac14",
+    "tests/livetranslate-actual-call-metadata.test.ts": "479e6f6539de7ae5737622f5df481ebe501e6769cebcf6f6c75a6f68188e2336",
+    "tests/fixtures/livetranslate-protocol/actual-call-6e0d0fba-metadata.PROVENANCE.md": "97369bde51b66163b02f23afdf67fd2ae2dbeb6668def755ba737e6d77ae30fd",
+    "tests/fixtures/livetranslate-protocol/actual-call-6e0d0fba-metadata.redacted.json": "8b796b13295dacbd2dd0c9e4c5e959f57f32b1f7290e6794afa04ef41e600370"
+  },
+  "findings": [
+    {
+      "id": "R1",
+      "priority": 2,
+      "state": "fixed_and_independently_reverified",
+      "file": "src/experiments/livetranslate-send-pump.ts",
+      "lines": "234-246",
+      "trigger": "Local monotonic age exceeds2000ms, but the overdue timer has not been dispatched and a successful write callback runs first.",
+      "impact": "Callback success clears pending work and cancels its overdue timer without checking total accepted age, bypassing the explicit oldest-send deadline. No retry, unbounded memory or real incident causation is established.",
+      "evidence": "Independent pure scheduling probe advanced monotonic clock from0 to3000 before executing stored callback without dispatching timer; failures[], writtenAudioBytes640, pending0, timers0, send_written callbackDurationMs3000.",
+      "evidenceFiles": [
+        "deadline-callback-probe.mts",
+        "deadline-callback-probe.json"
+      ],
+      "suggestedMinimalFix": "In success callback, check duration(item.acceptedAt)>=LIVE_TRANSLATE_SEND_WAIT_MS before counting/observing success; fail once as oldest_send_timeout. Keep explicit callback error first cause and duplicate/closed fences. Add deterministic overdue-timer-before-dispatch success case.",
+      "resolution": {
+        "file": "src/experiments/livetranslate-send-pump.ts",
+        "lines": "244-248",
+        "change": "Successful callback now validates total accepted age before updating written counters; explicit callback error retains precedence.",
+        "unchangedProbeResult": "oldest_send_timeout; writtenAudioBytes0; stoppedtrue; remainingTimers0",
+        "greenEvidenceFile": "deadline-callback-probe-green.json"
+      }
+    },
+    {
+      "id": "R2",
+      "priority": 2,
+      "state": "fixed_and_independently_reverified",
+      "file": "src/experiments/livetranslate-client.ts",
+      "lines": "646-650",
+      "trigger": "An onSendObservation sink throws specifically while observing send_failed or transport_closed, before the pump/client calls its original failure handler.",
+      "impact": "Wrapper fail(CALLBACK_FAILED) closes the client and suppresses subsequent original transport failure. Diagnostic observer can replace first cause. Production bridge currently guards ordinary sink exceptions with notify, so practical exposure is narrower than the client API and no leakage/call persistence was found.",
+      "evidence": "Independent fake client ready, socket readyState2, onSendObservation throws only for send_failed: onError reports CALLBACK_FAILED rather than SEND_UNAVAILABLE/transport_not_open.",
+      "evidenceFiles": [
+        "failure-observer-probe.mts",
+        "failure-observer-probe.json"
+      ],
+      "suggestedMinimalFix": "Make send-observation telemetry non-authoritative, or at least ignore observer throws for failure/close/cancel stages so they cannot replace original transport error; regression should assert original code and safe reason remain once.",
+      "resolution": {
+        "file": "src/experiments/livetranslate-client.ts",
+        "lines": "646-652",
+        "change": "Send-observation exceptions are isolated and cannot stop a healthy writer or replace original transport failure.",
+        "unchangedProbeResult": "onError remains LIVETRANSLATE_SEND_UNAVAILABLE",
+        "greenEvidenceFile": "failure-observer-probe-green.json"
+      }
+    }
+  ],
+  "confirmedDesign": [
+    "Send pump is phone-only; audition retains prior direct-send behavior. FIFO has at most one in-flight local write, pending PCM includes in-flight and is bounded64000bytes; serialized pending bytes and transport ceiling1MiB. Per-frame at most one send, no retry/reconnect/provider fallback.",
+    "Monotonic clock used for oldest wait, callbacks fenced by stopped/completed/inFlight identity; abort clears queue/inFlight/timer. session.finish enqueues after accepted audio, new append refused by finishRequested.",
+    "Phone output uses admitted per-role source VAD start offsets plus stable local tie-break, known response-created order within source, and explicit source binding. Later source text/PCM held for prior known nonempty source, current source can stream before final ASR/VADstop.",
+    "Unknown earlier response blocks later output; legal empty completed response can retire without invented source. Empty cannot satisfy missing earlier source translation. Nonempty local text without audio retains explicit failure.",
+    "Only already-arrived held output acquires5s ordering timer; ordinary silence/current source does not create a call-duration limit. New old-source output after advancing frontier fails visibly rather than replaying out of order; duplicate/tombstone fencing retained.",
+    "Bridge stop aborts both models, clears translation output, notifies translationStopped without invoking phone end. Remote original route and manual/remote hangup cleanup remain existing production paths, exercised by new in-memory lifecycle cases.",
+    "New scalar diagnostics use fixed enums, own-data-descriptor and finite/nonnegative counts; no raw audio/base64/body/error/secret/full number/providerID is logged. Local write completion explicitly differs from supplier receipt; endpoint basis remains provider_stream_estimate and actualPlaybackStartAt remains null."
+  ],
+  "verification": {
+    "command": "node --import tsx --test tests/livetranslate-send-pump.test.ts tests/livetranslate-source-order.test.ts tests/livetranslate-send-order-lifecycle.test.ts",
+    "exitCode": 0,
+    "tests": 40,
+    "pass": 40,
+    "fail": 0,
+    "skip": 0,
+    "logFile": "targeted-regressions.log",
+    "logSha256": "f70486e0418ffd3d79143adc9dd99f73467c70c6592419a6cd4e5b18c216299d",
+    "independentProbes": 2,
+    "probesUseOnlyInMemoryFakeSocketAndInjectedClock": true,
+    "fullSuiteRunByThisReviewer": false,
+    "networkOrModelCalled": false,
+    "codeChangedByReviewer": false,
+    "childDiagnosticReviewFile": "DIAGNOSTIC_IMPLEMENTATION_SUBREVIEW.json",
+    "childDiagnosticReviewSha256": "19b0991700b12b68fbfe3e59bfd9eb4732e42b7f610d87255576224b840b2fe0",
+    "postFixAffectedCommand": "node --import tsx --test tests/livetranslate-send-pump.test.ts tests/livetranslate-client.test.ts",
+    "postFixAffectedResults": {
+      "exitCode": 0,
+      "tests": 62,
+      "pass": 62,
+      "fail": 0,
+      "skip": 0,
+      "logFile": "affected-regressions-green.log",
+      "logSha256": "e1006062fdf5b979c952ff0b62c6c175df9729c4d93e562b9c7e1ef8620fcc5b"
+    },
+    "countingNote": "40 targeted pre-fix tests and62 affected post-fix tests are separate runs with overlap; do not sum as102 unique tests. Root full-suite results are not substituted here.",
+    "probeCodeUnchangedForGreenRerun": true,
+    "metadataFixtureReadCheck": {
+      "sourceFiles": "The fixture provenance hashes match independently reviewed saved incident originals. Each selected lifecycle30/sourceoffset10/critical3/peak2 row matches its original allowlisted projection; termination stage is a constant fixture label and at is mapped from observedAtMs.",
+      "evidenceKind": "Actual application diagnostic metadata projection only; not provider wire/audio replay.",
+      "safeContent": "No supplier event/item/session ID, audio, transcript, complete phone, credential, header or request body; local application call/deployment UUID correlation only."
+    },
+    "evidenceSha256": {
+      "deadline-callback-probe.mts": "9eddb4ce1c21fa72d3ce5341ebfdddf5ba81b79cf5d46919de7f5add302856ee",
+      "deadline-callback-probe.json": "1beadf7edf10257d5c4c021e8bc3946f691e672636825a9642f8a35ee6fbe136",
+      "deadline-callback-probe-green.json": "84aef3582544df4532bef3dc6e75bc6137e407af5d4bc1e3814e4515a5c55fbb",
+      "failure-observer-probe.mts": "f70f8fa27d3cc5317abf93f6756cb8c436eddf6aaa99496208b6d9a247b32e6a",
+      "failure-observer-probe.json": "f914b4a3658f754fc8e35091dccb6e6e6c52207127f4c2f911f562b2e6fc0a5c",
+      "failure-observer-probe-green.json": "d1ba2763ab11b8344115cfe5e62817bba8e840bccc834cc05f6a9d56671a1010"
+    }
+  },
+  "limits": [
+    "The two findings are independent synthetic correctness probes, not retained incident-frame replay and not proof of real SEND_UNAVAILABLE root cause.",
+    "Per-role source offsets do not establish cross-role acoustic order or ear-side playback timing; Chinese recognized on remote track remains an unconfirmed acoustic/ASR/echo/association problem and must not be reassigned by language.",
+    "Protocol has no guaranteed source-all-future-responses completion watermark. Later genuinely new old-source response after frontier causes explicit stop; cannot promise arbitrary reorder with zero latency/zero loss.",
+    "Known maximum256 retained association identities in<=32source grace window remains; dense source257 behavior not fixed by this patch.",
+    "Reviewer ran40 pre-fix targeted tests then62 affected post-fix tests, with overlap and separate hashes. No full-suite/browser/network/real model/phone/audio audition run by this reviewer. Final candidate commit binding may follow without claiming new execution."
+  ],
+  "disposition": "No remaining actionable blocker identified in reviewed implementation scope after both P2 fixes and independent GREEN reruns. This is an offline implementation review; exact real-call transport cause, acoustic order and audible quality remain unconfirmed.",
+  "finalStyleRebinding": {
+    "atUtc": "2026-10-16T03:57:19.349928+00:00",
+    "receipt": "FINAL_STYLE_BINDING.json",
+    "receiptSha256": "4fbc66e3c6b0e91c98ec619f119196eafc3e2967283881ffc60cf89259ee397f",
+    "method": "In memory reverse only six exact lint-comment lines and two exact blank-line changes; reconstructed bytes exactly match prior reviewed SHA256. All twelve other input files unchanged. No control-flow or data change.",
+    "testsRerun": false,
+    "mainAgentFurtherChecks": "Main agent separately reports final lint/typecheck/affected/full checks; not presented as tests executed by this independent reviewer."
+  }
+}

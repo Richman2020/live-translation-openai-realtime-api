@@ -31,6 +31,13 @@ export type LiveTranslatePhoneDiagnostic = {
     | 'configuration'
     | 'voice_evidence'
     | 'protocol_failure'
+    | 'send_accepted'
+    | 'send_started'
+    | 'send_written'
+    | 'send_waiting'
+    | 'send_failed'
+    | 'send_cancelled'
+    | 'transport_closed'
     | 'warning'
     | 'input_received'
     | 'association'
@@ -53,6 +60,26 @@ export type LiveTranslatePhoneDiagnostic = {
   actualType?: LiveTranslateProtocolDiagnostic['actualType'];
   conflictKind?: LiveTranslateProtocolDiagnostic['conflictKind'];
   receiveSequence?: number;
+  sendReason?: LiveTranslateProtocolDiagnostic['sendReason'];
+  readyState?: number;
+  bufferedBytes?: number;
+  pendingAudioBytes?: number;
+  pendingWireBytes?: number;
+  sendSequence?: number;
+  observedSequence?: number;
+  callbackDurationMs?: number;
+  queuedDurationMs?: number;
+  audioBytes?: number;
+  acceptedAudioBytes?: number;
+  writtenAudioBytes?: number;
+  sendEventType?:
+    | 'session.update'
+    | 'input_audio_buffer.append'
+    | 'session.finish'
+    | 'unknown';
+  outputItemCount?: number;
+  outputTextCharacters?: number;
+  outputAudioSeen?: boolean;
   sequence?: number;
   sourceSequence?: number;
   responseSequence?: number;
@@ -62,7 +89,12 @@ export type LiveTranslatePhoneDiagnostic = {
   providerAudioMs?: number;
   providerEndpointBasis?: 'provider_stream_estimate';
   inputAudioMs?: number;
-  basis?: 'model_input_submitted';
+  inputAcceptedAudioMs?: number;
+  inputWrittenAudioMs?: number;
+  basis?:
+    | 'model_input_submitted'
+    | 'client_accepted_not_written'
+    | 'transport_write_completed_not_received';
   actualPlaybackStartAt?: null;
   closeCode?: number;
   httpStatusCode?: number;

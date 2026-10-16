@@ -1510,3 +1510,36 @@ test('speech ordering, source conflicts and send failures retain concrete safe v
     'transport.send',
   );
 });
+
+test('phone send diagnostics cannot replace transport first fault or stop healthy writes', async () => {
+  const f = fixture('local', {
+    usage: 'phone',
+    onSendObservation() {
+      throw new Error('SYNTHETIC_OBSERVER_FAILURE');
+    },
+  });
+  await f.start();
+  f.client.append(Buffer.alloc(640));
+  assert.deepEqual(f.errors, []);
+  assert.equal(
+    f.socket.sent.filter((event) => event.type === 'input_audio_buffer.append')
+      .length,
+    1,
+  );
+  f.socket.readyState = WebSocket.CLOSING;
+  f.client.append(Buffer.alloc(640));
+  assert.deepEqual(
+    f.errors.map((event) => event.code),
+    ['LIVETRANSLATE_SEND_UNAVAILABLE'],
+  );
+  const diagnostic = f.protocolDiagnostics.find((event) => event.fatal);
+  assert.equal(diagnostic.sendReason, 'transport_not_open');
+  assert.equal(diagnostic.readyState, WebSocket.CLOSING);
+  assert.equal(
+    JSON.stringify(f.protocolDiagnostics).includes(
+      'SYNTHETIC_OBSERVER_FAILURE',
+    ),
+    false,
+  );
+  f.client.abort();
+});

@@ -18,6 +18,13 @@ const stages = new Set([
   'configuration',
   'voice_evidence',
   'protocol_failure',
+  'send_accepted',
+  'send_started',
+  'send_written',
+  'send_waiting',
+  'send_failed',
+  'send_cancelled',
+  'transport_closed',
   'warning',
   'source_started',
   'source_stopped',
@@ -85,8 +92,26 @@ export function sanitizeLiveTranslatePhoneDiagnostic(
     choose('conflictKind', LIVE_TRANSLATE_ITEM_CONFLICT_KINDS);
   }
   choose('providerEndpointBasis', ['provider_stream_estimate']);
+  choose('sendReason', [
+    'transport_not_open',
+    'transport_buffer_limit',
+    'pending_input_limit',
+    'oldest_send_timeout',
+    'write_callback_error',
+    'write_throw',
+  ]);
+  choose('readyState', [0, 1, 2, 3]);
+  choose('sendEventType', [
+    'session.update',
+    'input_audio_buffer.append',
+    'session.finish',
+    'unknown',
+  ]);
+  choose('outputAudioSeen', [true, false]);
   choose('basis', [
     'model_input_submitted',
+    'client_accepted_not_written',
+    'transport_write_completed_not_received',
     'provider_stream_estimate',
     'application_observed',
     'transport_enqueue_observed',
@@ -126,6 +151,16 @@ export function sanitizeLiveTranslatePhoneDiagnostic(
     safe.code = code;
   for (const key of [
     'sequence',
+    'sendSequence',
+    'observedSequence',
+    'audioBytes',
+    'acceptedAudioBytes',
+    'writtenAudioBytes',
+    'pendingAudioBytes',
+    'pendingWireBytes',
+    'bufferedBytes',
+    'outputItemCount',
+    'outputTextCharacters',
     'sourceSequence',
     'responseSequence',
     'bytes',
@@ -149,7 +184,15 @@ export function sanitizeLiveTranslatePhoneDiagnostic(
     receiveSequence > 0
   )
     safe.receiveSequence = receiveSequence;
-  for (const key of ['outstandingAudioMs', 'providerAudioMs', 'inputAudioMs']) {
+  for (const key of [
+    'outstandingAudioMs',
+    'providerAudioMs',
+    'inputAudioMs',
+    'inputAcceptedAudioMs',
+    'inputWrittenAudioMs',
+    'queuedDurationMs',
+    'callbackDurationMs',
+  ]) {
     const n = field(value, key);
     if (finite(n, 4102444800000)) safe[key] = n;
   }
@@ -192,6 +235,12 @@ export function projectLiveTranslateProtocolFailure(
     actualType: field(value, 'actualType'),
     conflictKind: field(value, 'conflictKind'),
     receiveSequence: field(value, 'receiveSequence'),
+    sendReason: field(value, 'sendReason'),
+    readyState: field(value, 'readyState'),
+    bufferedBytes: field(value, 'bufferedBytes'),
+    pendingAudioBytes: field(value, 'pendingAudioBytes'),
+    sendSequence: field(value, 'sendSequence'),
+    callbackDurationMs: field(value, 'callbackDurationMs'),
   });
   if (!safe || typeof safe.code !== 'string') return undefined;
   // Every optional value above passed the exact corresponding enum or scalar
@@ -217,6 +266,56 @@ export function projectLiveTranslateProtocolWarning(
   });
   return safe as
     | Omit<LiveTranslatePhoneDiagnostic, 'clock' | 'role'>
+    | undefined;
+}
+
+/** Safe scalar projection before bridge telemetry; track role comes from the
+ * authenticated adapter closure, never from text or callback-controlled data. */
+export function projectLiveTranslateSendObservation(
+  value: unknown,
+  role: 'local' | 'remote',
+): Omit<LiveTranslatePhoneDiagnostic, 'clock'> | undefined {
+  const stage = field(value, 'stage');
+  if (
+    ![
+      'send_accepted',
+      'send_started',
+      'send_written',
+      'send_waiting',
+      'send_failed',
+      'send_cancelled',
+      'transport_closed',
+    ].includes(stage as string)
+  )
+    return undefined;
+  const projection: Record<string, unknown> = {
+    role,
+    stage,
+    at: field(value, 'at'),
+    sendEventType: field(value, 'eventType'),
+    basis:
+      stage === 'send_written'
+        ? 'transport_write_completed_not_received'
+        : 'client_accepted_not_written',
+  };
+  for (const key of [
+    'sendSequence',
+    'observedSequence',
+    'audioBytes',
+    'acceptedAudioBytes',
+    'writtenAudioBytes',
+    'pendingAudioBytes',
+    'pendingWireBytes',
+    'readyState',
+    'bufferedBytes',
+    'queuedDurationMs',
+    'callbackDurationMs',
+    'sendReason',
+    'closeCode',
+  ])
+    projection[key] = field(value, key);
+  return sanitizeLiveTranslatePhoneDiagnostic(projection) as
+    | Omit<LiveTranslatePhoneDiagnostic, 'clock'>
     | undefined;
 }
 
