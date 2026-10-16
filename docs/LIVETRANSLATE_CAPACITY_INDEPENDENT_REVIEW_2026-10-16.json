@@ -1,0 +1,276 @@
+{
+  "reviewedAtUtc": "2026-10-16T05:28:24.911768+00:00",
+  "baselineSha": "cf62d18eb8dc371f294c8c08f03d2472992e5d4a",
+  "verdict": "No remaining blocking implementation issue identified in reviewed frozen scope. Offline implementation review only; not real-call acceptance.",
+  "inputSha256": {
+    "src/experiments/livetranslate-client.ts": "97a1f8a4cada61da1a4d29cd97e01758dbcb331fe6f30938bb850079651f2ec1",
+    "src/experiments/livetranslate-types.ts": "61c60971f05a457fbb5bcd9e14b8e8a9ba22949b82663b7859dde529b83ba1c5",
+    "tests/helpers/livetranslate-cf62-baseline.ts": "a9c56fb8dc30e1e8e1456dc283622cf2a637b1fe11efa01d60d229c472dc697e",
+    "tests/livetranslate-capacity-boundary.test.ts": "3d1565ad589e1bc19e6522f13301b11289647cade33282bf988dbfff94455605",
+    "tests/livetranslate-capacity-compaction.test.ts": "4dc5d1ed8bc94b6f5c7401c1b4d675e6c52647a1d070a38fa5127944020755a2",
+    "tests/livetranslate-capacity-differential.test.ts": "604346ad3e50cd4eb0a80845fba72c4aca71ca4556578695249b30f5eba5f603",
+    "tests/livetranslate-capacity-phone-lifecycle.test.ts": "e20c4f845028c87a9897233a90063e42a831e793a9feb7ffea18a6dedc1f6828",
+    "docs/LIVETRANSLATE_CAPACITY_COMPACTION_2026-10-16.md": "0741afe52471345f75910891e1b53550164c78c375107fdcdedadda8f74a2c33"
+  },
+  "businessScope": {
+    "paths": [
+      "src/experiments/livetranslate-client.ts",
+      "src/experiments/livetranslate-types.ts"
+    ],
+    "diffAdded": 333,
+    "diffRemoved": 15,
+    "sourceHashMatchedAtStartAndAfterIndependentProbes": true
+  },
+  "checklist": [
+    {
+      "area": "Maturity and bounded heavy retention",
+      "locations": [
+        "client:1455-1529"
+      ],
+      "result": "Across a single client, compact only mature created/done, one-output, VAD-admitted explicit-bound, final published revision with no queued PCM/order/anchor/usage dependency. At most32 mature heavy records remain; genuinely active records retain original256 protection. Closed parent has empty audio and one string-ID slot map, no translated body or PCM."
+    },
+    {
+      "area": "Shared1024 reserve and pin",
+      "locations": [
+        "client:1374-1449",
+        "client:1694-1731"
+      ],
+      "result": "Old terminal+closed identity count shares original1024. Reserve excludes incoming keys before selecting safe old entries. Closed pair only reclaimable with source absent and floor strictly greater than source start. Whole-source conversion is count-preserving; individual terminal-key reservation prevents batch reinsertion overflow. No candidate frees pinned active/grace/zero-duration-equal-floor evidence; no safe room fixed TERMINAL_CAPACITY."
+    },
+    {
+      "area": "Positive identity and bookkeeping",
+      "locations": [
+        "client:785-827",
+        "client:1174-1201",
+        "client:2430-2472"
+      ],
+      "result": "Typed closed output is not ordinary retired-source terminal. New input can cite closed output as previous bookkeeping without global own-ID suppression. Own closed identity cannot become input source or change output response/source/slot; matching late frames inert. No text similarity/language role inference added."
+    },
+    {
+      "area": "Validation and digest order",
+      "locations": [
+        "client:860-866",
+        "client:1780-1889",
+        "client:2509-2541",
+        "client:2669-2700"
+      ],
+      "result": "Closed response returns retained done parent outside active map; existing response created/done voice/config/status checks still execute in their existing order. Closed translation/item checks are reached after existing event-id digest check. Compaction does not forget active-source digest; completedGroup digest release includes closed identities at existing whole-source completion point. Event4096 remains finite."
+    },
+    {
+      "area": "Completion and usage",
+      "locations": [
+        "client:984-993",
+        "client:1305-1334",
+        "client:1604-1684",
+        "client:2194-2254"
+      ],
+      "result": "sourceCompletions stores closed response and empty-translation counts; order/complete/finish and completedGroup use active+closed evidence. Empty bound outputs cannot certify later nonempty raw source. Pending usage prevents maturity; original normalization, admission and publish-once behavior unchanged. Closed done does not republish usage; unknown not filled with zero."
+    },
+    {
+      "area": "Cleanup and observability",
+      "locations": [
+        "client:370-388",
+        "client:3037-3086",
+        "types:519-534,560"
+      ],
+      "result": "cleanup clears active maps, ledger, source summaries, retired count, pending usage and waits. Retention snapshot exposes counts only, no new normal logging or secret/body/IDs. New TERMINAL_CAPACITY uses exact fixed failure allowlist and existing fail/translation-stop path."
+    },
+    {
+      "area": "No audio or request scheduling change",
+      "locations": [
+        "diff cf62..frozen client/types only"
+      ],
+      "result": "No model/voice/session payload/send pump/PCM converter/phone bridge/UI/workflow/config file modified. Audio publishing/FIFO/packet/mark/microtask bodies unchanged; source completion view adjustment only accounts already-published compact output. No2/4B PCM fix, provider fallback, retry or extra model request."
+    },
+    {
+      "area": "Tests and documentation review",
+      "locations": [
+        "new capacity33/differential17/phone4 source files",
+        "docs/LIVETRANSLATE_CAPACITY_COMPACTION_2026-10-16.md"
+      ],
+      "result": "Tests use injected fake peers, exact five immutable cf62 blobs for baseline, and explicit actual five-frame config prefix limits. Documentation correctly distinguishes synthetic counts/logical state from heap/ear playback,545 output-before-failure and fragment-heavy4096 limit, no real257 capture, unknown withdrawal semantics and historical transport cause. Reviewer did not rerun root entire suites."
+    }
+  ],
+  "blockingFindings": [],
+  "policyNotes": [
+    {
+      "priority": "nonblocking reviewed safety difference",
+      "trigger": "A new late output item ID tries to occupy a compacted already-done response slot under a new event ID.",
+      "finding": "Typed closedParent check now explicitly fails response_slot_rebound; cf62 retained done-parent branch returned before that slot check and ignored such late mismatches. This is stricter invalid-stream handling, not a change to an already supported legitimate PCM/translation trace. Do not claim every malformed-event error trace is identical.",
+      "locations": [
+        "client:1187-1198",
+        "cf62 client:1131-1142"
+      ],
+      "recommendation": "Mention this bounded safety tightening with the existing normal-trace equivalence claim; no implementation rollback requested."
+    }
+  ],
+  "independentExecution": {
+    "fullSuiteRerun": false,
+    "authoredSuitesRerun": false,
+    "probes": {
+      "evidenceKind": "independent_synthetic_in_memory_probes_not_actual_call_replay",
+      "passed": 4,
+      "results": [
+        {
+          "name": "nonempty pending usage resolves through late VAD, then survives compaction and duplicate done once",
+          "passed": true,
+          "errors": [],
+          "snapshot": {
+            "usage": "phone",
+            "activeSources": 1,
+            "activeTranslations": 32,
+            "activeResponses": 32,
+            "pendingAssociations": 0,
+            "retainedEventIds": 2,
+            "terminalIdentifiers": 0,
+            "sourceOffsetFloorMs": 0,
+            "closedResponseIdentities": 9,
+            "closedOutputIdentities": 9,
+            "pinnedTerminalIdentifiers": 18,
+            "reclaimableTerminalIdentifiers": 0,
+            "retiredResponsesTotal": 9,
+            "sourceCompletionSummaries": 1,
+            "terminalBudgetUsed": 18,
+            "retainedTextCharacters": 818,
+            "queuedAudioBytes": 0
+          }
+        },
+        {
+          "name": "actual pending usage plus held output aborts cleanly and late VAD cannot publish or write",
+          "passed": true,
+          "errors": [],
+          "snapshot": {
+            "usage": "phone",
+            "activeSources": 0,
+            "activeTranslations": 0,
+            "activeResponses": 0,
+            "pendingAssociations": 0,
+            "retainedEventIds": 0,
+            "terminalIdentifiers": 0,
+            "sourceOffsetFloorMs": 0,
+            "closedResponseIdentities": 0,
+            "closedOutputIdentities": 0,
+            "pinnedTerminalIdentifiers": 0,
+            "reclaimableTerminalIdentifiers": 0,
+            "retiredResponsesTotal": 0,
+            "sourceCompletionSummaries": 0,
+            "terminalBudgetUsed": 0,
+            "retainedTextCharacters": 0,
+            "queuedAudioBytes": 0
+          }
+        },
+        {
+          "name": "full pinned identity budget cannot be released by zero-duration same-offset source retirement",
+          "passed": true,
+          "errors": [
+            "LIVETRANSLATE_TERMINAL_CAPACITY"
+          ],
+          "snapshot": {
+            "usage": "phone",
+            "activeSources": 0,
+            "activeTranslations": 0,
+            "activeResponses": 0,
+            "pendingAssociations": 0,
+            "retainedEventIds": 0,
+            "terminalIdentifiers": 0,
+            "sourceOffsetFloorMs": 0,
+            "closedResponseIdentities": 0,
+            "closedOutputIdentities": 0,
+            "pinnedTerminalIdentifiers": 0,
+            "reclaimableTerminalIdentifiers": 0,
+            "retiredResponsesTotal": 0,
+            "sourceCompletionSummaries": 0,
+            "terminalBudgetUsed": 0,
+            "retainedTextCharacters": 0,
+            "queuedAudioBytes": 0
+          }
+        },
+        {
+          "name": "active-source compacted response still detects changed payload under original event ID",
+          "passed": true,
+          "errors": [
+            "LIVETRANSLATE_EVENT_CONFLICT"
+          ],
+          "snapshot": {
+            "usage": "phone",
+            "activeSources": 0,
+            "activeTranslations": 0,
+            "activeResponses": 0,
+            "pendingAssociations": 0,
+            "retainedEventIds": 0,
+            "terminalIdentifiers": 0,
+            "sourceOffsetFloorMs": 0,
+            "closedResponseIdentities": 0,
+            "closedOutputIdentities": 0,
+            "pinnedTerminalIdentifiers": 0,
+            "reclaimableTerminalIdentifiers": 0,
+            "retiredResponsesTotal": 0,
+            "sourceCompletionSummaries": 0,
+            "terminalBudgetUsed": 0,
+            "retainedTextCharacters": 0,
+            "queuedAudioBytes": 0
+          }
+        }
+      ]
+    },
+    "attempts": [
+      {
+        "attempt": 1,
+        "exitCode": 1,
+        "classification": "Audit harness import-resolution failure: ws package is not an ancestor of audit directory. Candidate scenario did not start. Original probe/stdout/stderr preserved as attempt1.",
+        "repair": "Only audit probe import switched to existing project node_modules/ws/index.js; no install/source change."
+      },
+      {
+        "attempt": 2,
+        "exitCode": 0,
+        "classification": "Four pure in-memory scenarios passed with frozen implementation and external-network guard. No test assertion removed."
+      }
+    ],
+    "guardReceipts": {
+      "process-172961.json": {
+        "externalNetworkAttempts": 0,
+        "allowedLocalCalls": 4
+      },
+      "process-173008.json": {
+        "externalNetworkAttempts": 0,
+        "allowedLocalCalls": 4
+      }
+    },
+    "guardFile": "/workspace/ai-phone-reference/ci73-local-fix-20261016/deny-external-network.cjs",
+    "evidenceSha256": {
+      "independent-capacity-probes.mts": "95b0624bf20f0d5b6de63282c93c15e314d4cedd36e04cf234cc0d0928d06b8f",
+      "independent-capacity-probes.stdout.json": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "independent-capacity-probes-attempt1.stdout.json": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "independent-capacity-probes-attempt1.mts": "3012415e954da4d9ded0312fad3f2c0383de487a52277d4e774f47887667e1fb",
+      "independent-capacity-probes-attempt2.stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "independent-capacity-probes.stderr.log": "0604bb9ee28705d2d751f2d448bc3d4846425b429b86573e96559d4027d09dd0",
+      "independent-capacity-probes-attempt1.stderr.log": "0604bb9ee28705d2d751f2d448bc3d4846425b429b86573e96559d4027d09dd0",
+      "independent-capacity-probes-attempt2.stdout.json": "190b849de5f9f1a993278848ba1de3897a90e5242440cc58e4dd59d7c5d6a6a1"
+    }
+  },
+  "completionUsageSubreview": {
+    "file": "COMPLETION_USAGE_SUBREVIEW.json",
+    "sha256": "ef809557851bcccbbd42798fd38a1242caaedb9e3ae9da16001e54b0d31f580b",
+    "staticOnly": true,
+    "originalCoverageGap": "Authored abort test did not explicitly make pendingUsage nonempty. Independent scenarios1/2 now directly construct done-before-VAD pending usage and exercise recovery/abort; no remaining blocker from that gap."
+  },
+  "validationAttribution": "Root separately reports33 capacity/17 differential/4 phone,2339 total/2334pass/5Windows skips and seven browser checks. This reviewer inspected source/claims and ran only four independent probes; does not substitute or add overlapping counts.",
+  "remainingRisks": [
+    "Budget remains finite: active256, joint identity1024 and necessary event4096; no unlimited dense single-source promise.545/273 are fixture-specific states, not product call or sentence limits.",
+    "No actual capacity257 provider-frame capture or real call/audio was supplied for this repair. Historical SEND_UNAVAILABLE exact cause,20-second offset gap, source/echo symptoms and ear playback timing remain unconfirmed.",
+    "Supported local unknown/deleted bookkeeping handling is not a supplier guarantee about every future withdraw protocol. Already played speech cannot be physically withdrawn.",
+    "Logical retained-object/text/PCM counts are not process heap measurements or real latency/CPU measurements.",
+    "Finite tombstone memory with offset proof cannot prove perpetual uniqueness under arbitrary infinite-late malicious ID reuse; existing VAD, source-order, session and cleanup fences remain essential."
+  ],
+  "actions": {
+    "businessEdited": false,
+    "repoTestsEdited": false,
+    "installed": false,
+    "network": false,
+    "platform": false,
+    "model": false,
+    "phone": false,
+    "pushed": false,
+    "deployed": false
+  }
+}

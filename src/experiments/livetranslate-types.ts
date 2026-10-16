@@ -519,6 +519,16 @@ export type LiveTranslateRetentionSnapshot = {
   retainedEventIds: number;
   terminalIdentifiers: number;
   sourceOffsetFloorMs: number;
+  /** Compact, typed closed identities share the original 1024-key budget. */
+  closedResponseIdentities?: number;
+  closedOutputIdentities?: number;
+  pinnedTerminalIdentifiers?: number;
+  reclaimableTerminalIdentifiers?: number;
+  retiredResponsesTotal?: number;
+  sourceCompletionSummaries?: number;
+  terminalBudgetUsed?: number;
+  retainedTextCharacters?: number;
+  queuedAudioBytes?: number;
 };
 
 /** Exact fixed local diagnoses; arbitrary provider text/prefixes never qualify. */
@@ -547,6 +557,7 @@ export const LIVE_TRANSLATE_FAILURE_CODES = [
   'LIVETRANSLATE_FINISH_TIMEOUT',
   'LIVETRANSLATE_INPUT_INVALID',
   'LIVETRANSLATE_ITEM_CAPACITY',
+  'LIVETRANSLATE_TERMINAL_CAPACITY',
   'LIVETRANSLATE_ITEM_CONFLICT',
   'LIVETRANSLATE_MODALITY_MISMATCH',
   'LIVETRANSLATE_MODEL_EVENT_MISMATCH',

@@ -4,6 +4,17 @@
 
 需求见 [PROJECT_BRIEF.md](PROJECT_BRIEF.md)，工作规则见 [AGENTS.md](AGENTS.md)，运行步骤见 [LOCAL_SETUP.md](LOCAL_SETUP.md)，后续执行入口见 [LOCAL_CODEX_HANDOFF.md](LOCAL_CODEX_HANDOFF.md)。
 
+## 最新：cf62 最小响应容量回收（2026-10-16，仅离线候选）
+
+- 固定父提交 `cf62d18eb8dc371f294c8c08f03d2472992e5d4a`，独立分支 `codex/ai-phone-livetranslate-capacity-fix-20261016`。cf62 Git bundle、4份既有未提交文件overlay、逐文件hash已在独立目录恢复验证；不覆盖旧成果。旧PROGRESS、桥接调查测试和调查报告保留在工作区，未夹带进新提交；17项旧容量characterization保留全部断言，改为冻结精确cf62执行。
+- 仅改client状态管理和类型：完成且字幕/PCM/usage均已交付的响应，超过全client32个近期成熟重对象后压缩；保留来源完成/空译文摘要、类型化response/output绑定。排序等待、未知绑定、未定稿、未释放PCM与待发布usage不压缩；电话层尚待mark的记录仍由原bridge保留。没有改模型3.8、Andre、复刻关闭、请求/context、语速、分段、字幕历史/显示、原声、发送或播放调度；没有极短PCM修复。
+- 原1024联合身份预算按key计数（每闭合response/output对2键），与旧terminal共享；活跃/grace来源身份pin，整源退休且floor严格越过start才可回收。必要event摘要仍4096；不提高256/1024/4096，不无限缓存。无安全空间固定TERMINAL_CAPACITY，既有失败收尾/原音/挂断路径不改。压缩需要的完成摘要和身份分流调整逐项记于报告；真正错绑仍拒绝，异常已done slot重绑显式失败比原部分忽略更严格。
+- 容量专项33/33；冻结cf62历史17/17；差分17/17（15正常逐action字幕/PCM字节/顺序/时间/usage/请求/终止全相同，2项明确旧257失败、新继续）；跨层4/4。真实历史五帧仅配置/首响应prefix，无PCM/usage/257原帧，其余容量事件为人工；不能称真实257事故回放或通话验收。
+- exact候选文件集独立worktree全量2339 total/2334 pass/0 fail/5 Windows skip；完整typecheck、build、改动源码lint、JS语法、diff-check通过。七浏览器首轮43/107/123/120/29/50/84共556checks全部通过，0失败/跳过/重跑，冻结源码稳定。全量160份Node守卫、七浏览器外部请求及各guard均0外联；无安装/真实供应商/电话操作。所有尝试与早期3项lint样式失败均保留，修正后通过，不删测试或盲目重跑。
+- 容量与内存证据：单来源257→32重对象+225闭合对（450键），300→32+268对；400来源×3累计1200通过、联合键≤1024。单一未定稿来源544完成仍健康，第545done已交付后压缩因1024全pin而停译；另一碎片密集人工case在273rd响应内先耗4096摘要。不得称无限通话/彻底取消所有容量；逻辑正文累计622090字符仅留66385、客户端排队PCM0，不是进程heap曲线，字幕历史不变。
+- 冻结实现独立审查完成，无剩余阻断；4项独立合成探针通过，源码/测试/技术文档hash均绑定。首探针attempt因审计目录ws解析失败、未执行候选，改为显式引用既有依赖后通过；两次原始日志均留存。独审与作者测试分开计数；详见 [独立审查](docs/LIVETRANSLATE_CAPACITY_INDEPENDENT_REVIEW_2026-10-16.md)。
+- 本轮只读回核线上仍cf62／部署 `7f455c08-b39b-48c2-8390-e966fdf304be` SUCCESS、staged=null；不推送、不部署、不拨号/模型调用、不改变量、密钥、网络、Railway或Twilio，不操作portal-test。原20秒offset未知项等旧风险不在本轮消除范围。离线候选完成后停止，等待审查后另行决定推送/发布；详见 [容量回收报告](docs/LIVETRANSLATE_CAPACITY_COMPACTION_2026-10-16.md)，全部本轮审计保存在资料目录 `livetranslate-capacity-fix-20261016`。
+
 ## 最新：e31 实通停译与源句顺序离线修复（2026-10-16，未推送/部署）
 
 - 精确父提交 `e31ceb45d515c6fd93c8baff2761aec7949f18a8`，独立分支 `codex/ai-phone-livetranslate-send-order-20261016`；原分支、旧候选、既有未提交PROGRESS/附件与失败证据完整保留，新提交仅纳入本节及本轮文件。当前线上只读回核仍e31／部署 `6a933e0e-0860-4404-ae0e-51fed37b65a7`。

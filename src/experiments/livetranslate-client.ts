@@ -169,6 +169,26 @@ type ResponseState = {
   }[];
   outputs: Map<number, string>;
 };
+type ClosedResponse = {
+  responseId: string;
+  translationId: string;
+  sourceId: string;
+  sourceStartMs: number;
+  parent: ResponseState;
+};
+type ClosedIdentity = {
+  kind: 'response' | 'output';
+  record: ClosedResponse;
+};
+type TerminalIdentity = {
+  kind: 'source' | 'response' | 'output';
+  /** A zero-duration retired source is not fenced until floor > its start. */
+  protectedStartMs?: number;
+};
+type SourceCompletion = {
+  responses: number;
+  emptyTranslations: number;
+};
 
 /** Independent prototype only. No production registration, retries or fallback. */
 export function createLiveTranslateClient(
@@ -233,7 +253,10 @@ export function createLiveTranslateClient(
   const responses = new Map<string, ResponseState>();
   const seen = new Map<string, string>();
   const eventOwners = new Map<string, readonly string[]>();
-  const terminalIdentifiers = new Map<string, true>();
+  const terminalIdentifiers = new Map<string, TerminalIdentity>();
+  const closedLedger = new Map<string, ClosedIdentity>();
+  const sourceCompletions = new Map<string, SourceCompletion>();
+  let retiredResponsesTotal = 0;
   const sourcePublishedRevision = new Map<string, number>();
   const translationPublishedRevision = new Map<string, number>();
   const associationPublished = new Set<string>();
@@ -350,6 +373,9 @@ export function createLiveTranslateClient(
     seen.clear();
     eventOwners.clear();
     terminalIdentifiers.clear();
+    closedLedger.clear();
+    sourceCompletions.clear();
+    retiredResponsesTotal = 0;
     sourcePublishedRevision.clear();
     translationPublishedRevision.clear();
     associationPublished.clear();
@@ -757,6 +783,18 @@ export function createLiveTranslateClient(
     }
   };
   const bindOutputSource = (translationId: string, sourceId: string) => {
+    // An output identity is never an input source. A new input item's ordinary
+    // predecessor is handled separately and never reaches this binding path.
+    if (closedLedger.has(`item:${sourceId}`)) {
+      fail('LIVETRANSLATE_SOURCE_CONFLICT');
+      return;
+    }
+    const closedOutput = closedLedger.get(`item:${translationId}`);
+    if (closedOutput) {
+      if (closedOutput.record.sourceId !== sourceId)
+        fail('LIVETRANSLATE_SOURCE_CONFLICT');
+      return;
+    }
     const prior =
       associations.get(translationId) ?? pendingAssociations.get(translationId);
     if (prior !== undefined && prior !== sourceId) {
@@ -770,6 +808,15 @@ export function createLiveTranslateClient(
     associate(translationId, sourceId);
   };
   const ensureSource = (id: string) => {
+    if (phone && closedLedger.has(`item:${id}`)) {
+      fail('LIVETRANSLATE_ITEM_CONFLICT', undefined, undefined, {
+        validationPath: 'item_id',
+        expected: 'consistent_item_binding',
+        actual: id,
+        conflictKind: 'source_after_output',
+      });
+      return undefined;
+    }
     if (phone && terminalIdentifiers.has(`item:${id}`)) return undefined;
     if (
       translations.has(id) ||
@@ -813,6 +860,8 @@ export function createLiveTranslateClient(
   };
   const response = (id: string) => {
     if (phone && terminalIdentifiers.has(`response:${id}`)) return undefined;
+    const archived = phone ? closedLedger.get(`response:${id}`) : undefined;
+    if (archived) return archived.record.parent;
     let item = responses.get(id);
     if (!item) {
       if (responses.size >= MAX_ITEMS) {
@@ -935,7 +984,11 @@ export function createLiveTranslateClient(
   function phoneSourceComplete(source: Source) {
     if (!source.final || source.endMs === undefined) return false;
     const parents = sourceResponses(source.sourceId);
-    if (!parents.length) return !source.text.trim();
+    if (!parents.length)
+      return (
+        !source.text.trim() ||
+        Boolean(sourceCompletions.get(source.sourceId)?.responses)
+      );
     return parents.every(([, parent]) => parent.done && !parent.audio.length);
   }
   function hasPendingPhoneOutput(item: Translation) {
@@ -1119,6 +1172,32 @@ export function createLiveTranslateClient(
         terminalIdentifiers.has(`response:${event.response_id}`))
     )
       return undefined;
+    if (phone) {
+      const closedOutput = closedLedger.get(`item:${event.item_id}`);
+      const closedParent = closedLedger.get(`response:${event.response_id}`);
+      if (
+        closedOutput &&
+        closedOutput.record.responseId !== event.response_id
+      ) {
+        fail('LIVETRANSLATE_ITEM_CONFLICT', undefined, undefined, {
+          validationPath: 'item_id',
+          expected: 'consistent_item_binding',
+          actual: event.item_id,
+          conflictKind: 'output_response_rebound',
+        });
+        return undefined;
+      }
+      if (closedParent && closedParent.record.translationId !== event.item_id) {
+        fail('LIVETRANSLATE_ITEM_CONFLICT', undefined, undefined, {
+          validationPath: 'item_id',
+          expected: 'consistent_item_binding',
+          actual: event.item_id,
+          conflictKind: 'response_slot_rebound',
+        });
+        return undefined;
+      }
+      if (closedOutput || closedParent) return undefined;
+    }
     if (sources.has(event.item_id)) {
       fail('LIVETRANSLATE_ITEM_CONFLICT', undefined, undefined, {
         validationPath: 'item_id',
@@ -1223,12 +1302,19 @@ export function createLiveTranslateClient(
     const source = sourceId ? sources.get(sourceId) : undefined;
     return Boolean(source?.final && source.text.trim());
   };
+  function hasCompletedSourceOutput(sourceId: string) {
+    return (
+      [...associations.values()].includes(sourceId) ||
+      Boolean(sourceCompletions.get(sourceId)?.responses)
+    );
+  }
   const incompleteBoundOutput = () =>
     [...sources.values()].some(
       (source) =>
         source.final &&
         source.text.trim() &&
-        ![...associations.values()].includes(source.sourceId),
+        (!hasCompletedSourceOutput(source.sourceId) ||
+          Boolean(sourceCompletions.get(source.sourceId)?.emptyTranslations)),
     ) ||
     [...translations.values()].some(
       (item) =>
@@ -1285,18 +1371,158 @@ export function createLiveTranslateClient(
         seen.delete(eventId);
       }
   }
-  const rememberTerminal = (keys: readonly string[]) => {
+  function terminalReclaimable(value: TerminalIdentity) {
+    return (
+      value.protectedStartMs === undefined ||
+      sourceOffsetFloorMs > value.protectedStartMs
+    );
+  }
+  function closedReclaimable(record: ClosedResponse) {
+    return (
+      !sources.has(record.sourceId) &&
+      sourceOffsetFloorMs > record.sourceStartMs
+    );
+  }
+  function reserveTerminalKeys(keys: readonly string[]) {
+    const incoming = new Set(keys);
+    const missing = new Set(
+      keys.filter(
+        (key) => !terminalIdentifiers.has(key) && !closedLedger.has(key),
+      ),
+    );
+    while (
+      terminalIdentifiers.size + closedLedger.size + missing.size >
+      MAX_TERMINAL_IDENTIFIERS
+    ) {
+      const terminal = [...terminalIdentifiers].find(
+        ([key, value]) => !incoming.has(key) && terminalReclaimable(value),
+      );
+      if (terminal) {
+        terminalIdentifiers.delete(terminal[0]);
+        continue;
+      }
+      const archived = [...closedLedger.values()].find(
+        (value) =>
+          !incoming.has(`response:${value.record.responseId}`) &&
+          !incoming.has(`item:${value.record.translationId}`) &&
+          closedReclaimable(value.record),
+      );
+      if (archived) {
+        closedLedger.delete(`response:${archived.record.responseId}`);
+        closedLedger.delete(`item:${archived.record.translationId}`);
+        continue;
+      }
+      fail('LIVETRANSLATE_TERMINAL_CAPACITY', undefined, undefined, {
+        validationPath: 'source.binding',
+        expected: 'bounded_capacity',
+        actual: terminalIdentifiers.size + closedLedger.size,
+      });
+      return false;
+    }
+    return true;
+  }
+  const rememberTerminal = (
+    keys: readonly string[],
+    sourceFence?: { sourceId: string; startMs: number },
+  ) => {
     for (const key of keys) {
       if (key.startsWith('item:')) unclassifiedCreated.delete(key.slice(5));
-      terminalIdentifiers.set(key, true);
+      if (!closedLedger.has(key)) {
+        // A whole retired source can carry more safe terminal keys than the
+        // rolling window. Insert individually, exactly as a bounded FIFO;
+        // never reserve the full batch and then reinsert evicted incoming keys.
+        if (!reserveTerminalKeys([key])) return;
+        let kind: TerminalIdentity['kind'] = key.startsWith('response:')
+          ? 'response'
+          : 'output';
+        if (sourceFence && key === `item:${sourceFence.sourceId}`)
+          kind = 'source';
+        terminalIdentifiers.set(key, {
+          kind,
+          ...(sourceFence ? { protectedStartMs: sourceFence.startMs } : {}),
+        });
+      }
       const wait = anchorWaits.get(key);
       if (wait) clearTimeout(wait);
       anchorWaits.delete(key);
     }
-    while (terminalIdentifiers.size > MAX_TERMINAL_IDENTIFIERS)
-      terminalIdentifiers.delete(terminalIdentifiers.keys().next().value!);
     forgetCompletedEventDigests(keys);
   };
+  function sourceClosedKeys(sourceId: string) {
+    return [...closedLedger]
+      .filter(([, value]) => value.record.sourceId === sourceId)
+      .map(([key]) => key);
+  }
+  function compactMatureResponses() {
+    const mature = [...responses]
+      .filter(([id, parent]) => {
+        if (
+          !parent.createdSeen ||
+          !parent.done ||
+          parent.audio.length ||
+          responseOrder.includes(id) ||
+          pendingUsage.has(id) ||
+          anchorWaits.has(`response:${id}`) ||
+          parent.outputs.size !== 1
+        )
+          return false;
+        return [...parent.outputs.values()].every((itemId) => {
+          const item = translations.get(itemId);
+          return (
+            item &&
+            item.final &&
+            item.textDone &&
+            item.sourceId &&
+            phoneSourceAdmitted(item.sourceId) &&
+            associations.get(itemId) === item.sourceId &&
+            !pendingAssociations.has(itemId) &&
+            !unclassifiedCreated.has(itemId) &&
+            !anchorWaits.has(`item:${item.sourceId}`) &&
+            !phoneOrderWaits.has(itemId) &&
+            translationPublishedRevision.get(itemId) === item.revision &&
+            (role !== 'local' ||
+              !item.text.trim() ||
+              (item.audioSeen && item.audioDone))
+          );
+        });
+      })
+      .sort(
+        ([, left], [, right]) => left.createdSequence - right.createdSequence,
+      );
+    // One global recent completed-response cache; never 32 per source.
+    while (!closed() && mature.length > COMPLETED_SOURCE_GRACE) {
+      const [id, parent] = mature.shift()!;
+      const itemId = parent.outputs.get(0)!;
+      const item = translations.get(itemId)!;
+      const source = sources.get(item.sourceId!)!;
+      const keys = [`response:${id}`, `item:${itemId}`];
+      if (!reserveTerminalKeys(keys)) return;
+      const record: ClosedResponse = {
+        responseId: id,
+        translationId: itemId,
+        sourceId: source.sourceId,
+        sourceStartMs: source.startMs!,
+        parent,
+      };
+      closedLedger.set(keys[0], { kind: 'response', record });
+      closedLedger.set(keys[1], { kind: 'output', record });
+      const summary = sourceCompletions.get(source.sourceId) ?? {
+        responses: 0,
+        emptyTranslations: 0,
+      };
+      summary.responses += 1;
+      if (!item.text.trim()) summary.emptyTranslations += 1;
+      sourceCompletions.set(source.sourceId, summary);
+      retiredResponsesTotal += 1;
+      responses.delete(id);
+      translations.delete(itemId);
+      associations.delete(itemId);
+      translationPublishedRevision.delete(itemId);
+      associationPublished.delete(itemId);
+      // Active-source event digests still own the original 4096 protection.
+      // They are released only when the whole source is proved complete/retired.
+    }
+  }
 
   const discardUnadmittedSource = (sourceId: string) => {
     const source = sources.get(sourceId);
@@ -1317,6 +1543,7 @@ export function createLiveTranslateClient(
       ...[...responseIds].map((id) => `response:${id}`),
     ];
     sources.delete(sourceId);
+    sourceCompletions.delete(sourceId);
     sourcePublishedRevision.delete(sourceId);
     speechSeen.delete(sourceId);
     for (const id of itemIds) {
@@ -1376,6 +1603,8 @@ export function createLiveTranslateClient(
         ...outputIds.map((itemId) => `item:${itemId}`),
       ]);
     }
+    compactMatureResponses();
+    if (closed()) return;
     // Unresolved edges/ordering are active protection, never evicted for room.
     if (
       pendingAssociations.size ||
@@ -1399,7 +1628,12 @@ export function createLiveTranslateClient(
       const itemIds = [...associations]
         .filter(([, id]) => id === source.sourceId)
         .map(([id]) => id);
-      if (source.text.trim() && itemIds.length === 0) return undefined;
+      const summary = sourceCompletions.get(source.sourceId);
+      if (
+        source.text.trim() &&
+        ((!itemIds.length && !summary?.responses) || summary?.emptyTranslations)
+      )
+        return undefined;
       const items = itemIds.map((id) => translations.get(id));
       if (
         items.some(
@@ -1444,6 +1678,7 @@ export function createLiveTranslateClient(
         `item:${id}`,
         ...group.itemIds.map((itemId) => `item:${itemId}`),
         ...group.responseIds.map((responseId) => `response:${responseId}`),
+        ...sourceClosedKeys(id),
       ]);
     for (const source of ordered) {
       if (completed.size <= COMPLETED_SOURCE_GRACE) break;
@@ -1458,6 +1693,7 @@ export function createLiveTranslateClient(
       const { itemIds, responseIds } = group;
       completed.delete(source.sourceId);
       sources.delete(source.sourceId);
+      sourceCompletions.delete(source.sourceId);
       speechSeen.delete(source.sourceId);
       sourcePublishedRevision.delete(source.sourceId);
       for (const id of itemIds) {
@@ -1471,11 +1707,27 @@ export function createLiveTranslateClient(
         pendingUsage.delete(id);
       }
       sourceOffsetFloorMs = Math.max(sourceOffsetFloorMs, source.endMs!);
-      rememberTerminal([
-        `item:${source.sourceId}`,
-        ...itemIds.map((id) => `item:${id}`),
-        ...responseIds.map((id) => `response:${id}`),
-      ]);
+      // After the whole source retires, restore the existing terminal-event
+      // policy. Strict floor protection keeps zero-duration identities pinned.
+      const archivedKeys = sourceClosedKeys(source.sourceId);
+      for (const key of archivedKeys) {
+        const value = closedLedger.get(key)!;
+        closedLedger.delete(key);
+        terminalIdentifiers.set(key, {
+          kind: value.kind,
+          protectedStartMs: source.startMs!,
+        });
+      }
+      rememberTerminal(
+        [
+          `item:${source.sourceId}`,
+          ...itemIds.map((id) => `item:${id}`),
+          ...responseIds.map((id) => `response:${id}`),
+          ...archivedKeys,
+        ],
+        { sourceId: source.sourceId, startMs: source.startMs! },
+      );
+      if (closed()) return;
     }
     // Empty completed responses carry no source reference or sound to protect.
     for (const [id, parent] of responses)
@@ -1964,7 +2216,7 @@ export function createLiveTranslateClient(
           (source) =>
             source.final &&
             source.text.trim() &&
-            ![...associations.values()].includes(source.sourceId),
+            !hasCompletedSourceOutput(source.sourceId),
         );
         const unboundOutput = [...translations.values()].some(
           (item) =>
@@ -2033,7 +2285,8 @@ export function createLiveTranslateClient(
         phone &&
         (translations.has(event.item_id) ||
           associations.has(event.item_id) ||
-          pendingAssociations.has(event.item_id))
+          pendingAssociations.has(event.item_id) ||
+          closedLedger.has(`item:${event.item_id}`))
       ) {
         fail('LIVETRANSLATE_ITEM_CONFLICT', undefined, undefined, {
           validationPath: 'item_id',
@@ -2178,6 +2431,29 @@ export function createLiveTranslateClient(
       )
         return;
       if (phone && terminalIdentifiers.has(`item:${event.item.id}`)) return;
+      const archivedOutput = phone
+        ? closedLedger.get(`item:${event.item.id}`)
+        : undefined;
+      if (archivedOutput) {
+        if (
+          Array.isArray(event.item.content) &&
+          event.item.content.some((part: any) => part?.type === 'input_audio')
+        ) {
+          fail('LIVETRANSLATE_ITEM_CONFLICT', undefined, undefined, {
+            validationPath: 'item.id',
+            expected: 'consistent_item_binding',
+            actual: event.item.id,
+            conflictKind: 'created_input_after_output',
+          });
+        } else if (
+          event.item.role === 'assistant' &&
+          identifier(event.previous_item_id) &&
+          event.previous_item_id !== archivedOutput.record.sourceId
+        ) {
+          fail('LIVETRANSLATE_SOURCE_CONFLICT');
+        }
+        return;
+      }
       if (
         Array.isArray(event.item.content) &&
         event.item.content.some((part: any) => part?.type === 'input_audio')
@@ -2770,6 +3046,37 @@ export function createLiveTranslateClient(
       retainedEventIds: seen.size,
       terminalIdentifiers: terminalIdentifiers.size,
       sourceOffsetFloorMs,
+      closedResponseIdentities: [...closedLedger.values()].filter(
+        (value) => value.kind === 'response',
+      ).length,
+      closedOutputIdentities: [...closedLedger.values()].filter(
+        (value) => value.kind === 'output',
+      ).length,
+      pinnedTerminalIdentifiers:
+        [...terminalIdentifiers.values()].filter(
+          (value) => !terminalReclaimable(value),
+        ).length +
+        [...closedLedger.values()].filter(
+          (value) => !closedReclaimable(value.record),
+        ).length,
+      reclaimableTerminalIdentifiers:
+        [...terminalIdentifiers.values()].filter(terminalReclaimable).length +
+        [...closedLedger.values()].filter((value) =>
+          closedReclaimable(value.record),
+        ).length,
+      retiredResponsesTotal,
+      sourceCompletionSummaries: sourceCompletions.size,
+      terminalBudgetUsed: terminalIdentifiers.size + closedLedger.size,
+      retainedTextCharacters:
+        [...sources.values()].reduce(
+          (sum, source) => sum + source.text.length,
+          0,
+        ) +
+        [...translations.values()].reduce(
+          (sum, item) => sum + item.text.length,
+          0,
+        ),
+      queuedAudioBytes,
     }),
     append(pcm) {
       if (closed() || finishRequested || state !== 'ready')
