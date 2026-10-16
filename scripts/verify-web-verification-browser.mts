@@ -16,6 +16,10 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import WebSocket from 'ws';
+import {
+  CdpInterceptionLifecycle,
+  type InterceptionRecord,
+} from './cdp-interception-lifecycle';
 
 import { CLOUD_SESSION_COOKIE } from '../src/solo/cloud-access';
 import { GOOGLE_LOGIN_COOKIE } from '../src/solo/google-login';
@@ -45,6 +49,10 @@ if (!executable)
   throw new Error('Set CHROME_BIN to an installed Chromium executable.');
 const directory = await mkdtemp(join(tmpdir(), `${browserMode}-offline-`));
 const profile = join(directory, 'chrome');
+// Do not leave a previous passing artifact behind if this invocation fails.
+await rm(join(repo, '.runtime', `${browserMode}-browser`, 'acceptance.json'), {
+  force: true,
+});
 const pause = (ms: number) => new Promise<void>((done) => setTimeout(done, ms));
 const keys = generateKeyPairSync('rsa', { modulusLength: 2048 });
 const publicKey = {
@@ -59,7 +67,6 @@ const syntheticSecret = 'explicit-offline-client-secret';
 const providerCodes = new Map<string, { nonce: string; challenge: string }>();
 const checks: string[] = [];
 const faults: string[] = [];
-const cancelledNetworkRequests = new Set<string>();
 const blockedExternalOrigins = new Set<string>();
 const clients: CdpPage[] = [];
 const upstreamRequests = new Set<http.ClientRequest>();
@@ -107,6 +114,7 @@ let chrome: ReturnType<typeof spawn> | undefined;
 let browserStderr = '';
 let signedOutScreenshot: string | undefined;
 let signedInScreenshot: string | undefined;
+let acceptance: Record<string, unknown> | undefined;
 let service:
   | Awaited<ReturnType<typeof createCloudWebVerificationService>>
   | Awaited<ReturnType<typeof createCloudWebWorkbenchService>>
@@ -229,6 +237,11 @@ class CdpPage {
   blockLogoutRequests = false;
   socket: WebSocket;
   nextId = 0;
+  lifecycle = new CdpInterceptionLifecycle({
+    pageId: `page-${clients.length + 1}`,
+    origin,
+    onFault: (fault) => faults.push(fault),
+  });
   pending = new Map<
     number,
     { done: (value: any) => void; reject: (error: Error) => void }
@@ -247,56 +260,49 @@ class CdpPage {
               }),
             )
           : pending?.done(value.result);
-      } else if (value.method === 'Runtime.exceptionThrown')
-        faults.push('Unexpected browser exception');
-      else if (
-        value.method === 'Network.loadingFailed' &&
-        value.params.canceled === true
-      )
-        cancelledNetworkRequests.add(value.params.requestId);
-      else if (value.method === 'Fetch.requestPaused')
-        void this.intercept(value.params).catch((error) => {
-          const url = new URL(value.params.request.url);
-          const local = url.origin === origin;
-          const category = [
-            '/favicon.ico',
-            '/favicon.svg',
-            '/controlled',
-            '/auth/status',
-            '/auth/logout',
-            '/auth/google/start',
-            '/auth/google/callback',
-            '/api/browser-session',
-            '/api/events',
-          ].includes(url.pathname)
-            ? url.pathname
-            : 'asset-or-other';
-          const code = /Invalid InterceptionId/.test(String(error?.message))
-            ? 'INVALID_INTERCEPTION_ID'
-            : error?.name === 'AssertionError'
-              ? 'FIXTURE_ASSERTION'
-              : 'CDP_COMMAND_FAILURE';
-          const resource = [
-            'Document',
-            'Script',
-            'Stylesheet',
-            'Image',
-            'Fetch',
-            'XHR',
-            'EventSource',
-            'Other',
-          ].includes(value.params.resourceType)
-            ? value.params.resourceType
-            : 'OTHER_RESOURCE';
-          const protocolCode =
-            typeof error?.protocolCode === 'number'
-              ? error.protocolCode
-              : 'none';
-          faults.push(
-            `Offline interception failed: ${code}/${protocolCode}/${local ? 'same-origin' : 'provider'}/${resource}/${category}/hasNetworkId=${Boolean(value.params.networkId)}/cancelled=${cancelledNetworkRequests.has(value.params.networkId)}`,
+      } else {
+        this.lifecycle.observe(value.method, value.params);
+        if (value.method === 'Runtime.exceptionThrown')
+          faults.push('Unexpected browser exception');
+        else if (value.method === 'Fetch.requestPaused')
+          this.lifecycle.run(value.params, (record) =>
+            this.intercept(value.params, record),
           );
-        });
+      }
     });
+    this.socket.on('error', () => faults.push('CDP_TRANSPORT_ERROR'));
+    this.socket.on('close', () => {
+      this.lifecycle.observe('Fixture.transportClosed');
+      for (const pending of this.pending.values())
+        pending.reject(new Error('CDP_TRANSPORT_CLOSED'));
+      this.pending.clear();
+    });
+  }
+  async stop() {
+    this.lifecycle.observe('Fixture.cleanupStarted');
+    if (this.socket.readyState === WebSocket.OPEN) {
+      // All functional assertions and screenshots are complete. Freeze producers
+      // before stopping requests; Fetch remains enabled throughout shutdown.
+      await this.send('Emulation.setScriptExecutionDisabled', { value: true });
+      await this.send('Page.stopLoading');
+    }
+    await this.lifecycle.drain();
+    if (this.pending.size) throw new Error('CDP_PENDING_COMMANDS_AT_SHUTDOWN');
+    if (this.socket.readyState !== WebSocket.CLOSED) {
+      const closed = once(this.socket, 'close');
+      this.socket.close();
+      let timer: ReturnType<typeof setTimeout>;
+      await Promise.race([
+        closed,
+        new Promise((_, reject) => {
+          timer = setTimeout(() => {
+            this.socket.terminate();
+            reject(new Error('CDP_CLOSE_TIMEOUT'));
+          }, 2000);
+        }),
+      ]).finally(() => clearTimeout(timer));
+    }
+    await this.lifecycle.drain();
   }
   async ready() {
     await once(this.socket, 'open');
@@ -344,14 +350,16 @@ class CdpPage {
       patterns: [{ urlPattern: '*', requestStage: 'Request' }],
     });
   }
-  async intercept(event: any) {
+  async intercept(event: any, record: InterceptionRecord) {
+    const send = (method: string, params: Record<string, unknown>) =>
+      this.send(method, params, record);
     const url = new URL(event.request.url);
     if (
       this.blockLogoutRequests &&
       url.origin === origin &&
       url.pathname === '/auth/logout'
     ) {
-      await this.send('Fetch.failRequest', {
+      await send('Fetch.failRequest', {
         requestId: event.requestId,
         errorReason: 'ConnectionClosed',
       });
@@ -362,7 +370,7 @@ class CdpPage {
       url.protocol === 'data:' ||
       url.protocol === 'about:'
     ) {
-      await this.send('Fetch.continueRequest', { requestId: event.requestId });
+      await send('Fetch.continueRequest', { requestId: event.requestId });
       return;
     }
     if (
@@ -371,7 +379,7 @@ class CdpPage {
       event.resourceType === 'Document'
     ) {
       const cookie = (
-        await this.send('Network.getCookies', { urls: [origin] })
+        await send('Network.getCookies', { urls: [origin] })
       ).cookies.find((item: any) => item.name === GOOGLE_LOGIN_COOKIE);
       assert.ok(cookie);
       loginCookieBounds = {
@@ -402,7 +410,7 @@ class CdpPage {
       // A real document at the Google origin initiates the native cross-site
       // callback. No fake cookie or forged Fetch Metadata is supplied.
       const html = `<!doctype html><meta name="referrer" content="no-referrer"><link rel="icon" href="data:,"><script>location.replace(${JSON.stringify(lastCallback)})</script>`;
-      await this.send('Fetch.fulfillRequest', {
+      await send('Fetch.fulfillRequest', {
         requestId: event.requestId,
         responseCode: 200,
         responseHeaders: [
@@ -414,30 +422,47 @@ class CdpPage {
       return;
     }
     blockedExternalOrigins.add(url.origin);
-    await this.send('Fetch.failRequest', {
+    await send('Fetch.failRequest', {
       requestId: event.requestId,
       errorReason: 'BlockedByClient',
     });
   }
-  send(method: string, params: Record<string, unknown> = {}): Promise<any> {
+  send(
+    method: string,
+    params: Record<string, unknown> = {},
+    record?: InterceptionRecord,
+  ): Promise<any> {
     const id = ++this.nextId;
-    return new Promise((done, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(id);
-        reject(new Error(`CDP timeout: ${method}`));
-      }, 10000);
-      this.pending.set(id, {
-        done: (value) => {
-          clearTimeout(timer);
-          done(value);
-        },
-        reject: (error) => {
-          clearTimeout(timer);
-          reject(error);
-        },
+    const dispatch = () =>
+      new Promise((done, reject) => {
+        if (this.socket.readyState !== WebSocket.OPEN) {
+          reject(new Error('CDP_TRANSPORT_NOT_OPEN'));
+          return;
+        }
+        const timer = setTimeout(() => {
+          this.pending.delete(id);
+          reject(new Error(`CDP timeout: ${method}`));
+        }, 10000);
+        this.pending.set(id, {
+          done: (value) => {
+            clearTimeout(timer);
+            done(value);
+          },
+          reject: (error) => {
+            clearTimeout(timer);
+            reject(error);
+          },
+        });
+        this.socket.send(JSON.stringify({ id, method, params }), (error) => {
+          if (!error) return;
+          const pending = this.pending.get(id);
+          this.pending.delete(id);
+          pending?.reject(new Error('CDP_SEND_FAILURE'));
+        });
       });
-      this.socket.send(JSON.stringify({ id, method, params }));
-    });
+    return record
+      ? this.lifecycle.command(record, method, id, dispatch)
+      : dispatch();
   }
   async evaluate(expression: string): Promise<any> {
     const value = await this.send('Runtime.evaluate', {
@@ -736,11 +761,11 @@ try {
     'Chromium startup',
     30000,
   );
-  const target = await (
+  const target = (await (
     await fetch(`http://127.0.0.1:${port}/json/new?about:blank`, {
       method: 'PUT',
     })
-  ).json();
+  ).json()) as { id: string; webSocketDebuggerUrl: string };
   const page = new CdpPage(target.webSocketDebuggerUrl);
   clients.push(page);
   await page.ready();
@@ -1124,11 +1149,11 @@ try {
       'local dial and audio controls make no telephone or event-stream request',
     );
     await page.evaluate(`document.getElementById('account-menu').open=true`);
-    const target = await (
+    const target = (await (
       await fetch(`http://127.0.0.1:${port}/json/new?about:blank`, {
         method: 'PUT',
       })
-    ).json();
+    ).json()) as { id: string; webSocketDebuggerUrl: string };
     const mismatchPage = new CdpPage(target.webSocketDebuggerUrl);
     clients.push(mismatchPage);
     await mismatchPage.ready();
@@ -1459,11 +1484,11 @@ try {
     'Second valid login',
   );
   if (browserMode === 'web-workbench') {
-    const secondTarget = await (
+    const secondTarget = (await (
       await fetch(`http://127.0.0.1:${port}/json/new?about:blank`, {
         method: 'PUT',
       })
-    ).json();
+    ).json()) as { id: string; webSocketDebuggerUrl: string };
     const secondPage = new CdpPage(secondTarget.webSocketDebuggerUrl);
     clients.push(secondPage);
     await secondPage.ready();
@@ -1709,7 +1734,6 @@ try {
     0,
     'web verification never invokes a telephone or translation supplier',
   );
-  check(faults, [], 'web verification has zero browser and fixture exceptions');
   const provenance = apiProvenance.find((item) => item.path === '/api/status')!;
   check(
     {
@@ -1748,7 +1772,7 @@ try {
     join(output, 'expired.png'),
     Buffer.from(screenshot.data, 'base64'),
   );
-  const result = {
+  acceptance = {
     passed: true,
     mode: browserMode,
     checkCount: checks.length,
@@ -1766,14 +1790,38 @@ try {
     ],
     browser: await page.send('Browser.getVersion'),
   };
-  await writeFile(
-    join(output, 'acceptance.json'),
-    `${JSON.stringify(result, null, 2)}\n`,
-  );
-  console.log(JSON.stringify(result));
 } finally {
   privateApiUnavailable = false;
-  for (const client of clients) client.socket.close();
+  const cleanup = await Promise.allSettled(
+    clients.map((client) => client.stop()),
+  );
+  for (const result of cleanup)
+    if (result.status === 'rejected') faults.push('CDP_CLEANUP_FAILURE');
+  for (const client of clients)
+    if (client.socket.readyState !== WebSocket.CLOSED)
+      client.socket.terminate();
+  const diagnostics = clients.map((client) => client.lifecycle.snapshot());
+  const diagnosticOutput = join(repo, '.runtime', `${browserMode}-browser`);
+  await mkdir(diagnosticOutput, { recursive: true });
+  await writeFile(
+    join(diagnosticOutput, 'cdp-lifecycle.json'),
+    `${JSON.stringify({ pages: diagnostics, faults }, null, 2)}\n`,
+  );
+  console.log(
+    JSON.stringify({
+      cdpLifecycle: diagnostics.map(
+        ({ pageId, inFlight, faults, cancellations, duplicates }) => ({
+          pageId,
+          inFlight,
+          faults,
+          cancellations,
+          duplicates,
+        }),
+      ),
+    }),
+  );
+  // If CI fails, retain a bounded safe timeline in its log as well as on disk.
+  if (faults.length) console.log(JSON.stringify({ cdpFailure: diagnostics }));
   const stopBrowser = (signal: NodeJS.Signals) => {
     try {
       if (process.platform !== 'win32' && chrome?.pid)
@@ -1803,3 +1851,24 @@ try {
     retryDelay: 100,
   });
 }
+
+// A successful artifact is only published after interception and transport cleanup.
+check(
+  blockedExternalOrigins.size,
+  0,
+  'cleanup preserves external request interception',
+);
+check(
+  supplierCalls,
+  0,
+  'cleanup never invokes a telephone or translation supplier',
+);
+check(faults, [], 'web verification has zero browser and fixture exceptions');
+assert.ok(acceptance);
+acceptance.checkCount = checks.length;
+acceptance.exceptions = [...faults];
+await writeFile(
+  join(repo, '.runtime', `${browserMode}-browser`, 'acceptance.json'),
+  `${JSON.stringify(acceptance, null, 2)}\n`,
+);
+console.log(JSON.stringify(acceptance));

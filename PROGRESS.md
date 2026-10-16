@@ -1,8 +1,18 @@
 # 项目进度与交接
 
-更新日期：2026-10-15。共享仓库：<https://github.com/Richman2020/live-translation-openai-realtime-api>。
+更新日期：2026-10-16。共享仓库：<https://github.com/Richman2020/live-translation-openai-realtime-api>。
 
 需求见 [PROJECT_BRIEF.md](PROJECT_BRIEF.md)，工作规则见 [AGENTS.md](AGENTS.md)，运行步骤见 [LOCAL_SETUP.md](LOCAL_SETUP.md)，后续执行入口见 [LOCAL_CODEX_HANDOFF.md](LOCAL_CODEX_HANDOFF.md)。
+
+## 最新：CI #72 CDP浏览器夹具修复与诊断（2026-10-16，仅本地）
+
+- 以已推送精确`5e3f494de78ffb75221f76f4e10fc799f5f56c84`为父；原候选/交付包、失败日志与哈希保留。只改测试夹具、回归和记录，未改src/public、模型、voice、电话或第257响应限制，未推送/PR/发布/安装/读取密钥/外呼/模型调用。
+- 原CI run`38829933953`的同源XHR continue失败与严格faults断言已确认；缺FetchID/NetworkID/commandID及首个终态，原失效首因仍未知。真实本地Chromium人工调度证明重复continue和明确abort后继续可产生同族-32602；导航无取消证据时旧请求仍可继续，target关闭是传输错误，不预设导航/取消根因。
+- 新测试专属每页生命周期关联、安全时间线、精确重复指纹与单终结指令；只有同页同请求明确canceled可窄处理，未知/跨页/provider/普通-32602仍失败。150ms只等证据、不重试；有界排空及收尾后严格断言，不移除外站拦截；成功回执最后才写并移除旧成功文件。
+- 独立审查确定问题已修，26项纯事件专项及独立复核均26/26；真实Chromium最终对照10项，原CI日志、可控真实请求与人工事件严格区分。全部开发失败/通过结果保留在专属回执，不只列成功。
+- 冻结文件最终全量2168 total/2163 pass/5 Windows skip/0 fail，完整typecheck/build及额外夹具类型检查通过；7组浏览器（controlled84/continuous91/paired关闭88/Google29/web验证50/daily84及对话模拟）、浏览器JS语法、10项真实Chromium对照和diff-check均通过；daily三页无fault或in-flight残留，未用取消例外过关。首轮全量曾2161 pass/2 fail/5 skip（启动后补入缺失终结动作防护），未当最终结果；没有删/跳过失败测试。
+- Docker本地没有基础/应用缓存镜像，因禁止安装/拉取，本轮不重建或运行容器；待新SHA完整CI，不拿旧CI Docker成功替代。第257单来源响应停翻译仍未解决，原声与手动挂断要求保持。
+- 远端CI分支只读回核仍5e3。下一步需用户确认精确新SHA的单分支非强推与完整CI；本轮不操作Railway/Twilio，不创建部署或变量变更。详见[CI72夹具修复与证据边界](docs/CDP_WORKBENCH_CI72_FIX_2026-10-16.md)。
 
 ## 最新：LiveTranslate 3.8 + Andre 电话离线集成（2026-10-15，未推送/部署/通话）
 
