@@ -15,6 +15,8 @@ import { promisify } from 'node:util';
 import { once } from 'node:events';
 import twilio from 'twilio';
 import WebSocket from 'ws';
+import { CdpInterceptionLifecycle } from './cdp-interception-lifecycle';
+import { ControlledBrowserTrace } from './controlled-browser-trace';
 
 import {
   CLOUD_SESSION_COOKIE,
@@ -62,6 +64,7 @@ if (!executable)
   throw new Error('Set CHROME_BIN to an installed Chromium executable.');
 const directory = await mkdtemp(join(tmpdir(), 'controlled-phone-offline-'));
 const profile = join(directory, 'chrome');
+await rm(join(repo,'.runtime',artifactDirectory,'acceptance.json'),{force:true});
 const pause = (ms: number) => new Promise<void>((done) => setTimeout(done, ms));
 function deferred() {
   let resolve!: () => void;
@@ -78,6 +81,37 @@ const checks: string[] = [];
 let conversationScreenshot: string | undefined;
 let remoteScreenshot: string | undefined;
 const clients: CdpPage[] = [];
+const timing = new ControlledBrowserTrace(1024);
+let serverDiagnostic: () => Record<string, unknown> = () => ({});
+let acceptance: Record<string, unknown> | undefined;
+let bootstrapReplyGate: { tabId: string; afterRequest: number; requestId?: number; hits: number; entered: ReturnType<typeof deferred>; release: ReturnType<typeof deferred> } | undefined;
+let requestSequence = 0;
+let latestControllerMode = 'unknown';
+const routeKind = (path: string) => path === '/api/browser-session' ? 'browser-session' : path === '/api/events' ? 'events' : path === '/api/controller/revoke' ? 'revoke' : path === '/api/controller/renew' ? 'renew' : /\/hangup$/.test(path) ? 'hangup' : 'other';
+const probeSource = `(() => {
+  const p = window.__controlledProbe = {events:[],reads:0,completed:0,pending:0,lastCompleted:0,streams:0,current:0,opened:0,received:0,sources:new Map(),lastTabId:'',sequence:0};
+  const note = (event, fields={}) => {p.events.push({event,sequence:++p.sequence,atMs:performance.now(),documentTimeOrigin:performance.timeOrigin,...fields}); if(p.events.length>512)p.events.shift();};
+  const nativeFetch=window.fetch.bind(window);
+  window.fetch=async(input,options)=>{
+    const url=new URL(typeof input==='string'?input:input.url,location.href);
+    if(url.origin!==location.origin||url.pathname!=='/api/browser-session')return nativeFetch(input,options);
+    const id=++p.reads;p.pending++;p.lastTabId=url.searchParams.get('tabId')||'';note('request-start',{request:id,route:'browser-session'});
+    try {
+      const response=await nativeFetch(input,options), json=response.json.bind(response);let finished=false;
+      response.json=async()=>{try{return await json();}finally{if(!finished){finished=true;p.pending--;p.completed++;p.lastCompleted=id;note('request-complete',{request:id,route:'browser-session',statusCode:response.status,readCompletedMs:performance.now()});}}};
+      return response;
+    }catch(error){p.pending--;note('failure',{route:'browser-session',request:id});throw error;}
+  };
+  const Native=window.EventSource;
+  window.EventSource=class extends Native {
+    constructor(...args){super(...args);const id=++p.streams;p.current=id;p.sources.set(id,this);if(p.sources.size>32)p.sources.delete(p.sources.keys().next().value);note('sse-created',{stream:id});
+      this.addEventListener('open',()=>{if(p.current===id)p.opened=id;note('sse-open',{stream:id,connected:p.current===id});});
+      for(const kind of ['snapshot','call','error'])this.addEventListener(kind,event=>{let value;try{value=JSON.parse(event.data||'null')}catch{};const call=kind==='snapshot'?value?.activeSession:value;
+        p.received++;note('sse-event',{stream:id,eventKind:kind,connected:p.current===id,callStatus:call?.status||'none',cleanupPending:call?.cleanupUnconfirmed===true});});
+    }
+    close(){for(const [id,source]of p.sources)if(source===this){note('sse-close',{stream:id});if(p.current===id)p.current=0;}return super.close();}
+  };
+})();`;
 const mediaSockets = new Set<WebSocket>();
 const eventResponses = new Set<http.ServerResponse>();
 const upstreamRequests = new Set<http.ClientRequest>();
@@ -156,6 +190,9 @@ class CdpPage {
   targetId: string;
   socket: WebSocket;
   nextId = 0;
+  ordinal = clients.length + 1;
+  eventRequestGate?: { fetchId?: string; hits: number; entered: ReturnType<typeof deferred>; release: ReturnType<typeof deferred> };
+  interception = new CdpInterceptionLifecycle({ pageId: `controlled-${clients.length + 1}`, origin, onFault: fault => faults.push(fault) });
   pending = new Map<
     number,
     { done: (value: any) => void; reject: (error: Error) => void }
@@ -165,7 +202,14 @@ class CdpPage {
     this.socket = new WebSocket(url);
     this.socket.on('message', (data) => {
       const value = JSON.parse(String(data));
-      if (value.id) {
+      if (value.method) this.interception.observe(value.method, value.params);
+      if (value.method === 'Fetch.requestPaused') {
+        this.interception.run(value.params, async record => {
+          const gate = this.eventRequestGate;
+          if (gate) { if(gate.fetchId!==undefined)throw new Error('CONTROLLED_GATE_SECOND_REQUEST');gate.fetchId=value.params.requestId;gate.hits++; gate.entered.resolve(); timing.add('gate-held', {scope:'fixture',page:this.ordinal,scenario:'sse-held'}); await gate.release.promise; }
+          await this.interception.command(record, 'Fetch.continueRequest', this.nextId + 1, () => this.send('Fetch.continueRequest', {requestId:value.params.requestId}));
+        });
+      } else if (value.id) {
         const pending = this.pending.get(value.id);
         this.pending.delete(value.id);
         value.error
@@ -179,16 +223,28 @@ class CdpPage {
       else if (value.method === 'Network.requestWillBeSent')
         requests.push(value.params.request.url);
     });
+    this.socket.on('error',()=>faults.push('CONTROLLED_CDP_TRANSPORT_ERROR'));
+    this.socket.on('close',()=>{for(const item of this.pending.values())item.reject(new Error('CONTROLLED_CDP_CLOSED'));this.pending.clear();});
+  }
+  async stop() {
+    if(this.socket.readyState===WebSocket.OPEN){await this.send('Emulation.setScriptExecutionDisabled',{value:true});await this.send('Page.stopLoading');}
+    await this.interception.drain();
+    if(this.pending.size)throw new Error('CONTROLLED_PENDING_COMMAND_AT_CLOSE');
+    if(this.socket.readyState!==WebSocket.CLOSED){const closed=once(this.socket,'close');this.socket.close();let timer:ReturnType<typeof setTimeout>;await Promise.race([closed,new Promise((_,reject)=>{timer=setTimeout(()=>{this.socket.terminate();reject(new Error('CONTROLLED_CDP_CLOSE_TIMEOUT'));},2000);})]).finally(()=>clearTimeout(timer));}
+    await this.interception.drain();
   }
   async ready() {
     await once(this.socket, 'open');
     await this.send('Runtime.enable');
     await this.send('Network.enable');
     await this.send('Page.enable');
+    await this.send('Page.addScriptToEvaluateOnNewDocument', { source: probeSource });
+    await this.send('Fetch.enable', { patterns: [{ urlPattern: `${origin}/api/events`, requestStage: 'Request' }] });
   }
   send(method: string, params: Record<string, unknown> = {}): Promise<any> {
     const id = ++this.nextId;
     return new Promise((done, reject) => {
+      if(this.socket.readyState!==WebSocket.OPEN){reject(new Error('CONTROLLED_CDP_NOT_OPEN'));return;}
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(new Error(`CDP timeout: ${method}`));
@@ -218,6 +274,11 @@ class CdpPage {
           value.exceptionDetails.text,
       );
     return value.result.value;
+  }
+  recordedDocument = 0;
+  recordedSequence = 0;
+  async diagnostic() {
+    return this.evaluate(`(()=>{const p=window.__controlledProbe;return {phase:document.documentElement.dataset.controllerPhase,muteEnabled:!document.getElementById('mute-button')?.disabled,startEnabled:!document.getElementById('start-call')?.disabled,endEnabled:!document.getElementById('end-call')?.disabled,hidden:document.hidden,connected:document.getElementById('local-state')?.textContent==='会话状态已连接',sdkClosed:window.__offlineVoice?.lastCall?.closed===true,bootstrapStarted:p?.reads||0,bootstrapCompleted:p?.completed||0,bootstrapPending:p?.pending||0,sseCurrent:p?.current||0,sseOpened:p?.opened||0,sseReceived:p?.received||0,documentTimeOrigin:performance.timeOrigin,events:p?.events||[]};})()`);
   }
   async foreground() {
     await this.send('Page.bringToFront');
@@ -338,10 +399,11 @@ async function attach(xml: string, sid: string) {
 }
 
 const proxy = https.createServer(async (request, response) => {
-  const path = new URL(
-    request.url || '/',
-    origin || 'https://phone.example.test',
-  ).pathname;
+  const requestUrl = new URL(request.url || '/', origin || 'https://phone.example.test');
+  const path = requestUrl.pathname;
+  const requestId = ++requestSequence;
+  const kind = routeKind(path);
+  if (kind !== 'other') timing.add('request-start', {scope:'server',request:requestId,route:kind,...serverDiagnostic()});
   if (path === '/vendor/twilio.min.js') {
     response
       .writeHead(200, {
@@ -425,6 +487,27 @@ const proxy = https.createServer(async (request, response) => {
       headers: request.headers,
     },
     async (stream) => {
+      let bootstrapBody = '';
+      if (kind === 'events') {
+        let pending = '';
+        stream.on('data', chunk => {
+          pending += String(chunk);
+          if(pending.length>65536){pending='';return;}
+          let end;while((end=pending.indexOf('\n\n'))>=0){const frame=pending.slice(0,end);pending=pending.slice(end+2);const eventKind=/^event: (snapshot|call|error)$/m.exec(frame)?.[1];if(!eventKind)continue;let data;try{data=JSON.parse(/^data: (.*)$/m.exec(frame)?.[1]||'null');}catch{};const call=eventKind==='snapshot'?data?.activeSession:data;timing.add('sse-event',{scope:'server',request:requestId,eventKind,callStatus:call?.status||'none',cleanupPending:call?.cleanupUnconfirmed===true});}
+        });
+      }
+      if (kind === 'browser-session') {
+        stream.pause();
+        stream.on('data', chunk => { if (bootstrapBody.length < 65536) bootstrapBody = (bootstrapBody + String(chunk)).slice(0,65536); });
+        stream.once('end', () => {
+          try { const body=JSON.parse(bootstrapBody); latestControllerMode = body.controller?.mode ?? 'unknown'; timing.add('request-complete',{scope:'server',request:requestId,route:kind,controllerMode:latestControllerMode,busy:body.busy,callStatus:body.activeSession?.status||'none',readCompletedMs:performance.now()}); } catch {}
+          bootstrapBody = '';
+        });
+      }
+      if (kind !== 'other') timing.add('request-response', {scope:'server',request:requestId,route:kind,statusCode:stream.statusCode,...serverDiagnostic()});
+      const readGate = kind === 'browser-session' && bootstrapReplyGate?.tabId === requestUrl.searchParams.get('tabId') && requestId>bootstrapReplyGate.afterRequest ? bootstrapReplyGate : undefined;
+      if (readGate) { if(readGate.requestId!==undefined){faults.push('CONTROLLED_GATE_SECOND_RESPONSE');readGate.release.resolve();}else{readGate.requestId=requestId;readGate.hits++;readGate.entered.resolve();} timing.add('gate-held', {scope:'server',request:requestId,scenario:'bootstrap-held'}); await readGate.release.promise; }
+      stream.once('end', () => {if(kind !== 'other')timing.add('request-complete', {scope:'server',request:requestId,route:kind,...serverDiagnostic()});});
       if (path === '/api/controller/revoke' && stream.statusCode === 200)
         stream.once('end', () => {
           completedControllerRevocations += 1;
@@ -517,6 +600,7 @@ try {
       },
       hangup: async (sid) => {
         providerHangups.push(sid);
+        timing.add('provider-hangup',{scope:'server',providerHangups:providerHangups.length});
         if (failHangup) throw new Error('Explicit offline cleanup failure');
       },
     }),
@@ -535,6 +619,7 @@ try {
     },
     setupTimeoutMs: 30000,
   });
+  manager.on('event', value => { if(value.event==='call')timing.add('server-call',{scope:'server',callStatus:value.data.status,cleanupPending:value.data.cleanupUnconfirmed===true}); });
   const policy = new CloudAccessPolicy({
     publicOrigin: origin,
     now,
@@ -596,6 +681,11 @@ try {
       code: 'OFFLINE_READY',
     }),
     revalidationIntervalMs: 1000,
+  });
+  serverDiagnostic = () => ({
+    managerBlocked: manager.controlAdmissionBlocked, serverActive: Boolean(manager.activeSession),
+    callStatus: manager.activeSession?.status || 'none',
+    voiceReservations: heldVoiceReservations.size,providerHangups:providerHangups.length,revocations:completedControllerRevocations,
   });
   app = await buildSoloServer({
     configStore: new ConfigStore({
@@ -660,7 +750,7 @@ try {
       await fetch(`http://127.0.0.1:${port}/json/new?about:blank`, {
         method: 'PUT',
       })
-    ).json();
+    ).json() as {id:string;webSocketDebuggerUrl:string};
     const page = new CdpPage(target.webSocketDebuggerUrl, target.id);
     clients.push(page);
     await page.ready();
@@ -1041,6 +1131,38 @@ try {
     true,
     'page mute controls only its current SDK call',
   );
+  function collectPageTrace(client: CdpPage, state: any) {
+    if(client.recordedDocument!==state.documentTimeOrigin){client.recordedDocument=state.documentTimeOrigin;client.recordedSequence=0;}
+    for(const event of state.events)if(event.sequence>client.recordedSequence){timing.add(event.event,{scope:'page',page:client.ordinal,...event});client.recordedSequence=event.sequence;}
+  }
+  async function observeBoundary(scenario: string) {
+    const state = await page.diagnostic();
+    collectPageTrace(page,state);
+    timing.add('boundary', {scope:'page',page:page.ordinal,scenario,...state});
+    timing.add('boundary', {scope:'server',scenario,...serverDiagnostic()});
+    return state;
+  }
+  async function waitFreshEvents(afterRead: number, afterStream: number, active = true) {
+    await eventually(async () => {
+      const state = await page.diagnostic();
+      return state.bootstrapStarted > afterRead && state.bootstrapCompleted === state.bootstrapStarted &&
+        state.bootstrapPending === 0 && state.sseCurrent > afterStream && state.sseOpened === state.sseCurrent &&
+        state.connected && !state.hidden && (!active || state.phase === 'active' && state.muteEnabled && !state.sdkClosed);
+    }, 'Fresh bootstrap body and current SSE open before media boundary');
+    await observeBoundary('refresh-ready');
+  }
+  async function waitDisconnectedUi(scenario: string) {
+    try {
+      await eventually(() => !manager.controlAdmissionBlocked, 'Real media disconnect two-leg cleanup');
+      await eventually(async () => {
+        const state = await page.diagnostic();
+        return state.phase === 'readonly' && !state.muteEnabled;
+      }, 'Disconnected media owner UI');
+      await eventually(() => heldVoiceReservations.size === 0 && controllerStatus().mode === 'available', 'Voice reservation and old controller cleanup complete');
+      const state = await observeBoundary(scenario);
+      check({phase:state.phase,mute:state.muteEnabled,sdkClosed:state.sdkClosed}, {phase:'readonly',mute:false,sdkClosed:true}, 'Disconnected owner is readonly, mute unavailable and original SDK closed');
+    } catch(error) { await observeBoundary(scenario); timing.add('failure',{scope:'fixture',scenario,...serverDiagnostic()}); throw error; }
+  }
   async function verifyBackgroundCall() {
     await eventually(
       async () => (await page.state()).mute,
@@ -1088,11 +1210,9 @@ try {
       'mute remains intact while accepted media stay connected in the background',
     );
     await page.foreground();
+    const beforeRefresh = await page.diagnostic();
     await page.click('refresh-controlled-state');
-    await eventually(
-      async () => (await page.state()).mute,
-      'Existing accepted owner recovers authoritative status without manual renewal',
-    );
+    await waitFreshEvents(beforeRefresh.bootstrapStarted, beforeRefresh.sseCurrent);
   }
   await page.click('end-call');
   await eventually(
@@ -1744,18 +1864,10 @@ try {
   );
   await verifyBackgroundCall();
   const disconnectedBefore = providerHangups.length;
+  await observeBoundary('baseline');
+  timing.add('media-disconnect',{scope:'fixture',scenario:'baseline',...serverDiagnostic()});
   for (const socket of mediaSockets) socket.terminate();
-  await eventually(
-    () => !manager.controlAdmissionBlocked,
-    'Real media disconnect two-leg cleanup',
-  );
-  await eventually(
-    async () =>
-      (await page.evaluate(
-        'document.documentElement.dataset.controllerPhase',
-      )) === 'readonly' && !(await page.state()).mute,
-    'Disconnected media owner UI',
-  );
+  await waitDisconnectedUi('baseline');
   check(
     providerHangups.length - disconnectedBefore,
     2,
@@ -1785,6 +1897,50 @@ try {
       heldVoiceReservations.size === 0
     );
   }, 'Disconnected-call Voice cleanup and old controller revoke complete');
+  // Deterministic scheduling, not retries: hold either one native read response
+  // or this exact page's next SSE request. No auth response/event is fabricated.
+  for (const scenario of ['bootstrap-held', 'sse-held'] as const) {
+    await page.click('refresh-controlled-state');
+    await eventually(async () => (await page.state()).start, 'Timing scenario can dial after prior complete cleanup');
+    await dial();
+    await eventually(async () => manager.activeSession?.status === 'active' && (await page.state()).mute, 'Timing scenario accepted media');
+    await eventually(async()=>{const state=await page.diagnostic();return state.bootstrapPending===0&&state.sseCurrent===state.sseOpened&&state.connected;},'Timing scenario begins with settled native reads and an open stream');
+    const before = await page.diagnostic();
+    const lateCall = manager.activeSession!;
+    const hangups = providerHangups.length;
+    const gate = {entered:deferred(),release:deferred(),hits:0};
+    if (scenario === 'bootstrap-held') bootstrapReplyGate = {...gate,afterRequest:requestSequence,tabId:await page.evaluate('window.__controlledProbe.lastTabId')};
+    else page.eventRequestGate = gate;
+    try {
+      await page.click('refresh-controlled-state');
+      let gateTimer:ReturnType<typeof setTimeout>;
+      await Promise.race([gate.entered.promise,new Promise((_,reject)=>{gateTimer=setTimeout(()=>reject(new Error('CONTROLLED_TIMING_GATE_NOT_REACHED')),12000);})]).finally(()=>clearTimeout(gateTimer));
+      check(scenario==='bootstrap-held'?bootstrapReplyGate!.hits:page.eventRequestGate!.hits,1,'Controlled gate owns exactly one native request');
+      const held = await observeBoundary(scenario);
+      check(held.muteEnabled,true,'Legacy mute predicate is already true while the controlled refresh gate is held');
+      check(held.connected,false,'Controlled gate proves state stream has not reconnected');
+      if (scenario === 'bootstrap-held') check(held.bootstrapPending > 0,true,'Held real bootstrap response is not a completed read');
+      else check(held.sseOpened < held.sseCurrent,true,'Held native SSE request is not an open current stream');
+      timing.add('media-disconnect',{scope:'fixture',scenario,...serverDiagnostic()});
+      for (const socket of mediaSockets) socket.terminate();
+      await eventually(() => !manager.controlAdmissionBlocked,'Server line cleanup while refresh is deliberately held');
+      gate.release.resolve(); timing.add('gate-released',{scope:'fixture',scenario});
+      bootstrapReplyGate = undefined; page.eventRequestGate = undefined;
+      await waitFreshEvents(before.bootstrapStarted,before.sseCurrent,false);
+      await waitDisconnectedUi(scenario);
+      check(providerHangups.length-hangups,2,'Controlled refresh boundary still ends both fake provider legs once');
+      const afterWrites = apiRequests.filter(item => item.method === 'POST').length;
+      const beforeLate = await page.diagnostic();
+      // Artificial delayed old-instance event: the real workbench must ignore it.
+      const injected = await page.evaluate(`(()=>{const source=window.__controlledProbe.sources.get(${before.sseCurrent});if(!source)return false;source.dispatchEvent(new MessageEvent('call',{data:${JSON.stringify(JSON.stringify({id:lateCall.id,status:'active',translationEngine}))}}));return true;})()`);
+      check(injected,true,'Artificial late event is actually dispatched on the retained old stream');
+      const afterLate = await page.diagnostic();
+      check(afterLate.sseReceived,beforeLate.sseReceived+1,'Late event reaches the diagnostic listener');
+      await observeBoundary('late-result');
+      check({phase:afterLate.phase,mute:afterLate.muteEnabled,sdkClosed:afterLate.sdkClosed},{phase:'readonly',mute:false,sdkClosed:true},'Late retired-stream event cannot revive media or owner');
+      check(apiRequests.filter(item=>item.method==='POST').length,afterWrites,'Late retired-stream event creates no cleanup or dial write');
+    } finally {gate.release.resolve(); bootstrapReplyGate=undefined;page.eventRequestGate=undefined;}
+  }
   await observer.click('refresh-controlled-state');
   await eventually(
     async () => (await observer.state()).start,
@@ -1938,7 +2094,7 @@ try {
     join(output, 'conversation-remote.png'),
     Buffer.from(remoteScreenshot, 'base64'),
   );
-  const result = {
+  acceptance = {
     passed: true,
     checkCount: checks.length,
     checks,
@@ -1956,26 +2112,26 @@ try {
     ],
     browser: await page.send('Browser.getVersion'),
   };
-  await writeFile(
-    join(output, 'acceptance.json'),
-    `${JSON.stringify(result, null, 2)}\n`,
-  );
-  console.log(
-    JSON.stringify({
-      ...result,
-      screenshot: `.runtime/${artifactDirectory}/acceptance.png`,
-    }),
-  );
+
 } catch (error) {
-  if (error !== layoutCompleted) throw error;
+  if (error !== layoutCompleted) {
+    timing.add('failure',{scope:'fixture',...serverDiagnostic()});
+    for (const client of clients) { const state=await client.diagnostic().catch(()=>null); if(state){for(const event of state.events)if(event.sequence>client.recordedSequence)timing.add(event.event,{scope:'page',page:client.ordinal,...event});timing.add('failure',{scope:'page',page:client.ordinal,...state});} }
+    throw error;
+  }
 } finally {
+  bootstrapReplyGate?.release.resolve();
+  for (const client of clients) client.eventRequestGate?.release.resolve();
   refreshRevokeGate?.resolve();
   refreshHangupReplyGate?.resolve();
   identity.revoked = false;
   failHangup = false;
   voiceGate?.resolve();
   publicGate?.resolve();
-  for (const client of clients) client.socket.close();
+  timing.add('cleanup-start',{scope:'fixture'});
+  const cleanup=await Promise.allSettled(clients.map(client=>client.stop()));
+  for(const result of cleanup)if(result.status==='rejected')faults.push('CONTROLLED_CDP_CLEANUP_FAILURE');
+  for(const client of clients)if(client.socket.readyState!==WebSocket.CLOSED)client.socket.terminate();
   const stopBrowser = (signal: NodeJS.Signals) => {
     try {
       if (process.platform !== 'win32' && chrome?.pid)
@@ -1997,6 +2153,10 @@ try {
   if (chrome?.pid && process.platform !== 'win32') stopBrowser('SIGKILL');
   for (const response of eventResponses) response.destroy();
   for (const request of upstreamRequests) request.destroy();
+  const failedTimingOutput=join(repo,'.runtime',artifactDirectory);
+  await mkdir(failedTimingOutput,{recursive:true});
+  await writeFile(join(failedTimingOutput,'controlled-timing.json'),JSON.stringify(timing.snapshot(),null,2)+'\n');
+  if(!acceptance||faults.length)console.log(JSON.stringify({controlledTiming:timing.snapshot()}));
   for (const socket of mediaSockets) socket.terminate();
   await app?.close();
   await new Promise<void>((done) => proxy.close(() => done()));
@@ -2007,3 +2167,12 @@ try {
     retryDelay: 100,
   });
 }
+
+check(faults, [], 'browser and interception cleanup preserve strict zero exceptions');
+check(requests.filter(url=>/^https?:/.test(url)&&!url.startsWith(`${origin}/`)), [], 'cleanup preserves the no-external-service boundary');
+timing.add('cleanup-end',{scope:'fixture'});
+const timingOutput=join(repo,'.runtime',artifactDirectory);
+await mkdir(timingOutput,{recursive:true});
+await writeFile(join(timingOutput,'controlled-timing.json'),JSON.stringify(timing.snapshot(),null,2)+'\n');
+console.log(JSON.stringify({controlledTiming:timing.snapshot()}));
+if(acceptance){acceptance.checkCount=checks.length;acceptance.exceptions=[...faults];await writeFile(join(timingOutput,'acceptance.json'),JSON.stringify(acceptance,null,2)+'\n');console.log(JSON.stringify(acceptance));}

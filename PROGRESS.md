@@ -4,7 +4,26 @@
 
 需求见 [PROJECT_BRIEF.md](PROJECT_BRIEF.md)，工作规则见 [AGENTS.md](AGENTS.md)，运行步骤见 [LOCAL_SETUP.md](LOCAL_SETUP.md)，后续执行入口见 [LOCAL_CODEX_HANDOFF.md](LOCAL_CODEX_HANDOFF.md)。
 
-## 最新：CI #72 CDP浏览器夹具修复与诊断（2026-10-16，仅本地）
+## 最新：CI #73 本地夹具同步与安全诊断完成（2026-10-16，未推送）
+
+- 精确父提交`e97ab1a3139381411daaedec99b2b29f4252058b`，独立本地分支`codex/ai-phone-ci73-controlled-fixture-20261016`。原分支、原失败日志及原未提交PROGRESS全文/patch均已哈希封存；下面前阶段失败记录保留。只改受控浏览器夹具、安全诊断helper、2份测试及文档，不改src/public、模型、音色、workflow、依赖或第257响应限制。
+- **已确认测试同步缺口，原CI确切根因仍未确认**：原刷新只等mute，不能证明bootstrap JSON完成/当前SSE已open；真实本地Chromium扣留响应或SSE请求时都能出现mute=true且connected=false。新屏障等待新读完成、无pending、当前新SSE open及活动UI；不加固定延时、不放宽原`readonly && !mute`。媒体断开后再严格检查SDK关闭、Voice预留和控制所有权清理，两假腿各结束一次。
+- 新增安全状态时间线（页面原子phase/mute/SDK、状态读取完成、SSE实例与顺序、服务端状态和清理计数），只白名单序号/枚举/布尔/时间，不记凭据、URL参数、号码或正文。正常断开、两个真实请求gate及人工迟到旧SSE事件分别验证；清理和严格fault断言通过后才生成成功回执。没有发现需修改生产源码的确定缺陷，也未重现原CI的全部时序。
+- **最终冻结验证**：2185 total/2180 pass/5 Windows-only skip/0 fail；typecheck、build、额外fixture类型检查、浏览器JS语法和diff-check通过。7组浏览器全部通过：conversation43、controlled107、continuous114、paired关闭111、Google29、web-verification50、daily84；所有浏览器exceptions=[]/externalRequests=0。新增17项已纳入最终全量。所有命令前后5份源码哈希一致；Node守卫193份回执外连尝试0。
+- 独立审查无剩余阻断；独审17项旧哈希结果与最终void类型修正准确区分。早期trace计数断言9/10、两次额外类型检查失败、后续修正及所有成功运行均保留，未反复重跑挑成功。首个真实Chromium诊断99项与最终加强断言后成绩分开，不重跑GitHub失败任务。
+- 本轮未安装/推送/PR/部署/访问模型/拨号/上传录音，不读密钥或操作Railway/Twilio。线上配置及语音方案不改；最后已知线上6d/f260来自前阶段，本轮未新回读。Docker及新SHA GitHub完整CI待后续，原CI仍为失败。**第257个单来源响应停止翻译仍未解决**。
+- 本节所属本地提交的完整SHA见交付回执。下一步仅待用户确认将该精确SHA非强推到`codex/cloud-phone-conversation-livetranslate-ci-20261015`并跟进完整CI；执行前再核远端和实际部署关联，不发布。详见[完整诊断、全部尝试及验证](docs/CI73_CONTROLLED_REFRESH_FIX_2026-10-16.md)。审计目录`/workspace/ai-phone-reference/ci73-local-fix-20261016`。
+
+## 前一阶段：精确e97推送及CI #73失败（2026-10-16，线上未变）
+
+- 本轮用户仅批准精确`e97ab1a3139381411daaedec99b2b29f4252058b`非强推原仓库CI分支。当前实际Railway来源、main与候选workflow已只读复核；AI仍旧aliyun分支固定6d，portal-test另仓且Offline，其余可见服务source为空；当前分支无PR，未创建PR。远端原5e3→e97仅1提交，单ref非强推一次，无tags/merge/额外提交。
+- CI #73 run`38833366465`/job`116756897504`，event push、head精确e97、attempt1，09:07:05–09:10:30北京时间，终态**failure**。build、完整typecheck、2168项回归（2163 pass/5 Windows skip/0 fail）、浏览器JS语法、Docker构建/离线容器及对话浏览器通过。
+- 失败在`verify-controlled-browser.mts:1752`：主动terminate模拟媒体后，前置manager闸门已释放，但“Disconnected media owner UI”12秒内未满足`readonly && !mute`。本轮未记录实际phase/mute/SDK/终态SSE与撤销顺序，不能定为flaky、D-Bus故障、媒体泄漏或具体业务根因。前序刷新仅等mute，不能证明bootstrap/SSE重连已完成，是待复现同步缺口；不直接改断言或延长timeout。
+- 连续音频两组、Google、web-verification、daily web-workbench及git diff --check步骤因前序失败而跳过；**CI #72的daily修复本轮未得到GitHub浏览器验收**。本地旧成功不替代本次结果。未修代码、重跑CI或另推SHA。
+- CI结束后只读回核ai-phone-test Online，来源SHA仍`6d061820d8cbb062ec3e3a168f05dd3bbd9b63ec`，active部署仍`f2609bcc-7ec3-456b-80e9-50ba03a8b431`、1/1副本、无暂存变更；portal-test保持Offline。本轮0部署/变量变更/真实电话或模型调用。
+- 完整原CI日志已脱敏保存及独立只读诊断，位于`/workspace/ai-phone-reference/livetranslate-e97-push-ci-20261016`。下一步仅建议补该受控浏览器边界的安全状态时间线与可控事件gates，确认根因后定最小修复，保留严格清理与鉴权；尚无发布条件。第257响应停翻译仍未解决。此进度更新留为未提交资料，不夹入精确e97。
+
+## 前一阶段：CI #72 CDP浏览器夹具修复与诊断（2026-10-16，仅本地）
 
 - 以已推送精确`5e3f494de78ffb75221f76f4e10fc799f5f56c84`为父；原候选/交付包、失败日志与哈希保留。只改测试夹具、回归和记录，未改src/public、模型、voice、电话或第257响应限制，未推送/PR/发布/安装/读取密钥/外呼/模型调用。
 - 原CI run`38829933953`的同源XHR continue失败与严格faults断言已确认；缺FetchID/NetworkID/commandID及首个终态，原失效首因仍未知。真实本地Chromium人工调度证明重复continue和明确abort后继续可产生同族-32602；导航无取消证据时旧请求仍可继续，target关闭是传输错误，不预设导航/取消根因。
