@@ -50,6 +50,7 @@ export function sendDiagnosticFixture(
         closeCode: null,
       },
     ],
+    firstFailure: null,
     summary: {
       recordedRecords: 3,
       overwrittenRecords: 0,
@@ -62,6 +63,16 @@ export function sendDiagnosticFixture(
       peakSenderBufferedBytes: null,
       peakWritableBufferedBytes: null,
       monitorStopped: trigger !== 'backlog_warning',
+      windowTruncatedRecords: 0,
+      windowContextOmittedRecords: 0,
+      truncatedRecords: 0,
+      suppressedRecords: 0,
+      suppressedWindows: 0,
+      projectionRejectedWindows: 0,
+      sinkErrorWindows: 0,
+      observedThroughRecordSequence: 3,
+      captureEnded: trigger !== 'backlog_warning',
+      futureSuppressedRecords: null,
     },
   };
 }

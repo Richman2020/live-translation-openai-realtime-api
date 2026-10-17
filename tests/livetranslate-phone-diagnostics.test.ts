@@ -133,11 +133,11 @@ test('send window projection never executes getters or toJSON and rejects malfor
   );
 });
 
-test('the final serialized send log bound includes call and event envelopes, rather than only the inner window', () => {
+test('the final send log fits its trusted envelope without silently losing the fault window', () => {
   const batch = sendDiagnosticFixture('send_failure');
   batch.records = Array.from({ length: 24 }, () => ({ ...batch.records[0] }));
   // Synthetic large finite metadata builds a valid body just under its 32 KiB
-  // cap. The final sink must reject it if the trusted envelope crosses the cap.
+  // cap. The final sink must trim old metadata and keep the fault snapshot.
   for (const record of batch.records) {
     for (const key of Object.keys(record)) {
       if (
@@ -172,17 +172,100 @@ test('the final serialized send log bound includes call and event envelopes, rat
     first,
     'The inner body is valid, so this specifically tests final-envelope accounting',
   );
-  let writes = 0;
-  reportCloudLiveTranslateDiagnostic(
+  const lines: string[] = [];
+  const receipt = reportCloudLiveTranslateDiagnostic(
     {
       event: 'translation-live',
       data: { ...first, sessionId: '12345678-1234-4123-8123-123456789abc' },
     },
-    () => {
-      writes += 1;
-    },
+    (line) => lines.push(line),
   );
-  assert.equal(writes, 0);
+  assert.equal(lines.length, 1);
+  assert.ok(
+    Buffer.byteLength(lines[0]) <= LIVE_TRANSLATE_DIAGNOSTIC_MAX_WINDOW_BYTES,
+  );
+  const retained = JSON.parse(lines[0]);
+  assert.equal(retained.role, 'local');
+  assert.equal(retained.callId, '12345678-1234-4123-8123-123456789abc');
+  assert.equal(retained.message, 'LiveTranslate input send diagnostic');
+  assert.equal(retained.sendDiagnostic.trigger, 'send_failure');
+  assert.ok(retained.sendDiagnostic.summary.windowTruncatedRecords > 0);
+  assert.equal(retained.sendDiagnostic.summary.truncatedRecords, 0);
+  assert.deepEqual(
+    retained.sendDiagnostic.records.at(-1),
+    batch.records.at(-1),
+  );
+  assert.equal(retained.sendDiagnostic.summary.futureSuppressedRecords, null);
+  assert.deepEqual(receipt, {
+    status: 'sink_returned',
+    generatedRows: 1,
+    sinkReturnedRows: 1,
+    discardedWindows: 0,
+    railwayStored: null,
+  });
+});
+
+test('fault anchors and unknown transport measurements survive phone logging without claiming platform storage', () => {
+  const batch = sendDiagnosticFixture('transport_closed');
+  const raw = {
+    ...batch.records[0],
+    callbackError: true,
+    callbackErrorCode: 'EPIPE' as const,
+  };
+  const failure = {
+    ...batch.records[0],
+    stage: 'send_failed' as const,
+    sendReason: 'write_callback_error' as const,
+  };
+  batch.firstFailure = { failure, precedingRawCallback: raw };
+  batch.records[0] = {
+    ...batch.records[0],
+    stage: 'transport_closed',
+    closeCode: 1006,
+  };
+  const lines: string[] = [];
+  const event = {
+    event: 'translation-live',
+    data: {
+      ...projectLiveTranslatePhoneSendDiagnostic(batch, 'remote'),
+      sessionId: '12345678-1234-4123-8123-123456789abc',
+    },
+  };
+  const receipt = reportCloudLiveTranslateDiagnostic(event, (line) =>
+    lines.push(line),
+  );
+  assert.ok(receipt);
+  assert.equal(receipt.railwayStored, null);
+  const retained = JSON.parse(lines[0]);
+  assert.equal(retained.role, 'remote');
+  assert.deepEqual(retained.sendDiagnostic.firstFailure, batch.firstFailure);
+  assert.equal(retained.sendDiagnostic.records[0].senderBufferedBytes, null);
+  assert.equal(retained.sendDiagnostic.records[0].writableBufferedBytes, null);
+  assert.equal(retained.sendDiagnostic.records[0].perMessageDeflate, null);
+  assert.equal(
+    retained.sendDiagnostic.firstFailure.precedingRawCallback.prefixGapSequence,
+    1,
+  );
+  assert.equal(
+    retained.sendDiagnostic.firstFailure.failure.oldestUnfinishedAgeMs,
+    25,
+  );
+  assert.equal(retained.sendDiagnostic.summary.windowTruncatedRecords, 0);
+  assert.equal(retained.sendDiagnostic.summary.truncatedRecords, 0);
+
+  let attempts = 0;
+  const failed = reportCloudLiveTranslateDiagnostic(event, () => {
+    attempts += 1;
+    throw new Error('PRIVATE_LOG_SINK_FAILURE');
+  });
+  assert.equal(attempts, 1);
+  assert.deepEqual(failed, {
+    status: 'sink_threw',
+    generatedRows: 1,
+    sinkReturnedRows: 0,
+    discardedWindows: 1,
+    railwayStored: null,
+  });
 });
 
 test('send observations expose bounded progress and trust the authenticated track, not callback text', () => {

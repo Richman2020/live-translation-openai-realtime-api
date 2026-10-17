@@ -1,3 +1,14 @@
+## 最新：2a9诊断日志留存补证（2026-10-17，未推送/发布，未修复真实停译）
+
+- 以精确`2a9b20553d0bcbdac86c0de90b1d4262a6fc22a6`为唯一父基准追加仅诊断增量；原2a9回执/ZIP、0746/cf62及故障证据均保留。不改发送泵、client、manager、模型3.8/Andre/复刻关闭、上下文、字幕、原声与播放、64000B/1MiB/2秒保护和双向停止策略，不混入容量补丁。
+- 已用2a9原代码离线复现合法32689B正文+外壳后0行且无丢弃回执。现诊断预算独立保留3预警+1实际send_failed+1结束/关闭+1首迟到=6次尝试，最终完整JSON每行32KiB、每方向192KiB、双向384KiB，既有其他日志/换行另计。保留2条固定scalar失败锚点；超长只裁旧context、保留最新与锚点，不再整批静默丢；非法诊断时间不入ring，不更改业务时钟。
+- 环覆盖、最近24条选择、字节裁剪分开计数；抑制/投射拒绝/直接sink错误均标观测截止。futureSuppressedRecords=null不伪造未来0丢失；首次send_failed不代表所有协议fatal，其他错误保留旧protocol_failure链路。producer累计与最终phone本窗口裁剪分开，最终console返回不回传为producer或Railway接收ACK。
+- 最终受影响5文件专项64/64、独立最终窄探针5/5、完整typecheck/build、2个变更源码ESLint和diff检查通过。已保留core全部中间失败/修正及root首轮4个consistent-return lint错误（仅显式returnundefined处理），最终源重绑结果在新审计目录。没有重复全量npm test、七组浏览器、18机制或CPU/heap整轮；2a9旧成绩只作原版本背景，不当本增量新成绩。
+- 本轮Railway只读回核AI仍0746/部署bbc62689-a747-4d41-9a6b-741bd2fd91a9 SUCCESS，无staging补丁；新建议ref`codex/cloud-phone-conversation-send-diagnostics-ci-20261017`远端未占用，匹配现有离线workflow。AI当前实际订阅旧input-send分支且pin0746；本轮未推送/创建ref/PR/部署或修改任何服务配置。
+- **推送安全关口尚缺**：Auto Website Builder/production的portal、factory-web的Source在现有接口未返回，省略语义不能当作Disconnected。需页面只读确认实际仓库/触发分支或未连接；不改开关、不唤醒服务、不新增权限。没有该证据，不声称对任何关联服务推送都绝不触发部署。精确页面和当前证据见platform报告。
+- 官方只读日志资料：每replica500行/秒、Hobby7天；单行字节上限未确认，32KiB仅应用限制。最终message为固定字符串支持JSON索引；实际保存/完整取回/查询500条上限/采集告警留待另批诊断发布后验收。本轮不为日志验证发布或拨号。
+- 只修改2个生产诊断文件及测试/说明；本节提交最终SHA、完整差异、首次失败、验证和平台证据在`/workspace/ai-phone-reference/livetranslate-send-diagnostics-retention-20261017`。本轮没有安装、推送、部署、变量/密钥/网络操作、拨号或模型调用。**仅增强诊断，尚未修复真实停译**；第257响应限制仍在。下一步范围仅最终SHA到上述新ref的一次非强推+完整CI，先补Source证据并另获批准，禁止tags/PR/merge/deploy。详见[留存补证](docs/LIVETRANSLATE_SEND_RETENTION_2026-10-17.md)。
+
 ## 最新：0746有界发送诊断离线候选（2026-10-17，仅增强诊断，尚未修复真实停译）
 
 - 以精确`0746dc1fb3d57b6302dd4d7358c6a2b5230847c7`独立工作目录/本地分支`codex/ai-phone-livetranslate-send-diagnostics-20261017`制作。原0746的489个tracked文件、原未提交依赖链接、cf62及此前故障证据保留；0746可恢复Git bundle已验证。不合入0bd容量压缩；第257响应停译限制原样保留。

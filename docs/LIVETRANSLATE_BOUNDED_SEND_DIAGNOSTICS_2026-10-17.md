@@ -39,27 +39,27 @@ ws8.18.0的bufferedAmount是Sender字节与Node Writable字节之和，旧日志
 
 normal_end使用明确diagnostic_end快照，不伪造send_written。cancelled仅说明本地abort，不证明是用户主动挂断；transport_closed也不能直接当作首次异常。
 
-summary的rawCallbackCount/error/duplicate/late等是**诊断实际记录范围内**的计数，不能声称终态后所有回调的总量；终态后至多保留首个迟到窗口。emittedWindows是尝试输出批次序号，不证明已被日志平台采集。
+summary的计数按observedThroughRecordSequence标明观测截止，不能声称当前输出知道未来迟到尾部总数；futureSuppressedRecords固定为null。终态后至多保留首个迟到窗口，抑制数只统计截至截止点的已知事件。emittedWindows是尝试输出批次序号，不证明已被日志平台采集。新增firstFailure只指发送泵send_failed，其他链路致命错误仍关联旧protocol_failure，不能补造来源。
 
 ## 有界、低开销和清理
 
 - 每连接最多256条固定元数据环形记录，输出最多24条近期记录及摘要。没有wire字符串、PCM、原译文、provider标识、认证头、URL、号码或凭据引用。
-- 预警仅为诊断：pendingPCM至少16000B或最老未确认年龄至少500ms，至少间隔1000ms、每连接最多4次。它不触发挂断、丢帧或新增保护。
-- 最多4预警+1终态+1迟到批次，每批最终完整JSON行含event/callId/role外壳最多32768B。每方向新增send_window最多6行/192KiB，两方向最多12行/384KiB，换行另计。原有input/playback和简短failed/cancelled/closed日志不在这个新增日志预算内，未顺带重构。
+- 预警仅为诊断：pendingPCM至少16000B或最老未确认年龄至少500ms，至少间隔1000ms、每连接最多3次。它不触发挂断、丢帧或新增保护。
+- 最多3预警+1首次发送泵失败+1独立终态+1迟到批次，每批最终完整JSON行含event/callId/role外壳最多32768B。每方向新增send_window最多6行/192KiB，两方向最多12行/384KiB，换行另计。原有input/playback和简短failed/cancelled/closed日志不在这个新增日志预算内，未顺带重构。
 - project/serialize/sink延后到有界microtask，不在原回调截止判断之前执行重日志。诊断状态计算用常数时间计数及已知item，不新增扫描在途列表；原业务includes/队列逻辑保留。
-- 终态清空环形记录、停止event-loop监控；没有新增应用层setTimeout/setInterval，只有Node直方图的20ms监控采样。最多6个已排微任务各保留不超过24条元数据引用，执行后释放。仍可有固定256槽数组随既有回调闭包存活至GC，不宣称终态瞬时零内存。
+- 终态清空环形记录、停止event-loop监控；没有新增应用层setTimeout/setInterval，只有Node直方图的20ms监控采样。最多6个已排微任务各保留不超过24条context引用，另共享至多2条固定失败锚点，执行后释放。仍可有固定256槽数组随既有回调闭包存活至GC，不宣称终态瞬时零内存。
 - 字段读取、监控初始化/disable、投射、序列化和sink异常均隔离。缺失或不可读字段为null；不会为了取得数据改变发送、超时或全局清理。
 - 长通话预警配额耗尽后仍保留终态窗口，但不会保留无限历史。环覆盖数和记录序号说明观测范围；不能用这个窗口宣称看到了所有原始供应商事件。
 
 正常挂断原先先标session.ended，再关闭桥接，旧liveAdmission日志gate会挡终态。因此本候选只在现有诊断回调中允许经严格schema校验的终态/迟到窗口关联原callId。原业务admission、call/caption状态、SSE白名单及所有旧事件gate不变；translation-live不在受保护电话SSE转发白名单中。旧会话窗口不会变成新通话的事件。
 
-## 验证及证据绑定
+## 2a9阶段验证及证据绑定（本次留存补证不重复整轮）
 
 专项覆盖乱序/重复/缺失/错误回调、未知私有字段/throw getter、最老确认前沿年龄、窗口及字节上界、ring覆盖、monitor失败、正常结束/重复结束/迟到和最终日志投射。保留完整首轮错误及必要修正，不通过删除业务断言或盲目重跑取得通过。
 
 复用既有18种机制的同一事件计划，对照0746与候选完整发送内容/顺序、原onObservation、确认前缀、失败位置及终止行为；另用实际localhost ws8.18.0分别检查604ms回调延迟、Sender暂停、Writable暂停。虚拟时钟与真实连接结果分开，不把人工机制说成实通根因。正常路径不得有无法解释的业务差异。
 
-额外内存、日志字节及CPU微基准的全部轮次、最终源码哈希和计量限制保存在本轮独立审计目录/workspace/ai-phone-reference/livetranslate-send-diagnostics-candidate-20261017。微基准不是Railway/真实stdout/供应商链路延迟；最终候选版本与实测数值以本轮回执和comparison报告为准。
+额外内存、日志字节及CPU微基准的全部轮次、最终源码哈希和计量限制保存在本轮独立审计目录/workspace/ai-phone-reference/livetranslate-send-diagnostics-candidate-20261017。微基准不是Railway/真实stdout/供应商链路延迟；这些实测数值属于2a9冻结源码，不充当后续留存修订的新测量。留存修订的字段、计数边界、针对性回归和平台待验收项见[留存补证](LIVETRANSLATE_SEND_RETENTION_2026-10-17.md)。
 
 最终冻结源码的18/18机制对照、3/3真实localhost连接机制及独立9/9探针通过。三类观测分别为：回调延迟约604ms但peer仍收到120/120帧，Sender/Writable为0/0；Sender停滞时90300/0；Writable停滞时0/91100。它们验证新字段能区分人工注入的机制，不证明真实通话属于其中哪类。
 

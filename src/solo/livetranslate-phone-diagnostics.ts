@@ -1,4 +1,5 @@
 import {
+  fitLiveTranslateSendDiagnostic,
   projectLiveTranslateSendDiagnostic,
   LIVE_TRANSLATE_DIAGNOSTIC_MAX_WINDOW_BYTES,
 } from '../experiments/livetranslate-send-diagnostics';
@@ -355,15 +356,24 @@ export function projectLiveTranslatePhoneSendDiagnostic(
   }
 }
 
+export type LiveTranslateDiagnosticWriteReceipt = {
+  status: 'sink_returned' | 'sink_threw' | 'not_generated';
+  generatedRows: 0 | 1;
+  sinkReturnedRows: 0 | 1;
+  discardedWindows: 0 | 1;
+  /** A synchronous sink return is not a platform durability acknowledgement. */
+  railwayStored: null;
+};
+
 export function reportCloudLiveTranslateDiagnostic(
   value: unknown,
   // eslint-disable-next-line no-console -- Only the explicit scalar projection below reaches this sink.
   sink: (line: string) => void = (line) => console.log(line),
-): void {
-  if (field(value, 'event') !== 'translation-live') return;
+): LiveTranslateDiagnosticWriteReceipt | void {
+  if (field(value, 'event') !== 'translation-live') return undefined;
   const data = field(value, 'data');
   const safe = sanitizeLiveTranslatePhoneDiagnostic(data);
-  if (!safe) return;
+  if (!safe) return undefined;
   const suppliedCall = field(data, 'sessionId');
   const callId =
     typeof suppliedCall === 'string' &&
@@ -372,19 +382,72 @@ export function reportCloudLiveTranslateDiagnostic(
     )
       ? suppliedCall
       : undefined;
+  const sendWindow = safe.stage === 'send_window';
+  let generated = false;
   try {
-    const line = JSON.stringify({
+    const envelope: Record<string, unknown> = {
       event: 'CLOUD_LIVETRANSLATE_DIAGNOSTIC',
       ...(callId ? { callId } : {}),
       ...safe,
-    });
+      ...(sendWindow ? { message: 'LiveTranslate input send diagnostic' } : {}),
+    };
+    let line = JSON.stringify(envelope);
     if (
-      safe.stage === 'send_window' &&
+      sendWindow &&
+      Buffer.byteLength(line) > LIVE_TRANSLATE_DIAGNOSTIC_MAX_WINDOW_BYTES
+    ) {
+      // Reserve the exact trusted envelope first. Fit only already-sanitized
+      // scalar records, preserving first-failure anchors and the newest record.
+      const overhead =
+        Buffer.byteLength(
+          JSON.stringify({ ...envelope, sendDiagnostic: null }),
+        ) - Buffer.byteLength('null');
+      const batch = fitLiveTranslateSendDiagnostic(
+        safe.sendDiagnostic,
+        LIVE_TRANSLATE_DIAGNOSTIC_MAX_WINDOW_BYTES - overhead,
+      );
+      if (!batch)
+        return {
+          status: 'not_generated',
+          generatedRows: 0,
+          sinkReturnedRows: 0,
+          discardedWindows: 1,
+          railwayStored: null,
+        };
+      envelope.sendDiagnostic = batch;
+      line = JSON.stringify(envelope);
+    }
+    if (
+      sendWindow &&
       Buffer.byteLength(line) > LIVE_TRANSLATE_DIAGNOSTIC_MAX_WINDOW_BYTES
     )
-      return;
+      return {
+        status: 'not_generated',
+        generatedRows: 0,
+        sinkReturnedRows: 0,
+        discardedWindows: 1,
+        railwayStored: null,
+      };
+    generated = true;
     sink(line);
+    if (sendWindow)
+      return {
+        status: 'sink_returned',
+        generatedRows: 1,
+        sinkReturnedRows: 1,
+        discardedWindows: 0,
+        railwayStored: null,
+      };
   } catch {
     /* Logging cannot change telephone ownership, clear audio or reconnect. */
+    if (sendWindow)
+      return {
+        status: generated ? 'sink_threw' : 'not_generated',
+        generatedRows: generated ? 1 : 0,
+        sinkReturnedRows: 0,
+        discardedWindows: 1,
+        railwayStored: null,
+      };
   }
+  return undefined;
 }

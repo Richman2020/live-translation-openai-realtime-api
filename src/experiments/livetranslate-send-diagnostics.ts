@@ -80,6 +80,11 @@ export type LiveTranslateSendDiagnostic = {
   monotonicAtMs: number;
   sendSequence: number;
   records: LiveTranslateSendDiagnosticRecord[];
+  /** Fixed metadata anchors, not proof the preceding callback caused failure. */
+  firstFailure: {
+    failure: LiveTranslateSendDiagnosticRecord;
+    precedingRawCallback: LiveTranslateSendDiagnosticRecord | null;
+  } | null;
   summary: {
     recordedRecords: number;
     overwrittenRecords: number;
@@ -92,6 +97,17 @@ export type LiveTranslateSendDiagnostic = {
     peakSenderBufferedBytes: number | null;
     peakWritableBufferedBytes: number | null;
     monitorStopped: boolean | null;
+    windowTruncatedRecords: number;
+    windowContextOmittedRecords: number;
+    truncatedRecords: number;
+    suppressedRecords: number;
+    suppressedWindows: number;
+    projectionRejectedWindows: number;
+    sinkErrorWindows: number;
+    observedThroughRecordSequence: number;
+    captureEnded: boolean;
+    /** Future suppressed tail is not observable at this window's cutoff. */
+    futureSuppressedRecords: null;
   };
 };
 export type SendDiagnosticState = Pick<
@@ -216,11 +232,67 @@ const summaryCounts = [
   'lateCallbackCount',
   'duplicateCallbackCount',
   'peakPendingAudioBytes',
+  'windowTruncatedRecords',
+  'windowContextOmittedRecords',
+  'truncatedRecords',
+  'suppressedRecords',
+  'suppressedWindows',
+  'projectionRejectedWindows',
+  'sinkErrorWindows',
+  'observedThroughRecordSequence',
 ] as const;
+
+function projectRecord(
+  input: unknown,
+): LiveTranslateSendDiagnosticRecord | undefined {
+  const record: any = {};
+  for (const key of recordCounts) {
+    const v = own(input, key);
+    if (!count(v)) return undefined;
+    record[key] = v;
+  }
+  for (const key of recordNullableCounts) {
+    const v = own(input, key);
+    if (!nullableCount(v)) return undefined;
+    record[key] = v;
+  }
+  for (const [key, allowed] of [
+    ['stage', stages],
+    ['eventType', eventTypes],
+    ['callbackDisposition', [null, 'first', 'duplicate', 'late']],
+    [
+      'callbackErrorCode',
+      [
+        null,
+        'EPIPE',
+        'ECONNRESET',
+        'ETIMEDOUT',
+        'ERR_STREAM_DESTROYED',
+        'other',
+      ],
+    ],
+    ['sendReason', reasons],
+  ] as const) {
+    const v = own(input, key);
+    if (!oneOf(v, allowed)) return undefined;
+    record[key] = v;
+  }
+  for (const key of [
+    'callbackError',
+    'callbackDuplicate',
+    'callbackAfterStop',
+    'perMessageDeflate',
+  ]) {
+    const v = own(input, key);
+    if (!nullableBool(v)) return undefined;
+    record[key] = v;
+  }
+  return record;
+}
 
 /** A fresh scalar-only whitelist. Accessor properties are never invoked; thrown
  * proxies and invalid or oversized records fail closed at the diagnostic boundary. */
-export function projectLiveTranslateSendDiagnostic(
+function projectDiagnosticValue(
   value: unknown,
 ): LiveTranslateSendDiagnostic | undefined {
   try {
@@ -258,50 +330,25 @@ export function projectLiveTranslateSendDiagnostic(
       return undefined;
     out.records = [];
     for (let i = 0; i < (length as number); i += 1) {
-      const input = own(records, String(i));
-      const record: any = {};
-      for (const key of recordCounts) {
-        const v = own(input, key);
-        if (!count(v)) return undefined;
-        record[key] = v;
-      }
-      for (const key of recordNullableCounts) {
-        const v = own(input, key);
-        if (!nullableCount(v)) return undefined;
-        record[key] = v;
-      }
-      for (const [key, allowed] of [
-        ['stage', stages],
-        ['eventType', eventTypes],
-        ['callbackDisposition', [null, 'first', 'duplicate', 'late']],
-        [
-          'callbackErrorCode',
-          [
-            null,
-            'EPIPE',
-            'ECONNRESET',
-            'ETIMEDOUT',
-            'ERR_STREAM_DESTROYED',
-            'other',
-          ],
-        ],
-        ['sendReason', reasons],
-      ] as const) {
-        const v = own(input, key);
-        if (!oneOf(v, allowed)) return undefined;
-        record[key] = v;
-      }
-      for (const key of [
-        'callbackError',
-        'callbackDuplicate',
-        'callbackAfterStop',
-        'perMessageDeflate',
-      ]) {
-        const v = own(input, key);
-        if (!nullableBool(v)) return undefined;
-        record[key] = v;
-      }
+      const record = projectRecord(own(records, String(i)));
+      if (!record) return undefined;
       out.records.push(record);
+    }
+    const inputFailure = own(value, 'firstFailure');
+    out.firstFailure = null;
+    if (inputFailure !== null) {
+      const failure = projectRecord(own(inputFailure, 'failure'));
+      const inputCallback = own(inputFailure, 'precedingRawCallback');
+      const callback =
+        inputCallback === null ? null : projectRecord(inputCallback);
+      if (
+        !failure ||
+        failure.stage !== 'send_failed' ||
+        callback === undefined ||
+        (callback && callback.stage !== 'raw_callback')
+      )
+        return undefined;
+      out.firstFailure = { failure, precedingRawCallback: callback };
     }
     const inputSummary = own(value, 'summary');
     const summary: any = {};
@@ -321,14 +368,60 @@ export function projectLiveTranslateSendDiagnostic(
     const stopped = own(inputSummary, 'monitorStopped');
     if (!nullableBool(stopped)) return undefined;
     summary.monitorStopped = stopped;
+    const captureEnded = own(inputSummary, 'captureEnded');
+    if (
+      typeof captureEnded !== 'boolean' ||
+      own(inputSummary, 'futureSuppressedRecords') !== null
+    )
+      return undefined;
+    summary.captureEnded = captureEnded;
+    summary.futureSuppressedRecords = null;
     if (summary.emittedWindows > LIVE_TRANSLATE_DIAGNOSTIC_MAX_WINDOWS)
       return undefined;
     out.summary = summary;
-    if (
-      Buffer.byteLength(JSON.stringify(out)) >
+    return out;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Strict external projection retains its hard payload boundary. */
+export function projectLiveTranslateSendDiagnostic(
+  value: unknown,
+): LiveTranslateSendDiagnostic | undefined {
+  const out = projectDiagnosticValue(value);
+  return out &&
+    Buffer.byteLength(JSON.stringify(out)) <=
       LIVE_TRANSLATE_DIAGNOSTIC_MAX_WINDOW_BYTES
+    ? out
+    : undefined;
+}
+
+/** Scalar whitelist first, then discard only oldest context records. The newest
+ * record and both first-failure anchors survive; never truncate individual fields. */
+export function fitLiveTranslateSendDiagnostic(
+  value: unknown,
+  maxBytes = LIVE_TRANSLATE_DIAGNOSTIC_MAX_WINDOW_BYTES,
+): LiveTranslateSendDiagnostic | undefined {
+  try {
+    if (
+      !Number.isSafeInteger(maxBytes) ||
+      maxBytes < 1 ||
+      maxBytes > LIVE_TRANSLATE_DIAGNOSTIC_MAX_WINDOW_BYTES
     )
       return undefined;
+    const out = projectDiagnosticValue(value);
+    if (!out) return undefined;
+    while (Buffer.byteLength(JSON.stringify(out)) > maxBytes) {
+      if (out.records.length <= 1) return undefined;
+      if (
+        !Number.isSafeInteger(out.summary.windowTruncatedRecords) ||
+        out.summary.windowTruncatedRecords >= Number.MAX_SAFE_INTEGER
+      )
+        return undefined;
+      out.records.shift();
+      out.summary.windowTruncatedRecords += 1;
+    }
     return out;
   } catch {
     return undefined;
@@ -345,11 +438,22 @@ export function createLiveTranslateSendDiagnostics(options: Options) {
   let cursor = 0;
   let retained = 0;
   let recorded = 0;
+  let observed = 0;
+  let overwritten = 0;
   let windows = 0;
   let warnings = 0;
   let lastWarning = -Infinity;
   let finished = false;
+  let failureWindow = false;
+  let terminalWindow = false;
   let lateWindow = false;
+  let firstFailure: LiveTranslateSendDiagnostic['firstFailure'] = null;
+  let precedingRawCallback: LiveTranslateSendDiagnosticRecord | null = null;
+  let truncatedRecords = 0;
+  let suppressedRecords = 0;
+  let suppressedWindows = 0;
+  let projectionRejectedWindows = 0;
+  let sinkErrorWindows = 0;
   let rawCallbacks = 0;
   let errors = 0;
   let late = 0;
@@ -404,7 +508,10 @@ export function createLiveTranslateSendDiagnostics(options: Options) {
     trigger: LiveTranslateSendDiagnosticTrigger,
     record: LiveTranslateSendDiagnosticRecord,
   ) => {
-    if (windows >= LIVE_TRANSLATE_DIAGNOSTIC_MAX_WINDOWS) return;
+    if (windows >= LIVE_TRANSLATE_DIAGNOSTIC_MAX_WINDOWS) {
+      suppressedWindows += 1;
+      return;
+    }
     windows += 1;
     const window: LiveTranslateSendDiagnosticRecord[] = [];
     const size = Math.min(retained, LIVE_TRANSLATE_DIAGNOSTIC_WINDOW_RECORDS);
@@ -421,12 +528,10 @@ export function createLiveTranslateSendDiagnostics(options: Options) {
       monotonicAtMs: record.monotonicAtMs,
       sendSequence: record.sendSequence,
       records: window,
+      firstFailure,
       summary: {
         recordedRecords: recorded,
-        overwrittenRecords: Math.max(
-          0,
-          recorded - LIVE_TRANSLATE_DIAGNOSTIC_RING_RECORDS,
-        ),
+        overwrittenRecords: overwritten,
         emittedWindows: windows,
         rawCallbackCount: rawCallbacks,
         rawCallbackErrorCount: errors,
@@ -436,22 +541,108 @@ export function createLiveTranslateSendDiagnostics(options: Options) {
         peakSenderBufferedBytes: peakSender,
         peakWritableBufferedBytes: peakWritable,
         monitorStopped,
+        windowTruncatedRecords: 0,
+        windowContextOmittedRecords: Math.max(0, retained - size),
+        truncatedRecords,
+        suppressedRecords,
+        suppressedWindows,
+        projectionRejectedWindows,
+        sinkErrorWindows,
+        observedThroughRecordSequence: observed,
+        captureEnded: finished,
+        futureSuppressedRecords: null,
       },
     };
     // Serializing and calling a possibly slow log sink must not precede the
     // writer's existing synchronous callback deadline checks or prefix release.
     queueMicrotask(() => {
       try {
-        const event = projectLiveTranslateSendDiagnostic(candidate);
-        if (event) options.onDiagnostic(event);
+        candidate.firstFailure = firstFailure;
+        candidate.summary.recordedRecords = recorded;
+        candidate.summary.overwrittenRecords = overwritten;
+        candidate.summary.rawCallbackCount = rawCallbacks;
+        candidate.summary.rawCallbackErrorCount = errors;
+        candidate.summary.lateCallbackCount = late;
+        candidate.summary.duplicateCallbackCount = duplicates;
+        candidate.summary.peakPendingAudioBytes = peakPending;
+        candidate.summary.peakSenderBufferedBytes = peakSender;
+        candidate.summary.peakWritableBufferedBytes = peakWritable;
+        candidate.summary.monitorStopped = monitorStopped;
+        candidate.summary.truncatedRecords = truncatedRecords;
+        candidate.summary.suppressedRecords = suppressedRecords;
+        candidate.summary.suppressedWindows = suppressedWindows;
+        candidate.summary.projectionRejectedWindows = projectionRejectedWindows;
+        candidate.summary.sinkErrorWindows = sinkErrorWindows;
+        candidate.summary.observedThroughRecordSequence = observed;
+        candidate.summary.captureEnded = finished;
+        let event = fitLiveTranslateSendDiagnostic(candidate);
+        if (!event) {
+          projectionRejectedWindows += 1;
+          return;
+        }
+        // Updating the producer-total digit count can itself consume bytes at
+        // an exact boundary. Each iteration removes context, never the newest
+        // record or anchors, and the record-count bound makes this finite.
+        for (let i = 0; i < LIVE_TRANSLATE_DIAGNOSTIC_WINDOW_RECORDS; i += 1) {
+          event.summary.truncatedRecords =
+            truncatedRecords + event.summary.windowTruncatedRecords;
+          if (
+            Buffer.byteLength(JSON.stringify(event)) <=
+            LIVE_TRANSLATE_DIAGNOSTIC_MAX_WINDOW_BYTES
+          )
+            break;
+          event = fitLiveTranslateSendDiagnostic(event);
+          if (!event) {
+            projectionRejectedWindows += 1;
+            return;
+          }
+        }
+        truncatedRecords = event.summary.truncatedRecords;
+        try {
+          options.onDiagnostic(event);
+        } catch {
+          sinkErrorWindows += 1;
+        }
       } catch {
+        projectionRejectedWindows += 1;
         /* Diagnostic sinks never affect the writer. */
       }
     });
   };
   const record = (state: SendDiagnosticState) => {
     try {
-      if (finished && (state.stage !== 'raw_callback' || lateWindow)) return;
+      observed += 1;
+      if (state.stage === 'raw_callback') {
+        rawCallbacks += 1;
+        if (state.callbackError) errors += 1;
+        if (state.callbackAfterStop) late += 1;
+        if (state.callbackDuplicate) duplicates += 1;
+      }
+      const isTerminal =
+        state.stage === 'send_cancelled' ||
+        state.stage === 'transport_closed' ||
+        state.stage === 'diagnostic_end';
+      if (
+        finished &&
+        !(!terminalWindow && isTerminal) &&
+        !(state.stage === 'raw_callback' && !lateWindow)
+      ) {
+        suppressedRecords += 1;
+        return;
+      }
+      let at: number;
+      let monotonicAtMs: number;
+      try {
+        at = now();
+        monotonicAtMs = mono();
+      } catch {
+        suppressedRecords += 1;
+        return;
+      }
+      if (!count(at) || !count(monotonicAtMs)) {
+        suppressedRecords += 1;
+        return;
+      }
       const { socket }: { socket: any } = options;
       // eslint-disable-next-line no-underscore-dangle -- Read-only ws 8.18 Sender counter; unavailable values remain null.
       const sender = read(() => socket?._sender?._bufferedBytes);
@@ -474,9 +665,9 @@ export function createLiveTranslateSendDiagnostics(options: Options) {
       recorded += 1;
       const r: LiveTranslateSendDiagnosticRecord = {
         ...state,
-        at: now(),
-        monotonicAtMs: mono(),
-        recordSequence: recorded,
+        at,
+        monotonicAtMs,
+        recordSequence: observed,
         readyState: read(() => socket?.readyState),
         webSocketBufferedBytes: read(() => socket?.bufferedAmount),
         senderBufferedBytes: sender,
@@ -488,45 +679,55 @@ export function createLiveTranslateSendDiagnostics(options: Options) {
         eventLoopMaxMs:
           loopCount && loopCount > 0 ? read(() => monitor!.max / 1e6) : null,
       };
-      if (state.stage === 'raw_callback') {
-        rawCallbacks += 1;
-        if (state.callbackError) errors += 1;
-        if (state.callbackAfterStop) late += 1;
-        if (state.callbackDuplicate) duplicates += 1;
-      }
       peakPending = Math.max(peakPending, state.pendingAudioBytes);
       if (sender !== null) peakSender = Math.max(peakSender ?? 0, sender);
       if (writable !== null)
         peakWritable = Math.max(peakWritable ?? 0, writable);
-      if (finished) {
+      if (finished && state.stage === 'raw_callback') {
         lateWindow = true;
         flush('late_callback', r);
         return;
       }
+      if (state.stage === 'raw_callback') precedingRawCallback = r;
+      if (retained === ring.length) overwritten += 1;
       ring[cursor] = r;
       cursor = (cursor + 1) % ring.length;
       retained = Math.min(retained + 1, ring.length);
       let terminal: LiveTranslateSendDiagnosticTrigger | null = null;
-      if (state.stage === 'send_failed') terminal = 'send_failure';
       if (state.stage === 'send_cancelled') terminal = 'cancelled';
       if (state.stage === 'transport_closed') terminal = 'transport_closed';
-      if (terminal) {
+      if (state.stage === 'diagnostic_end') terminal = 'normal_end';
+      if (state.stage === 'send_failed' && !failureWindow) {
+        failureWindow = true;
+        firstFailure = { failure: r, precedingRawCallback };
+        finished = true;
+        stopMonitor();
+        flush('send_failure', r);
+        ring.fill(undefined);
+        retained = 0;
+        precedingRawCallback = null;
+        return;
+      }
+      if (terminal && !terminalWindow) {
+        terminalWindow = true;
         finished = true;
         stopMonitor();
         flush(terminal, r);
         ring.fill(undefined);
         retained = 0;
+        precedingRawCallback = null;
         return;
       }
       if (
-        warnings < 4 &&
         (state.pendingAudioBytes >= 16000 ||
           (state.oldestUnfinishedAgeMs ?? 0) >= 500) &&
         r.monotonicAtMs - lastWarning >= 1000
       ) {
-        warnings += 1;
         lastWarning = r.monotonicAtMs;
-        flush('backlog_warning', r);
+        if (warnings < 3) {
+          warnings += 1;
+          flush('backlog_warning', r);
+        } else suppressedWindows += 1;
       }
     } catch {
       /* Failed metadata reads, clocks and allocation never change transport behavior. */
@@ -539,15 +740,10 @@ export function createLiveTranslateSendDiagnostics(options: Options) {
       trigger: 'normal_end' | 'cancelled' = 'normal_end',
     ) {
       try {
-        if (finished) return;
-        record(state);
-        if (finished) return;
-        finished = true;
-        stopMonitor();
-        const r = ring[(cursor - 1 + ring.length) % ring.length];
-        if (r) flush(trigger, r);
-        ring.fill(undefined);
-        retained = 0;
+        record({
+          ...state,
+          stage: trigger === 'cancelled' ? 'send_cancelled' : 'diagnostic_end',
+        });
       } catch {
         stopMonitor();
         ring.fill(undefined);
@@ -560,6 +756,7 @@ export function createLiveTranslateSendDiagnostics(options: Options) {
       stopMonitor();
       ring.fill(undefined);
       retained = 0;
+      precedingRawCallback = null;
     },
     snapshot: () => ({
       retainedRecords: retained,
@@ -568,6 +765,13 @@ export function createLiveTranslateSendDiagnostics(options: Options) {
       emittedWindows: windows,
       finished,
       monitorStopped,
+      observedThroughRecordSequence: observed,
+      suppressedRecords,
+      suppressedWindows,
+      truncatedRecords,
+      projectionRejectedWindows,
+      sinkErrorWindows,
+      futureSuppressedRecords: null,
     }),
   };
 }

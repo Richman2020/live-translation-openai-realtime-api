@@ -3,6 +3,7 @@ import { test } from 'node:test';
 
 import {
   createLiveTranslateSendDiagnostics,
+  fitLiveTranslateSendDiagnostic,
   projectLiveTranslateSendDiagnostic,
   LIVE_TRANSLATE_DIAGNOSTIC_MAX_WINDOW_BYTES,
   type LiveTranslateSendDiagnostic,
@@ -314,8 +315,9 @@ test('post-cancel duplicate receipt is classified as both duplicate and after-st
   assert.equal(late.records[0].callbackDisposition, 'duplicate');
   assert.equal(late.records[0].callbackAfterStop, true);
   assert.equal(late.records[0].callbackDuplicate, true);
-  assert.equal(late.summary.lateCallbackCount, 1);
-  assert.equal(late.summary.duplicateCallbackCount, 2);
+  assert.equal(late.summary.lateCallbackCount, 2);
+  assert.equal(late.summary.duplicateCallbackCount, 3);
+  assert.ok(late.summary.suppressedRecords >= 1);
   assert.deepEqual(f.written, ['sensitive-test-pcm-never-logged']);
 });
 
@@ -579,4 +581,411 @@ test('strict projection rejects missing/negative/NaN/nonfinite values and oversi
     },
   });
   assert.equal(projectLiveTranslateSendDiagnostic(accessor), undefined);
+});
+
+test('three warning slots reserve the actual pump failure, cleanup and late-callback slots', async () => {
+  const f = fixture();
+  let completed = 0;
+  for (let cycle = 0; cycle < 5; cycle += 1) {
+    f.elapse(1000);
+    for (let i = 0; i < 25; i += 1) f.append(`synthetic-${cycle}-${i}`);
+    for (let i = 0; i < 25; i += 1) f.callbacks[completed++]();
+  }
+  f.elapse(1000);
+  f.socket._sender._bufferedBytes = 87000;
+  f.socket._socket.writableLength = 91100;
+  f.socket.bufferedAmount = 178100;
+  f.socket.extensions = 'permessage-deflate';
+  f.append('unconfirmed-prefix');
+  f.append('completed-behind-prefix');
+  f.elapse(10);
+  f.callbacks[completed + 1]();
+  f.elapse(40);
+  for (let i = 0; i < 101; i += 1) f.append(`failure-${i}`);
+  assert.equal((f.failures[0] as any).sendReason, 'pending_input_limit');
+  assert.equal(f.pump.snapshot().stopped, true);
+  f.pump.observeClose(1006);
+  f.callbacks[completed](
+    Object.assign(new Error('late synthetic error'), { code: 'ECONNRESET' }),
+  );
+  f.callbacks[completed]();
+  f.pump.observeClose(1006);
+  f.pump.abort();
+  await settle();
+  assert.deepEqual(
+    f.windows.map((window) => window.trigger),
+    [
+      'backlog_warning',
+      'backlog_warning',
+      'backlog_warning',
+      'send_failure',
+      'transport_closed',
+      'late_callback',
+    ],
+  );
+  const failure = f.windows[3];
+  assert.equal(failure.records.at(-1)!.stage, 'send_failed');
+  assert.equal(failure.firstFailure!.failure.pendingAudioBytes, 64000);
+  assert.equal(failure.firstFailure!.failure.sendReason, 'pending_input_limit');
+  assert.equal(failure.firstFailure!.precedingRawCallback!.sendSequence, 127);
+  assert.notEqual(
+    failure.firstFailure!.failure.sendSequence,
+    127,
+    'previous receipt is context, not the failed frame',
+  );
+  const retainedFault = failure.firstFailure!.failure;
+  assert.equal(retainedFault.senderBufferedBytes, 87000);
+  assert.equal(retainedFault.writableBufferedBytes, 91100);
+  assert.equal(retainedFault.webSocketBufferedBytes, 178100);
+  assert.equal(retainedFault.perMessageDeflate, true);
+  assert.equal(retainedFault.contiguousWrittenSequence, 125);
+  assert.equal(retainedFault.firstUnconfirmedSequence, 126);
+  assert.equal(retainedFault.prefixGapSequence, 126);
+  assert.equal(retainedFault.completedBehindGapFrames, 1);
+  assert.equal(retainedFault.oldestUnfinishedAgeMs, 50);
+  const terminal = f.windows[4];
+  assert.equal(terminal.records.at(-1)!.closeCode, 1006);
+  assert.deepEqual(terminal.firstFailure, failure.firstFailure);
+  assert.equal(f.windows[5].records[0].callbackAfterStop, true);
+  assert.equal(f.windows[5].records[0].callbackError, true);
+  assert.ok(f.windows[5].summary.suppressedWindows >= 2);
+  assert.ok(f.windows[5].summary.suppressedRecords >= 1);
+  assert.equal(f.windows[5].summary.futureSuppressedRecords, null);
+  assert.equal(f.windows[5].summary.captureEnded, true);
+  assert.equal(
+    f.windows[5].summary.observedThroughRecordSequence,
+    f.pump.diagnosticSnapshot()!.observedThroughRecordSequence,
+  );
+  assert.equal(f.pump.diagnosticSnapshot()!.retainedRecords, 0);
+  assert.equal(f.pump.diagnosticSnapshot()!.monitorStopped, true);
+});
+
+test('close first, normal hangup and late errors retain their classification without fabricating fatal failures', async () => {
+  for (const ending of ['close', 'hangup'] as const) {
+    const f = fixture();
+    f.append();
+    if (ending === 'close') f.pump.observeClose(1006);
+    f.pump.abort();
+    f.callbacks[0](Object.assign(new Error('late only'), { code: 'EPIPE' }));
+    f.pump.observeClose(1006);
+    f.pump.abort();
+    await settle();
+    assert.deepEqual(
+      f.windows.map((window) => window.trigger),
+      [ending === 'close' ? 'transport_closed' : 'cancelled', 'late_callback'],
+    );
+    assert.equal(f.windows[1].firstFailure, null);
+    assert.equal(f.windows[1].records[0].callbackAfterStop, true);
+    assert.equal(f.windows[1].records[0].callbackErrorCode, 'EPIPE');
+    assert.equal(f.pump.diagnosticSnapshot()!.retainedRecords, 0);
+    assert.equal(f.pump.diagnosticSnapshot()!.monitorStopped, true);
+  }
+});
+
+test('oversized trusted windows compact oldest context while preserving newest fatal and raw-callback anchors', async () => {
+  const f = fixture();
+  f.append('gap');
+  f.append('later');
+  f.callbacks[1]();
+  f.expire();
+  await settle();
+  const source = structuredClone(
+    f.windows.find((window) => window.trigger === 'send_failure')!,
+  );
+  const longNumber = 123456789.12345679;
+  const inflate = (record: any) => {
+    for (const key of Object.keys(record))
+      if (typeof record[key] === 'number' || record[key] === null) {
+        if (
+          key !== 'callbackDisposition' &&
+          key !== 'callbackErrorCode' &&
+          key !== 'sendReason' &&
+          key !== 'perMessageDeflate' &&
+          key !== 'callbackError' &&
+          key !== 'callbackDuplicate' &&
+          key !== 'callbackAfterStop'
+        )
+          record[key] = longNumber;
+      }
+    return record;
+  };
+  const record = inflate(structuredClone(source.records.at(-1)!));
+  record.stage = 'send_failed';
+  record.sendReason = 'oldest_send_timeout';
+  source.records = Array.from({ length: 24 }, () => structuredClone(record));
+  source.firstFailure = {
+    failure: structuredClone(record),
+    precedingRawCallback: inflate(
+      structuredClone(source.firstFailure!.precedingRawCallback!),
+    ),
+  };
+  source.firstFailure.precedingRawCallback!.stage = 'raw_callback';
+  source.firstFailure.precedingRawCallback!.sendReason = null;
+  assert.ok(
+    Buffer.byteLength(JSON.stringify(source)) >
+      LIVE_TRANSLATE_DIAGNOSTIC_MAX_WINDOW_BYTES,
+  );
+  assert.equal(
+    projectLiveTranslateSendDiagnostic(source),
+    undefined,
+    'untrusted projection never relaxes its size cap',
+  );
+  const fitted = fitLiveTranslateSendDiagnostic(source)!;
+  assert.ok(fitted);
+  assert.ok(fitted.records.length < 24);
+  assert.deepEqual(fitted.records.at(-1), source.records.at(-1));
+  assert.deepEqual(fitted.firstFailure, source.firstFailure);
+  assert.equal(
+    fitted.summary.windowTruncatedRecords,
+    24 - fitted.records.length,
+  );
+  assert.equal(
+    fitted.summary.truncatedRecords,
+    source.summary.truncatedRecords,
+    'generic fit does not invent producer-global totals',
+  );
+  assert.ok(
+    Buffer.byteLength(JSON.stringify(fitted)) <=
+      LIVE_TRANSLATE_DIAGNOSTIC_MAX_WINDOW_BYTES,
+  );
+  const tighter = fitLiveTranslateSendDiagnostic(fitted, 5500)!;
+  assert.ok(tighter);
+  assert.deepEqual(tighter.firstFailure, source.firstFailure);
+  assert.equal(
+    tighter.summary.windowTruncatedRecords,
+    24 - tighter.records.length,
+  );
+  assert.equal(
+    tighter.summary.truncatedRecords,
+    source.summary.truncatedRecords,
+  );
+  assert.equal(
+    fitLiveTranslateSendDiagnostic(source, 100),
+    undefined,
+    'cannot fit critical anchors: reject rather than erase them',
+  );
+  assert.equal(
+    fitLiveTranslateSendDiagnostic(
+      source,
+      LIVE_TRANSLATE_DIAGNOSTIC_MAX_WINDOW_BYTES + 1,
+    ),
+    undefined,
+  );
+  const overflow = structuredClone(source);
+  overflow.summary.windowTruncatedRecords = Number.MAX_SAFE_INTEGER;
+  assert.equal(
+    fitLiveTranslateSendDiagnostic(overflow, 5500),
+    undefined,
+    'counter overflow cannot escape the scalar boundary',
+  );
+});
+
+test('producer sink errors, projection rejection and post-budget suppression have known counters and an explicit future cutoff', async () => {
+  const received: LiveTranslateSendDiagnostic[] = [];
+  let clock = 1000;
+  let throwSink = false;
+  const d = createLiveTranslateSendDiagnostics({
+    socket: {},
+    now: () => clock,
+    monotonicNow: () => 0,
+    onDiagnostic(event) {
+      if (throwSink) throw new Error('synthetic sink');
+      received.push(event);
+    },
+  });
+  d.record({
+    ...bareState(),
+    pendingAudioBytes: 16000,
+    callbackDurationMs: Infinity,
+  });
+  await settle();
+  assert.equal(d.snapshot().projectionRejectedWindows, 1);
+  assert.equal(received.length, 0);
+  // Artificial impossible producer metadata exercises rejection. Once the
+  // bounded ring replaces that invalid context, later legal windows report it.
+  for (let i = 0; i < 256; i += 1) d.record(bareState());
+  clock = 2000;
+  throwSink = true;
+  d.record({
+    ...bareState(),
+    stage: 'send_failed',
+    sendReason: 'oldest_send_timeout',
+  });
+  await settle();
+  assert.equal(d.snapshot().sinkErrorWindows, 1);
+  throwSink = false;
+  d.record({ ...bareState(), stage: 'transport_closed', closeCode: 1006 });
+  await settle();
+  const terminal = received[0];
+  assert.equal(terminal.summary.projectionRejectedWindows, 1);
+  assert.equal(terminal.summary.sinkErrorWindows, 1);
+  assert.equal(terminal.records.at(-1)!.closeCode, 1006);
+  assert.ok(terminal.firstFailure);
+  d.record({ ...bareState(), stage: 'raw_callback', callbackAfterStop: true });
+  await settle();
+  const finalCutoff = received.at(-1)!.summary.observedThroughRecordSequence;
+  for (let i = 0; i < 100; i += 1)
+    d.record({
+      ...bareState(),
+      stage: 'raw_callback',
+      callbackAfterStop: true,
+      callbackError: true,
+    });
+  assert.equal(
+    received.at(-1)!.summary.observedThroughRecordSequence,
+    finalCutoff,
+  );
+  assert.equal(received.at(-1)!.summary.futureSuppressedRecords, null);
+  assert.equal(d.snapshot().observedThroughRecordSequence, finalCutoff + 100);
+  assert.equal(d.snapshot().suppressedRecords, 100);
+  assert.equal(d.snapshot().retainedRecords, 0);
+});
+
+test('invalid diagnostic clocks never poison the ring or manufacture a fatal timestamp', async () => {
+  for (const stage of ['send_started', 'send_failed'] as const) {
+    let clock = NaN;
+    const windows: LiveTranslateSendDiagnostic[] = [];
+    const d = createLiveTranslateSendDiagnostics({
+      socket: {},
+      now: () => clock,
+      monotonicNow: () => 0,
+      onDiagnostic: (event) => windows.push(event),
+    });
+    d.record({
+      ...bareState(),
+      stage,
+      pendingAudioBytes: 16000,
+      sendReason: stage === 'send_failed' ? 'oldest_send_timeout' : null,
+    });
+    assert.equal(d.snapshot().retainedRecords, 0);
+    assert.equal(d.snapshot().suppressedRecords, 1);
+    if (stage === 'send_failed') d.dispose();
+    clock = 1000;
+    d.record({ ...bareState(), stage: 'transport_closed', closeCode: 1006 });
+    await settle();
+    assert.equal(windows.length, 1);
+    assert.equal(windows[0].trigger, 'transport_closed');
+    assert.equal(
+      windows[0].firstFailure,
+      null,
+      'unobservable failure time stays missing',
+    );
+    assert.equal(windows[0].summary.suppressedRecords, 1);
+    assert.equal(windows[0].records[0].at, 1000);
+    assert.equal(windows[0].summary.futureSuppressedRecords, null);
+    assert.equal(d.snapshot().monitorStopped, true);
+  }
+});
+
+test('clearing the ring and post-failure teardown never inflate actual ring overwrite counts', async () => {
+  const windows: LiveTranslateSendDiagnostic[] = [];
+  const d = createLiveTranslateSendDiagnostics({
+    socket: {},
+    onDiagnostic: (window) => windows.push(window),
+  });
+  for (let i = 0; i < 260; i += 1) d.record(bareState());
+  d.record({
+    ...bareState(),
+    stage: 'send_failed',
+    sendReason: 'oldest_send_timeout',
+  });
+  d.dispose();
+  d.record({ ...bareState(), stage: 'transport_closed', closeCode: 1006 });
+  d.record({ ...bareState(), stage: 'raw_callback', callbackAfterStop: true });
+  await settle();
+  assert.equal(
+    windows.find((window) => window.trigger === 'send_failure')!.summary
+      .overwrittenRecords,
+    5,
+  );
+  assert.equal(
+    windows.find((window) => window.trigger === 'transport_closed')!.summary
+      .overwrittenRecords,
+    5,
+  );
+  assert.equal(
+    windows.find((window) => window.trigger === 'late_callback')!.summary
+      .overwrittenRecords,
+    5,
+  );
+  assert.equal(d.snapshot().retainedRecords, 0);
+});
+
+test('producer final byte bound includes updated totals and separately counts ring selection versus byte compaction', async () => {
+  const windows: LiveTranslateSendDiagnostic[] = [];
+  const longNumber = 0.0000012345678912345678;
+  const d = createLiveTranslateSendDiagnostics({
+    socket: {
+      readyState: 1,
+      bufferedAmount: longNumber,
+      _sender: { _bufferedBytes: longNumber },
+      _socket: { writableLength: longNumber },
+      extensions: 'permessage-deflate',
+    },
+    now: () => longNumber,
+    monotonicNow: () => longNumber,
+    createMonitor: () => ({
+      count: longNumber,
+      mean: longNumber * 1e6,
+      max: longNumber * 1e6,
+      enable() {},
+      disable() {},
+    }),
+    onDiagnostic: (event) => windows.push(event),
+  });
+  const state: any = bareState();
+  for (const key of Object.keys(state)) {
+    if (typeof state[key] === 'number') state[key] = longNumber;
+    if (
+      [
+        'callbackDurationMs',
+        'callbackAt',
+        'callbackMonotonicAtMs',
+        'firstUnconfirmedSequence',
+        'prefixGapSequence',
+        'oldestUnfinishedAgeMs',
+        'closeCode',
+      ].includes(key)
+    )
+      state[key] = longNumber;
+  }
+  for (let i = 0; i < 24; i += 1) d.record(state);
+  d.record({
+    ...state,
+    stage: 'raw_callback',
+    callbackError: false,
+    callbackDuplicate: false,
+    callbackAfterStop: false,
+    callbackDisposition: 'first',
+  });
+  d.record({
+    ...state,
+    stage: 'send_failed',
+    sendReason: 'pending_input_limit',
+  });
+  d.dispose();
+  d.record({ ...bareState(), stage: 'transport_closed', closeCode: 1006 });
+  await settle();
+  const failure = windows.find((window) => window.trigger === 'send_failure')!;
+  assert.ok(failure);
+  assert.ok(failure.summary.windowTruncatedRecords > 0);
+  assert.equal(failure.summary.windowContextOmittedRecords, 2);
+  assert.equal(failure.records.at(-1)!.stage, 'send_failed');
+  assert.equal(
+    failure.firstFailure!.precedingRawCallback!.stage,
+    'raw_callback',
+  );
+  assert.equal(failure.summary.overwrittenRecords, 0);
+  assert.ok(
+    windows.find((window) => window.trigger === 'transport_closed')!.summary
+      .truncatedRecords >= failure.summary.windowTruncatedRecords,
+  );
+  for (const event of windows) {
+    assert.ok(projectLiveTranslateSendDiagnostic(event));
+    assert.ok(
+      Buffer.byteLength(JSON.stringify(event)) <=
+        LIVE_TRANSLATE_DIAGNOSTIC_MAX_WINDOW_BYTES,
+    );
+    assert.ok(event.records.length <= 24);
+  }
 });
