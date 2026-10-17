@@ -321,9 +321,10 @@ test('synthetic slow write resumes FIFO without stopping either translation or d
   await flush();
   assert.equal(
     model.inputCount(),
-    1,
-    'Only one unconfirmed provider write may be in flight',
+    2,
+    'Both ordered audio frames are submitted without waiting for a local write callback',
   );
+  assert.equal(model.callbacks.length, 2);
   assert.deepEqual(f.phones.local.audio(), Buffer.concat([original, original]));
   assert.notEqual(f.manager.activeSession?.translationStopped, true);
   model.hold = false;

@@ -56,6 +56,7 @@ type SendItem = {
   acceptedAt: number;
   startedAt?: number;
   completed: boolean;
+  callbackDurationMs?: number;
   waitingObserved: boolean;
   onWritten?: () => void;
 };
@@ -84,7 +85,9 @@ export function createLiveTranslateSendPump(options: SendPumpOptions) {
     options.schedule ?? ((callback, delayMs) => setTimeout(callback, delayMs));
   const cancelSchedule = options.cancelSchedule ?? clearTimeout;
   const queue: SendItem[] = [];
-  let inFlight: SendItem | undefined;
+  // ws preserves send-call order itself. Keep bounded callback receipts, but
+  // do not gate the next audio frame on the preceding local write callback.
+  const inFlight: SendItem[] = [];
   let timer: Timer | undefined;
   let stopped = false;
   let pumping = false;
@@ -132,7 +135,7 @@ export function createLiveTranslateSendPump(options: SendPumpOptions) {
     if (timer !== undefined) cancelSchedule(timer);
     timer = undefined;
     queue.length = 0;
-    inFlight = undefined;
+    inFlight.length = 0;
     pendingAudioBytes = 0;
     pendingWireBytes = 0;
   };
@@ -163,7 +166,7 @@ export function createLiveTranslateSendPump(options: SendPumpOptions) {
       // The local stopped fence is authoritative even if cleanup throws.
     }
   };
-  const oldest = () => inFlight ?? queue[0];
+  const oldest = () => inFlight[0] ?? queue[0];
   const arm = (recheckBuffer = false) => {
     if (timer !== undefined) cancelSchedule(timer);
     timer = undefined;
@@ -202,8 +205,16 @@ export function createLiveTranslateSendPump(options: SendPumpOptions) {
     if (stopped || pumping) return;
     pumping = true;
     try {
-      while (!stopped && !inFlight && queue.length) {
+      while (!stopped && queue.length) {
         const item = queue[0];
+        // Configuration and finish retain their existing callback barriers.
+        // Only adjacent audio appends may have multiple outstanding writes.
+        if (
+          inFlight.length &&
+          (item.eventType !== 'input_audio_buffer.append' ||
+            inFlight[0].eventType !== 'input_audio_buffer.append')
+        )
+          break;
         if (options.socket.readyState !== 1) {
           fail('transport_not_open', item);
           break;
@@ -227,16 +238,17 @@ export function createLiveTranslateSendPump(options: SendPumpOptions) {
           return;
         }
         queue.shift();
-        inFlight = item;
+        inFlight.push(item);
         item.startedAt = monotonicNow();
         observe(sample('send_started', item));
-        if (stopped || inFlight !== item) break;
+        if (stopped || !inFlight.includes(item)) break;
         try {
-          // eslint-disable-next-line @typescript-eslint/no-loop-func -- Each closure owns its const item; stopped/inFlight fences reject late callbacks before mutating shared progress.
+          // eslint-disable-next-line @typescript-eslint/no-loop-func -- Each closure owns its const item; stopped/completed fences reject late or duplicate callbacks.
           options.socket.send(item.wire, (error) => {
-            if (stopped || item.completed || inFlight !== item) return;
+            if (stopped || item.completed || !inFlight.includes(item)) return;
             item.completed = true;
             const callbackDurationMs = duration(item.startedAt!);
+            item.callbackDurationMs = callbackDurationMs;
             if (error) {
               fail('write_callback_error', item, callbackDurationMs);
               return;
@@ -247,17 +259,29 @@ export function createLiveTranslateSendPump(options: SendPumpOptions) {
               fail('oldest_send_timeout', item, callbackDurationMs);
               return;
             }
-            inFlight = undefined;
-            pendingAudioBytes -= item.audioBytes;
-            pendingWireBytes -= Buffer.byteLength(item.wire);
-            writtenAudioBytes += item.audioBytes;
-            observe(sample('send_written', item, { callbackDurationMs }));
-            if (stopped) return;
-            try {
-              item.onWritten?.();
-            } catch {
-              fail('write_callback_error', item, callbackDurationMs);
-              return;
+            // Even a custom transport delivering callbacks out of order may
+            // advance acknowledged progress only across a successful prefix.
+            while (!stopped && inFlight[0]?.completed) {
+              const written = inFlight.shift()!;
+              pendingAudioBytes -= written.audioBytes;
+              pendingWireBytes -= Buffer.byteLength(written.wire);
+              writtenAudioBytes += written.audioBytes;
+              observe(
+                sample('send_written', written, {
+                  callbackDurationMs: written.callbackDurationMs,
+                }),
+              );
+              if (stopped) return;
+              try {
+                written.onWritten?.();
+              } catch {
+                fail(
+                  'write_callback_error',
+                  written,
+                  written.callbackDurationMs,
+                );
+                return;
+              }
             }
             pump();
           });
@@ -344,7 +368,7 @@ export function createLiveTranslateSendPump(options: SendPumpOptions) {
       pendingAudioBytes,
       pendingWireBytes,
       queuedFrames: queue.length,
-      inFlight: Boolean(inFlight),
+      inFlight: Boolean(inFlight.length),
       sendSequence,
     }),
   };
