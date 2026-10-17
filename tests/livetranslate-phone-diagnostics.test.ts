@@ -19,7 +19,10 @@ import {
   projectLiveTranslateProtocolFailure,
   projectLiveTranslateProtocolWarning,
   projectLiveTranslateSendObservation,
+  projectLiveTranslatePhoneSendDiagnostic,
 } from '../src/solo/livetranslate-phone-diagnostics';
+import { sendDiagnosticFixture } from './fixtures/livetranslate-send-diagnostic';
+import { LIVE_TRANSLATE_DIAGNOSTIC_MAX_WINDOW_BYTES } from '../src/experiments/livetranslate-send-diagnostics';
 
 const protocolFailure = {
   role: 'local',
@@ -33,6 +36,154 @@ const protocolFailure = {
   actualType: 'string',
   receiveSequence: 21,
 };
+
+test('bounded send windows preserve raw callback gaps and unknown fields through both phone metadata boundaries', () => {
+  const batch = sendDiagnosticFixture('send_failure');
+  const first = projectLiveTranslatePhoneSendDiagnostic(
+    {
+      ...batch,
+      role: 'local',
+      sessionId: 'PRIVATE_PROVIDER_ID',
+      audio: 'PRIVATE_PCM',
+      transcript: 'PRIVATE_TRANSCRIPT',
+      headers: { Authorization: 'PRIVATE_AUTH' },
+    },
+    'remote',
+  )!;
+  assert.equal(first.role, 'remote');
+  assert.equal(first.stage, 'send_window');
+  assert.deepEqual(first.sendDiagnostic, batch);
+  const second = sanitizeLiveTranslatePhoneDiagnostic(first)!;
+  assert.deepEqual(second.sendDiagnostic, batch);
+  const lines: string[] = [];
+  reportCloudLiveTranslateDiagnostic(
+    {
+      event: 'translation-live',
+      data: { ...second, sessionId: '12345678-1234-4123-8123-123456789abc' },
+    },
+    (line) => lines.push(line),
+  );
+  const logged = JSON.parse(lines[0]);
+  assert.equal(logged.callId, '12345678-1234-4123-8123-123456789abc');
+  assert.equal(logged.sendDiagnostic.records[0].senderBufferedBytes, null);
+  assert.equal(logged.sendDiagnostic.records[0].writableBufferedBytes, null);
+  assert.equal(logged.sendDiagnostic.records[0].contiguousWrittenSequence, 0);
+  assert.equal(logged.sendDiagnostic.records[0].prefixGapSequence, 1);
+  assert.equal(logged.sendDiagnostic.records[0].completedBehindGapFrames, 1);
+  assert.equal(lines[0].includes('PRIVATE'), false);
+});
+
+test('send window projection never executes getters or toJSON and rejects malformed records at both boundaries', () => {
+  let getterReads = 0;
+  const accessor = {
+    get() {
+      getterReads += 1;
+      throw new Error('PRIVATE');
+    },
+  };
+  const sample = sendDiagnosticFixture();
+  Object.defineProperty(sample, 'headers', accessor);
+  Object.defineProperty(sample.records[0], 'audio', accessor);
+  Object.defineProperty(sample, 'toJSON', accessor);
+  assert.ok(projectLiveTranslatePhoneSendDiagnostic(sample, 'local'));
+  assert.equal(getterReads, 0);
+  const guardedRecords = [] as unknown[];
+  Object.defineProperty(guardedRecords, '0', accessor);
+  const invalid = [
+    { ...sample, records: guardedRecords },
+    { ...sample, records: Array(25).fill(sample.records[0]) },
+    { ...sample, records: [{ ...sample.records[0], stage: 'PRIVATE' }] },
+    { ...sample, records: [{ ...sample.records[0], senderBufferedBytes: -1 }] },
+    {
+      ...sample,
+      records: [{ ...sample.records[0], callbackDurationMs: Infinity }],
+    },
+  ];
+  for (const item of invalid) {
+    assert.equal(
+      projectLiveTranslatePhoneSendDiagnostic(item, 'local'),
+      undefined,
+    );
+    assert.equal(
+      sanitizeLiveTranslatePhoneDiagnostic({
+        role: 'local',
+        stage: 'send_window',
+        at: 1000,
+        sendDiagnostic: item,
+      }),
+      undefined,
+    );
+  }
+  assert.equal(getterReads, 0);
+  const top = { ...sample };
+  Object.defineProperty(top, 'records', accessor);
+  assert.equal(
+    projectLiveTranslatePhoneSendDiagnostic(top, 'remote'),
+    undefined,
+  );
+  assert.equal(getterReads, 0);
+  reportCloudLiveTranslateDiagnostic(
+    {
+      event: 'translation-live',
+      data: projectLiveTranslatePhoneSendDiagnostic(sample, 'remote'),
+    },
+    () => {
+      throw new Error('SINK_FAILURE');
+    },
+  );
+});
+
+test('the final serialized send log bound includes call and event envelopes, rather than only the inner window', () => {
+  const batch = sendDiagnosticFixture('send_failure');
+  batch.records = Array.from({ length: 24 }, () => ({ ...batch.records[0] }));
+  // Synthetic large finite metadata builds a valid body just under its 32 KiB
+  // cap. The final sink must reject it if the trusted envelope crosses the cap.
+  for (const record of batch.records) {
+    for (const key of Object.keys(record)) {
+      if (
+        Buffer.byteLength(JSON.stringify(batch)) >=
+        LIVE_TRANSLATE_DIAGNOSTIC_MAX_WINDOW_BYTES - 40
+      )
+        break;
+      const data = record as unknown as Record<string, unknown>;
+      if (
+        typeof data[key] === 'number' ||
+        [
+          'senderBufferedBytes',
+          'writableBufferedBytes',
+          'webSocketBufferedBytes',
+          'eventLoopSampleCount',
+          'eventLoopMeanMs',
+          'eventLoopMaxMs',
+          'callbackDurationMs',
+          'firstUnconfirmedSequence',
+          'prefixGapSequence',
+          'oldestUnfinishedAgeMs',
+        ].includes(key)
+      )
+        data[key] = 1.2345678901234567e-150;
+    }
+  }
+  const bodyBytes = Buffer.byteLength(JSON.stringify(batch));
+  assert.ok(bodyBytes <= LIVE_TRANSLATE_DIAGNOSTIC_MAX_WINDOW_BYTES);
+  assert.ok(bodyBytes >= LIVE_TRANSLATE_DIAGNOSTIC_MAX_WINDOW_BYTES - 200);
+  const first = projectLiveTranslatePhoneSendDiagnostic(batch, 'local');
+  assert.ok(
+    first,
+    'The inner body is valid, so this specifically tests final-envelope accounting',
+  );
+  let writes = 0;
+  reportCloudLiveTranslateDiagnostic(
+    {
+      event: 'translation-live',
+      data: { ...first, sessionId: '12345678-1234-4123-8123-123456789abc' },
+    },
+    () => {
+      writes += 1;
+    },
+  );
+  assert.equal(writes, 0);
+});
 
 test('send observations expose bounded progress and trust the authenticated track, not callback text', () => {
   const event = {

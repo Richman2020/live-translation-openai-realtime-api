@@ -1,3 +1,16 @@
+## 最新：0746有界发送诊断离线候选（2026-10-17，仅增强诊断，尚未修复真实停译）
+
+- 以精确`0746dc1fb3d57b6302dd4d7358c6a2b5230847c7`独立工作目录/本地分支`codex/ai-phone-livetranslate-send-diagnostics-20261017`制作。原0746的489个tracked文件、原未提交依赖链接、cf62及此前故障证据保留；0746可恢复Git bundle已验证。不合入0bd容量压缩；第257响应停译限制原样保留。
+- 仅7个既有源码文件及1个新增诊断模块：发送泵只读记录、client回调与正常结束、phone白名单投射及manager终态元数据gate。原64000B／1MiB／2000ms保护、成功前缀推进/发送顺序、模型3.8/Andre/复刻关闭、上下文、字幕、原声直达、音频播放和双向停止策略不变；31个tracked public文件逐字节不变。
+- 记录原始回调入口/错误枚举、连续确认位置与缺口、成功但被前缀挡住的帧数、最老未连续释放帧年龄，拆分ws Sender与Node Writable缓冲，实际压缩协商及event-loop样本。未知为null；本地回调不当作供应商接收ACK，Node Writable不当TCP队列；应用epoch/单调时间与平台采集时间分开。白名单不含音频、原译文、任意Error/头、凭据或完整号码。
+- ring最多256条固定元数据；每次最多24条，4预警+1终态+1迟到窗口，每完整JSON行含外壳最多32KiB。每方向新增窗口日志最多192KiB，两方向384KiB，既有其他日志另计；正常流不逐帧输出日志。结束清ring/停monitor，有界微任务异步输出，不把日志工作放到原回调截止判断之前。终态允许旧通话闭包的严格元数据，不放宽业务admission或电话SSE白名单。
+- 最终18/18同事件0746对照的wire/PCM/hash/顺序/原Observation/确认前缀/失败点/清理一致；3/3真实localhost ws8.18.0可区分604ms回调延迟且peer120/120、Sender停滞90300/0、Writable停滞0/91100。另有19个新增核心测试及独立9/9对抗探针；合成机制不冒充本次实通首因。
+- 正式5轮×20000帧wall微基准中位数1.288→5.395μs/帧，增量4.108μs/帧；40泵×3轮隔离进程的本负载JS heap增量中位数约83890B（82KiB）/方向，非硬内存上界。正常20000帧过程0新增窗口、结束约21KB；停滞实验每连接4行约66—89KB。清理后ring0/monitor停止；RSS/GC波动和真实stdout/平台开销未作已验证承诺。
+- 完整typecheck、build、8源码ESLint、git diff --check通过。首轮全量2296pass/1fail/5skip：新工作目录缺既有prepare:desktop生成的SDK导致cloud-service测试404。保留首轮后，仅用本地锁定依赖运行该复制脚本、核对源/目标SHA256相同；无安装、源码或断言变化。第二轮全量2302total/2297pass/0fail/5 Windows条件skip；所有中间专项/投射/独审失败与后续最小修正均保留，不挑成功成绩。
+- 七组浏览器首轮顺序全部通过：conversation43、controlled107、continuous123、paired关闭120、Google29、web-verification50、daily84，共556检查；均externalRequests=0、exceptions=[]，无跳过/重跑。public递归22个JS（含本地生成SDK）语法检查通过。本轮未执行新GitHub CI或Docker构建，不把旧CI成绩当本候选结果。
+- 独立审查无阻断；新私有ws字段依赖8.18.0，取不到为null。真实慢写/压缩/回调/资源首因仍未知；诊断本身仍有小开销，真实通话日志影响待另批一次取证验证。本轮没有安装、推送、PR、CI、部署、变量/密钥/网络操作、拨号、启麦、模型请求或录音上传；没有读取或回传密钥值。
+- 完整差异、全部日志、审查、测量和最终SHA见独立审计目录`/workspace/ai-phone-reference/livetranslate-send-diagnostics-candidate-20261017`及本节所属本地提交。后续推送/CI、指定AI staging发布、本人单次实测及费用分别等待确认；实测字段、首次故障即停止和不补拨清单见[有界诊断说明](docs/LIVETRANSLATE_BOUNDED_SEND_DIAGNOSTICS_2026-10-17.md)。线上0746本轮不访问或修改，不声称已修复真实停译。
+
 ## 2026-10-17 当前：cf62实通输入发送积压最小离线修复（未推送、未部署）
 
 - 基准完整cf62d18eb8dc371f294c8c08f03d2472992e5d4a，线上24b65896-f6ea-42d3-8db2-17b11f1e6abf；新独立分支codex/ai-phone-livetranslate-input-send-fix-20261017。原0bd、未提交资料、依赖链接和旧证据已单独bundle/哈希/差异保护，不合入容量整理。

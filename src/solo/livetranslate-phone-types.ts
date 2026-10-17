@@ -2,6 +2,7 @@ import type {
   LiveTranslateProtocolDiagnostic,
   LiveTranslateVoicePolicy,
 } from '../experiments/livetranslate-types';
+import type { LiveTranslateSendDiagnostic } from '../experiments/livetranslate-send-diagnostics';
 
 export const LIVE_TRANSLATE_PHONE_FAILURE_CODES = [
   'LIVETRANSLATE_PHONE_CONFIGURATION_INVALID',
@@ -38,6 +39,7 @@ export type LiveTranslatePhoneDiagnostic = {
     | 'send_failed'
     | 'send_cancelled'
     | 'transport_closed'
+    | 'send_window'
     | 'warning'
     | 'input_received'
     | 'association'
@@ -53,6 +55,8 @@ export type LiveTranslatePhoneDiagnostic = {
     | 'usage'
     | 'failed';
   code?: string;
+  /** Bounded local send evidence; callbacks prove local write completion only. */
+  sendDiagnostic?: LiveTranslateSendDiagnostic;
   fatal?: true;
   eventType?: LiveTranslateProtocolDiagnostic['eventType'];
   validationPath?: LiveTranslateProtocolDiagnostic['validationPath'];

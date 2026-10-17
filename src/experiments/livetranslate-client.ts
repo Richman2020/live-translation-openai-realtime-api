@@ -321,6 +321,7 @@ export function createLiveTranslateClient(
   const cleanup = (graceful = false) => {
     clearTimeout(timer);
     timer = undefined;
+    if (graceful) sendPump?.finishDiagnostics();
     sendPump?.abort();
     // eslint-disable-next-line @typescript-eslint/no-use-before-define -- Hoisted cleanup closes the mutually recursive ordering/drain lifecycle.
     clearPhoneSourceOrder();
@@ -643,6 +644,15 @@ export function createLiveTranslateClient(
     sendPump = createLiveTranslateSendPump({
       socket,
       now,
+      onDiagnostic: options.onSendDiagnostic
+        ? (event) => {
+            try {
+              options.onSendDiagnostic?.({ ...event, role });
+            } catch {
+              /* Diagnostic sinks cannot change transport behavior. */
+            }
+          }
+        : undefined,
       onObservation: (event) => {
         try {
           options.onSendObservation?.({ role, ...event });

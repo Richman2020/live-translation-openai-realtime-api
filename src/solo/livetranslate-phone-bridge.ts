@@ -33,6 +33,7 @@ import type { ContinuousTranslationOptions } from './continuous-translation-clie
 import {
   projectLiveTranslateProtocolFailure,
   projectLiveTranslateProtocolWarning,
+  projectLiveTranslatePhoneSendDiagnostic,
   projectLiveTranslateSendObservation,
 } from './livetranslate-phone-diagnostics';
 
@@ -653,7 +654,6 @@ export function createLiveTranslatePhoneBridge(
     },
   ) => {
     if (role === 'local') localSink = settings.onAudio;
-    const lastSendReports = new Map<string, number>();
     let inputBytes = 0;
     let writtenInputBytes: number | undefined;
     let client: LiveTranslateClient;
@@ -684,6 +684,24 @@ export function createLiveTranslatePhoneBridge(
         onSource: (event) => onSource(role, event),
         onTranslation: (event) => onTranslation(role, event),
         onAudio: (pcm, metadata) => onAudio(role, pcm, metadata),
+        onSendDiagnostic: (event) => {
+          const safe = projectLiveTranslatePhoneSendDiagnostic(event, role);
+          // Close/cancel/late windows remain observable after this bridge has
+          // retired; only metadata flows here and no business state is changed.
+          if (!safe) return;
+          if (
+            (stopped || closed) &&
+            ![
+              'send_failure',
+              'normal_end',
+              'cancelled',
+              'transport_closed',
+              'late_callback',
+            ].includes(safe.sendDiagnostic?.trigger ?? '')
+          )
+            return;
+          diagnostic(safe);
+        },
         onSendObservation: (event) => {
           const safe = projectLiveTranslateSendObservation(event, role);
           if (!safe) return;
@@ -698,21 +716,15 @@ export function createLiveTranslatePhoneBridge(
             !['transport_closed', 'send_cancelled'].includes(safe.stage)
           )
             return;
-          const immediate = [
-            'send_failed',
-            'send_cancelled',
-            'transport_closed',
-          ].includes(safe.stage);
-          const period =
-            safe.stage === 'send_written' || safe.stage === 'send_waiting'
-              ? 200
-              : 1000;
+          // Routine per-frame observations are retained in the bounded send
+          // ring. Keep the original written-byte update above and compact
+          // legacy failure/cleanup metadata, without continuous send logging.
           if (
-            !immediate &&
-            safe.at - (lastSendReports.get(safe.stage) ?? -Infinity) < period
+            !['send_failed', 'send_cancelled', 'transport_closed'].includes(
+              safe.stage,
+            )
           )
             return;
-          lastSendReports.set(safe.stage, safe.at);
           diagnostic(safe);
         },
         onProtocolDiagnostic: (event) => {

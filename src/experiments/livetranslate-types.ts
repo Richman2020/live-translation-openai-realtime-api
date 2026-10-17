@@ -1,5 +1,6 @@
 import type WebSocket from 'ws';
 
+import type { LiveTranslateSendDiagnostic } from './livetranslate-send-diagnostics';
 import type {
   LiveTranslateSendReason,
   SendObservation,
@@ -494,6 +495,10 @@ export type LiveTranslateClientOptions = {
   /** Local write observations, never a supplier acknowledgement. */
   onSendObservation?: (
     event: SendObservation & { role: LiveTranslateRole },
+  ) => void;
+  /** Bounded local-transport metadata windows, never supplier receipt acknowledgements. */
+  onSendDiagnostic?: (
+    event: LiveTranslateSendDiagnostic & { role: LiveTranslateRole },
   ) => void;
   onError?: (
     code: string,

@@ -14,6 +14,7 @@ import type {
 import { Pcm24kToPcmu, PcmuToPcm16k } from '../src/solo/translation-pcm';
 import { ConversationEventAdapter } from '../src/solo/conversation-events';
 import { createConversationModel } from '../public/conversation-model.js';
+import { sendDiagnosticFixture } from './fixtures/livetranslate-send-diagnostic';
 
 const config: LiveTranslatePhoneConfig = {
   region: 'beijing',
@@ -720,5 +721,94 @@ test('metadata joins only explicit source edges and keeps provider endpoint, PCM
   const input = h.diagnostics.find((event) => event.stage === 'input_received');
   assert.equal(input.basis, 'client_accepted_not_written');
   assert.equal(input.inputAudioMs, 20);
+  h.bridge.close();
+});
+
+test('send diagnostic windows use the bound track and still reach observers after close without resuming business', async () => {
+  const h = fixture();
+  await h.pair();
+  const local = h.supplied.get('local')!;
+  local.onSendDiagnostic!({ ...sendDiagnosticFixture(), role: 'remote' });
+  const first = h.diagnostics.find((event) => event.stage === 'send_window');
+  assert.equal(first.role, 'local');
+  assert.equal(first.sendDiagnostic.records[0].senderBufferedBytes, null);
+  const original = Buffer.from([0xff, 0x80, 0x10]);
+  h.phones.remote.media(original);
+  assert.deepEqual(h.phones.local.audio(), original);
+  const failureCount = h.failures.length;
+  h.bridge.close();
+  const transcriptCount = h.transcripts.length;
+  local.onSendDiagnostic!({
+    ...sendDiagnosticFixture('cancelled'),
+    role: 'remote',
+  });
+  local.onSendDiagnostic!({
+    ...sendDiagnosticFixture('late_callback'),
+    role: 'remote',
+  });
+  local.onSendDiagnostic!({
+    ...sendDiagnosticFixture('backlog_warning'),
+    role: 'local',
+  });
+  const windows = h.diagnostics.filter(
+    (event) => event.stage === 'send_window',
+  );
+  assert.deepEqual(
+    windows.map((event) => event.sendDiagnostic.trigger),
+    ['backlog_warning', 'cancelled', 'late_callback'],
+  );
+  assert.ok(windows.every((event) => event.role === 'local'));
+  h.source('local', 'retired', 'Synthetic late text.');
+  assert.equal(h.transcripts.length, transcriptCount);
+  assert.deepEqual(h.aborted, { local: 1, remote: 1 });
+  assert.equal(h.failures.length, failureCount);
+});
+
+test('routine send callbacks still advance written input evidence without continuous normal send logs', async () => {
+  const h = fixture();
+  await h.pair();
+  const local = h.supplied.get('local')!;
+  for (let index = 1; index <= 20; index += 1) {
+    for (const stage of [
+      'send_accepted',
+      'send_started',
+      'send_written',
+    ] as const) {
+      local.onSendObservation!({
+        stage,
+        at: 1000 + index * 1000,
+        eventType: 'input_audio_buffer.append',
+        sendSequence: index,
+        observedSequence: index,
+        audioBytes: 640,
+        acceptedAudioBytes: index * 640,
+        writtenAudioBytes: index * 640,
+        pendingAudioBytes: 0,
+        pendingWireBytes: 0,
+        readyState: 1,
+        bufferedBytes: 0,
+        role: 'local',
+        queuedDurationMs: 0,
+      });
+    }
+  }
+  assert.equal(
+    h.diagnostics.some((event) =>
+      ['send_accepted', 'send_started', 'send_written'].includes(event.stage),
+    ),
+    false,
+  );
+  local.onTiming!({
+    role: 'local',
+    sessionId: 'session_local',
+    sourceId: 'source_after_send',
+    stage: 'source_stopped',
+    providerAudioMs: 50,
+    at: 22000,
+  });
+  const endpoint = h.diagnostics.find(
+    (event) => event.stage === 'source_stopped',
+  );
+  assert.equal(endpoint.inputWrittenAudioMs, 400);
   h.bridge.close();
 });

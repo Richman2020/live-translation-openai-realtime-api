@@ -1,4 +1,8 @@
 import {
+  projectLiveTranslateSendDiagnostic,
+  LIVE_TRANSLATE_DIAGNOSTIC_MAX_WINDOW_BYTES,
+} from '../experiments/livetranslate-send-diagnostics';
+import {
   isLiveTranslateFailureCode,
   LIVE_TRANSLATE_ITEM_CONFLICT_KINDS,
   LIVE_TRANSLATE_PROTOCOL_DIAGNOSTIC_EXPECTATIONS,
@@ -25,6 +29,7 @@ const stages = new Set([
   'send_failed',
   'send_cancelled',
   'transport_closed',
+  'send_window',
   'warning',
   'source_started',
   'source_stopped',
@@ -79,6 +84,17 @@ export function sanitizeLiveTranslatePhoneDiagnostic(
     if (allowed.includes(v)) safe[key] = v;
   };
   choose('clock', ['application_epoch_ms']);
+  if (stage === 'send_window') {
+    const batch = projectLiveTranslateSendDiagnostic(
+      field(value, 'sendDiagnostic'),
+    );
+    if (!batch || batch.at !== at) return undefined;
+    // The same fixed-schema projection runs independently at the bridge and
+    // owner/log boundary. Unknown measurements stay null, never invented zero.
+    safe.sendSequence = batch.sendSequence;
+    safe.sendDiagnostic = batch;
+    return Object.freeze(safe);
+  }
   if (stage === 'protocol_failure') {
     choose('fatal', [true]);
     choose('eventType', [
@@ -319,6 +335,26 @@ export function projectLiveTranslateSendObservation(
     | undefined;
 }
 
+/** The role is the authenticated adapter closure, not a provider field. */
+export function projectLiveTranslatePhoneSendDiagnostic(
+  value: unknown,
+  role: 'local' | 'remote',
+): Omit<LiveTranslatePhoneDiagnostic, 'clock'> | undefined {
+  try {
+    const batch = projectLiveTranslateSendDiagnostic(value);
+    if (!batch) return undefined;
+    return sanitizeLiveTranslatePhoneDiagnostic({
+      role,
+      stage: 'send_window',
+      at: batch.at,
+      sendDiagnostic: batch,
+    }) as Omit<LiveTranslatePhoneDiagnostic, 'clock'> | undefined;
+  } catch {
+    // Diagnostic availability cannot alter audio, cleanup or ownership.
+    return undefined;
+  }
+}
+
 export function reportCloudLiveTranslateDiagnostic(
   value: unknown,
   // eslint-disable-next-line no-console -- Only the explicit scalar projection below reaches this sink.
@@ -337,13 +373,17 @@ export function reportCloudLiveTranslateDiagnostic(
       ? suppliedCall
       : undefined;
   try {
-    sink(
-      JSON.stringify({
-        event: 'CLOUD_LIVETRANSLATE_DIAGNOSTIC',
-        ...(callId ? { callId } : {}),
-        ...safe,
-      }),
-    );
+    const line = JSON.stringify({
+      event: 'CLOUD_LIVETRANSLATE_DIAGNOSTIC',
+      ...(callId ? { callId } : {}),
+      ...safe,
+    });
+    if (
+      safe.stage === 'send_window' &&
+      Buffer.byteLength(line) > LIVE_TRANSLATE_DIAGNOSTIC_MAX_WINDOW_BYTES
+    )
+      return;
+    sink(line);
   } catch {
     /* Logging cannot change telephone ownership, clear audio or reconnect. */
   }

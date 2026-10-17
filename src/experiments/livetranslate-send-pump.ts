@@ -1,5 +1,11 @@
 import { performance } from 'node:perf_hooks';
 
+import {
+  createLiveTranslateSendDiagnostics,
+  type LiveTranslateSendDiagnostic,
+  type SendDiagnosticState,
+} from './livetranslate-send-diagnostics';
+
 /** Phone-only input protection, not a call duration or supplier usage limit. */
 export const LIVE_TRANSLATE_PENDING_INPUT_BYTES = 64000;
 export const LIVE_TRANSLATE_SEND_WAIT_MS = 2000;
@@ -56,6 +62,7 @@ type SendItem = {
   acceptedAt: number;
   startedAt?: number;
   completed: boolean;
+  rawCallbackSeen: boolean;
   callbackDurationMs?: number;
   waitingObserved: boolean;
   onWritten?: () => void;
@@ -73,6 +80,7 @@ type SendPumpOptions = {
   schedule?: (callback: () => void, delayMs: number) => Timer;
   cancelSchedule?: (timer: Timer) => void;
   onObservation?: (event: SendObservation) => void;
+  onDiagnostic?: (event: LiveTranslateSendDiagnostic) => void;
   onFailure: (event: SendFailure) => void;
 };
 
@@ -98,7 +106,72 @@ export function createLiveTranslateSendPump(options: SendPumpOptions) {
   let writtenAudioBytes = 0;
   let pendingAudioBytes = 0;
   let pendingWireBytes = 0;
+  let contiguousWrittenSequence = 0;
+  // Diagnostic accounting only; never used by admission, timers or prefix release.
+  let successfulCallbacksAwaitingPrefix = 0;
+  const diagnostics = (() => {
+    try {
+      return options.onDiagnostic
+        ? createLiveTranslateSendDiagnostics({
+            socket: options.socket,
+            now,
+            monotonicNow,
+            onDiagnostic: options.onDiagnostic,
+          })
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  })();
   const duration = (started: number) => Math.max(0, monotonicNow() - started);
+  const diagnosticState = (
+    stage: SendDiagnosticState['stage'],
+    item?: SendItem,
+    detail: Partial<SendDiagnosticState> = {},
+  ): SendDiagnosticState => {
+    const first = inFlight[0] ?? queue[0];
+    const blocked =
+      first && !first.completed ? successfulCallbacksAwaitingPrefix : 0;
+    return {
+      stage,
+      eventType: item?.eventType ?? 'unknown',
+      sendSequence: item?.sendSequence ?? sendSequence,
+      callbackDisposition: null,
+      callbackDuplicate: null,
+      callbackAfterStop: null,
+      callbackError: null,
+      callbackErrorCode: null,
+      callbackDurationMs: null,
+      callbackAt: null,
+      callbackMonotonicAtMs: null,
+      contiguousWrittenSequence,
+      firstUnconfirmedSequence: first?.sendSequence ?? null,
+      prefixGapSequence: blocked ? first!.sendSequence : null,
+      completedBehindGapFrames: blocked,
+      oldestUnfinishedAgeMs: first ? duration(first.acceptedAt) : null,
+      queuedFrames: queue.length,
+      inFlightFrames: inFlight.length,
+      acceptedAudioBytes,
+      writtenAudioBytes,
+      pendingAudioBytes,
+      pendingWireBytes,
+      sendReason: null,
+      closeCode: null,
+      ...detail,
+    };
+  };
+  const diagnose = (
+    stage: SendDiagnosticState['stage'],
+    item?: SendItem,
+    detail: Partial<SendDiagnosticState> = {},
+  ) => {
+    if (!diagnostics) return;
+    try {
+      diagnostics.record(diagnosticState(stage, item, detail));
+    } catch {
+      /* Diagnostic state cannot affect the writer. */
+    }
+  };
   const safeCount = (value: number) =>
     Number.isSafeInteger(value) && value >= 0 ? value : 0;
   const sample = (
@@ -124,7 +197,17 @@ export function createLiveTranslateSendPump(options: SendPumpOptions) {
       ...detail,
     };
   };
-  const observe = (event: SendObservation) => {
+  const observe = (event: SendObservation, diagnosticItem?: SendItem) => {
+    if (diagnostics)
+      diagnose(event.stage, diagnosticItem, {
+        eventType: event.eventType,
+        sendSequence: event.sendSequence,
+        ...(event.callbackDurationMs === undefined
+          ? {}
+          : { callbackDurationMs: event.callbackDurationMs }),
+        sendReason: event.sendReason ?? null,
+        closeCode: event.closeCode ?? null,
+      });
     try {
       options.onObservation?.(event);
     } catch {
@@ -138,6 +221,7 @@ export function createLiveTranslateSendPump(options: SendPumpOptions) {
     inFlight.length = 0;
     pendingAudioBytes = 0;
     pendingWireBytes = 0;
+    successfulCallbacksAwaitingPrefix = 0;
   };
   const fail = (
     sendReason: LiveTranslateSendReason,
@@ -158,6 +242,11 @@ export function createLiveTranslateSendPump(options: SendPumpOptions) {
           : 'LIVETRANSLATE_SEND_UNAVAILABLE',
     };
     stopped = true;
+    diagnose('send_failed', item, {
+      sendReason,
+      callbackDurationMs: callbackDurationMs ?? null,
+    });
+    diagnostics?.dispose();
     clear();
     observe(event);
     try {
@@ -232,6 +321,7 @@ export function createLiveTranslateSendPump(options: SendPumpOptions) {
               sample('send_waiting', item, {
                 sendReason: 'transport_buffer_limit',
               }),
+              item,
             );
           }
           arm(true);
@@ -240,36 +330,100 @@ export function createLiveTranslateSendPump(options: SendPumpOptions) {
         queue.shift();
         inFlight.push(item);
         item.startedAt = monotonicNow();
-        observe(sample('send_started', item));
+        observe(sample('send_started', item), item);
         if (stopped || !inFlight.includes(item)) break;
         try {
           // eslint-disable-next-line @typescript-eslint/no-loop-func -- Each closure owns its const item; stopped/completed fences reject late or duplicate callbacks.
           options.socket.send(item.wire, (error) => {
-            if (stopped || item.completed || !inFlight.includes(item)) return;
+            let callbackAt: number | null = null;
+            let callbackMonotonicAtMs: number | null = null;
+            if (diagnostics)
+              try {
+                callbackAt = now();
+                callbackMonotonicAtMs = monotonicNow();
+              } catch {
+                /* Optional clocks only. */
+              }
+            const recordRawCallback = (callbackDurationMs: number | null) => {
+              if (!diagnostics) return;
+              try {
+                let callbackErrorCode: SendDiagnosticState['callbackErrorCode'] =
+                  null;
+                if (error) {
+                  try {
+                    const code = Object.getOwnPropertyDescriptor(
+                      error,
+                      'code',
+                    )?.value;
+                    callbackErrorCode = [
+                      'EPIPE',
+                      'ECONNRESET',
+                      'ETIMEDOUT',
+                      'ERR_STREAM_DESTROYED',
+                    ].includes(code)
+                      ? code
+                      : 'other';
+                  } catch {
+                    callbackErrorCode = 'other';
+                  }
+                }
+                let callbackDisposition: SendDiagnosticState['callbackDisposition'] =
+                  stopped ? 'late' : 'first';
+                if (item.rawCallbackSeen) callbackDisposition = 'duplicate';
+                diagnose('raw_callback', item, {
+                  callbackDisposition,
+                  callbackDuplicate: item.rawCallbackSeen,
+                  callbackAfterStop: stopped,
+                  callbackError: Boolean(error),
+                  callbackErrorCode,
+                  callbackDurationMs,
+                  callbackAt,
+                  callbackMonotonicAtMs,
+                });
+                item.rawCallbackSeen = true;
+              } catch {
+                /* Raw callback diagnostics cannot change callback behavior. */
+              }
+            };
+            if (stopped || item.completed || !inFlight.includes(item)) {
+              recordRawCallback(
+                callbackMonotonicAtMs === null
+                  ? null
+                  : Math.max(0, callbackMonotonicAtMs - item.startedAt!),
+              );
+              return;
+            }
             item.completed = true;
             const callbackDurationMs = duration(item.startedAt!);
             item.callbackDurationMs = callbackDurationMs;
             if (error) {
+              recordRawCallback(callbackDurationMs);
               fail('write_callback_error', item, callbackDurationMs);
               return;
             }
             // A due timer may still be waiting for its event-loop turn. A late
             // success must not bypass the same accepted-item deadline.
             if (duration(item.acceptedAt) >= LIVE_TRANSLATE_SEND_WAIT_MS) {
+              recordRawCallback(callbackDurationMs);
               fail('oldest_send_timeout', item, callbackDurationMs);
               return;
             }
+            if (diagnostics) successfulCallbacksAwaitingPrefix += 1;
+            recordRawCallback(callbackDurationMs);
             // Even a custom transport delivering callbacks out of order may
             // advance acknowledged progress only across a successful prefix.
             while (!stopped && inFlight[0]?.completed) {
               const written = inFlight.shift()!;
+              if (diagnostics) successfulCallbacksAwaitingPrefix -= 1;
               pendingAudioBytes -= written.audioBytes;
               pendingWireBytes -= Buffer.byteLength(written.wire);
               writtenAudioBytes += written.audioBytes;
+              contiguousWrittenSequence = written.sendSequence;
               observe(
                 sample('send_written', written, {
                   callbackDurationMs: written.callbackDurationMs,
                 }),
+                written,
               );
               if (stopped) return;
               try {
@@ -310,6 +464,7 @@ export function createLiveTranslateSendPump(options: SendPumpOptions) {
         sendSequence,
         acceptedAt: monotonicNow(),
         completed: false,
+        rawCallbackSeen: false,
         waitingObserved: false,
         onWritten,
       };
@@ -339,7 +494,7 @@ export function createLiveTranslateSendPump(options: SendPumpOptions) {
       acceptedAudioBytes += audioBytes;
       pendingAudioBytes += audioBytes;
       pendingWireBytes += Buffer.byteLength(wire);
-      observe(sample('send_accepted', item));
+      observe(sample('send_accepted', item), item);
       pump();
       return !stopped;
     },
@@ -347,6 +502,8 @@ export function createLiveTranslateSendPump(options: SendPumpOptions) {
       if (stopped) return;
       const event = sample('send_cancelled', oldest());
       stopped = true;
+      diagnose('send_cancelled', oldest());
+      diagnostics?.dispose();
       clear();
       observe(event);
     },
@@ -359,7 +516,27 @@ export function createLiveTranslateSendPump(options: SendPumpOptions) {
             ? { closeCode: code }
             : {}),
         }),
+        oldest(),
       );
+      diagnostics?.dispose();
+    },
+    /** Read-only diagnostic accounting; never used for admission or cleanup decisions. */
+    diagnosticSnapshot: () =>
+      diagnostics
+        ? { ...diagnostics.snapshot(), successfulCallbacksAwaitingPrefix }
+        : undefined,
+    /** End metadata collection without changing the writer's existing lifecycle. */
+    finishDiagnostics() {
+      try {
+        diagnostics?.finish(
+          diagnosticState('diagnostic_end', oldest()),
+          'normal_end',
+        );
+      } catch {
+        /* Diagnostics only. */
+      } finally {
+        diagnostics?.dispose();
+      }
     },
     snapshot: () => ({
       stopped,

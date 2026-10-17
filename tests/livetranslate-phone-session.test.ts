@@ -15,6 +15,8 @@ import { createPersonalVoiceAdmission } from '../src/solo/cloud-service';
 import type { CloudVoiceReservation } from '../src/solo/cloud-voice-join';
 import type { SoloConfig } from '../src/solo/config';
 import { createLiveTranslatePhoneBridge } from '../src/solo/livetranslate-phone-bridge';
+import { reportCloudLiveTranslateDiagnostic } from '../src/solo/livetranslate-phone-diagnostics';
+import { sendDiagnosticFixture } from './fixtures/livetranslate-send-diagnostic';
 import {
   SessionManager,
   type BridgeOptions,
@@ -531,4 +533,71 @@ test('a real remote stream stop or transport error still ends the owner call and
     assert.equal(f.local.readyState, WebSocket.CLOSED);
     assert.equal(f.remote.readyState, WebSocket.CLOSED);
   }
+});
+
+test('manual hangup retains terminal send evidence at the final cloud sink without reviving retired output or polluting the next call', async (t) => {
+  const f = await fixture(t);
+  const lines: string[] = [];
+  f.manager.on('event', (event) =>
+    reportCloudLiveTranslateDiagnostic(event, (line) => lines.push(line)),
+  );
+  const oldLocal = f.models.get('local')!;
+  const oldRemote = f.models.get('remote')!;
+  await f.manager.end(f.call.id);
+  await flush();
+  const windows = lines
+    .map((line) => JSON.parse(line))
+    .filter((event) => event.stage === 'send_window');
+  assert.equal(windows.length, 2);
+  assert.deepEqual(
+    new Set(windows.map((event) => event.role)),
+    new Set(['local', 'remote']),
+  );
+  assert.ok(
+    windows.every(
+      (event) =>
+        event.callId === f.call.id &&
+        event.sendDiagnostic.trigger === 'cancelled',
+    ),
+  );
+  assert.deepEqual(new Set(f.hungup), new Set([localSid, remoteSid]));
+  assert.equal(f.manager.activeSession, null);
+  assert.equal(f.manager.isCleanupConfirmed(f.call.id), true);
+  const next = f.otherPageCall();
+  const before = f.events.length;
+  const beforeAudio = f.local.audio().length;
+  for (const model of [oldLocal, oldRemote]) {
+    model.options.onSendDiagnostic?.({
+      ...sendDiagnosticFixture('late_callback'),
+      role: model.options.role,
+    });
+    model.options.onSendDiagnostic?.({
+      ...sendDiagnosticFixture('backlog_warning'),
+      role: model.options.role,
+    });
+  }
+  f.settings.onLiveTranslateDiagnostic?.({
+    clock: 'application_epoch_ms',
+    role: 'local',
+    stage: 'configuration',
+    at: 1000,
+    model: 'qwen3.8-livetranslate-flash-realtime',
+    requestedVoice: 'Andre',
+  });
+  await flush();
+  const retiredEvents = f.events.slice(before);
+  assert.equal(retiredEvents.length, 2);
+  assert.ok(
+    retiredEvents.every(
+      (event) =>
+        event.event === 'translation-live' &&
+        event.data.sessionId === f.call.id &&
+        event.data.sendDiagnostic.trigger === 'late_callback',
+    ),
+  );
+  assert.equal(f.manager.activeSession?.id, next.id);
+  assert.equal(f.manager.hasEndIntent(next.id), false);
+  assert.equal(f.local.audio().length, beforeAudio);
+  assert.equal(f.created.length, 1);
+  assert.equal(f.models.size, 2);
 });

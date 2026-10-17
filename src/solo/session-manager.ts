@@ -1461,9 +1461,25 @@ export class SessionManager extends EventEmitter {
             });
           },
           onLiveTranslateDiagnostic: (diagnostic) => {
-            if (!this.liveAdmission(session)) return;
+            const admitted = this.liveAdmission(session);
             const safe = sanitizeLiveTranslatePhoneDiagnostic(diagnostic);
             if (!safe) return;
+            // Ending flips session.ended before the bridge aborts its clients.
+            // Permit only fixed-schema terminal send evidence from this owned
+            // closure after retirement; no text/readiness/audio gate changes.
+            const terminalSendWindow =
+              safe.stage === 'send_window' &&
+              [
+                'send_failure',
+                'normal_end',
+                'cancelled',
+                'transport_closed',
+                'late_callback',
+              ].includes(
+                (safe.sendDiagnostic as { trigger?: string } | undefined)
+                  ?.trigger ?? '',
+              );
+            if (!admitted && !terminalSendWindow) return;
             this.emit('event', {
               event: 'translation-live',
               data: { ...safe, sessionId: session.view.id },

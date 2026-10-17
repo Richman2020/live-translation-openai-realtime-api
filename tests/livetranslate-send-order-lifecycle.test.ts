@@ -334,10 +334,33 @@ test('synthetic slow write resumes FIFO without stopping either translation or d
   assert.notEqual(f.manager.activeSession?.translationStopped, true);
   assert.equal(f.models.size, 2);
   assert.equal(f.created.length, 1);
-  assert.ok(
+  model.options.onTiming?.({
+    role: 'remote',
+    sessionId: 'transport-remote',
+    sourceId: 'synthetic-after-callbacks',
+    stage: 'source_stopped',
+    providerAudioMs: 0,
+    at: 100000,
+  });
+  const writtenBytes = model.sent
+    .filter((event) => event.type === 'input_audio_buffer.append')
+    .reduce(
+      (total, event) => total + Buffer.from(event.audio, 'base64').length,
+      0,
+    );
+  const evidence = f.events.find(
+    (e) => e.event === 'translation-live' && e.data.stage === 'source_stopped',
+  );
+  assert.equal(
+    evidence?.data.inputWrittenAudioMs,
+    writtenBytes / 32,
+    'The contiguous local write receipt still advances source timing, although normal send logs now stay in the ring',
+  );
+  assert.equal(
     f.events.some(
       (e) => e.event === 'translation-live' && e.data.stage === 'send_written',
     ),
+    false,
   );
 });
 
